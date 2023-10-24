@@ -1,2 +1,2 @@
 # olah
-Self-hosted huggingface mirror service.
+Olah is self-hosted lightweight huggingface mirror service. Olah means hello in Hilichurlian.

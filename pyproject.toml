@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "olah"
+version = "0.0.1"
+description = "Self-hosted lightweight huggingface mirror."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "fastapi", "httpx", "numpy", "pydantic<=1.10.13", "requests",
+    "rich>=10.0.0", "shortuuid", "uvicorn", "wandb", "tenacity>=8.2.2",
+]
+
+[project.optional-dependencies]
+dev = ["black==23.3.0", "pylint==2.8.2"]
+
+[project.urls]
+"Homepage" = "https://github.com/vtuber-plan/olah"
+"Bug Tracker" = "https://github.com/vtuber-plan/olah/issues"
+
+[tool.setuptools.packages.find]
+exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
+
+[tool.wheel]
+exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
