@@ -76,6 +76,7 @@ python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
 
 ## Future Work
 
+* Space Mirror
 * Authentication
 * Administrator and user system
 * OOS backend support

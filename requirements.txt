@@ -1,1 +1,3 @@
 fastapi
+httpx
+pydantic
