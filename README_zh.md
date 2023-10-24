@@ -1,6 +1,6 @@
-Olah是一种自托管的轻量级HuggingFace镜像服务。`Olah`在希利奇人语中意味着`你好`。
+Olah是一种自托管的轻量级HuggingFace镜像服务。`Olah`在丘丘人语中意味着`你好`。
 
-## 特点
+## 特性
 * 模型镜像
 * 数据集镜像
 
@@ -39,7 +39,20 @@ python -m olah.server
 ```
 
 然后将环境变量`HF_ENDPOINT`设置为镜像站点（这里是http://localhost:8090）。
+```bash
+export HF_ENDPOINT=http://localhost:8090
+```
+
 从现在开始，HuggingFace库中的所有下载操作都将通过此镜像站点代理进行。
+```python
+from huggingface_hub import snapshot_download
+
+snapshot_download(repo_id='Qwen/Qwen-7B', repo_type='model',
+                  local_dir='./model_dir', resume_download=True,
+                  max_workers=8)
+
+```
+
 您可以检查存储所有缓存的数据集和模型的路径`./repos`。
 
 ## 启动服务器
@@ -58,3 +71,16 @@ python -m olah.server --host localhost --port 8090
 ```bash
 python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
 ```
+
+## 许可证
+
+olah采用MIT许可证发布。
+
+## 另请参阅
+
+- [olah-docs](https://github.com/vtuber-plan/olah/tree/main/docs)
+- [olah-source](https://github.com/vtuber-plan/olah)
+
+## Star历史
+
+[![Star历史图表]()](https://star-history.com/#vtuber-plan/olah&Date)

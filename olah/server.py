@@ -15,7 +15,7 @@ from olah.lfs import lfs_get_generator
 
 from olah.meta import check_commit_hf, meta_generator
 
-app = FastAPI()
+app = FastAPI(debug=False)
 
 class AppSettings(BaseSettings):
     # The address of the model controller.
@@ -70,8 +70,10 @@ async def lfs_proxy(hash_file: str, request: Request):
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+if __name__ in ["__main__", "olah.server"]:
+    parser = argparse.ArgumentParser(
+        description="Olah Huggingface Mirror Server."
+    )
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--repos-path", type=str, default="./repos")
@@ -84,4 +86,5 @@ if __name__ == "__main__":
     app.app_settings = AppSettings(repos_path=args.repos_path)
 
     import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port)
+    if __name__ == "__main__":
+        uvicorn.run("olah.server:app", host=args.host, port=args.port)

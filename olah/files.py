@@ -60,7 +60,7 @@ async def file_get_generator(app, repo_type: Literal["model", "dataset"], org: s
     headers.pop("host")
     # save
     repos_path = app.app_settings.repos_path
-    save_path = os.path.join(repos_path, f"{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path}")
+    save_path = os.path.join(repos_path, f"files/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path}")
     save_dir = os.path.dirname(save_path)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
@@ -79,10 +79,14 @@ async def file_get_generator(app, repo_type: Literal["model", "dataset"], org: s
     else:
         try:
             temp_file_path = None
+            if repo_type == "model":
+                url = f"{app.app_settings.hf_url}/{org}/{repo}/resolve/{commit}/{file_path}"
+            else:
+                url = f"{app.app_settings.hf_url}/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path}"
             async with httpx.AsyncClient() as client:
                 with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_file:
                     async with client.stream(
-                        method="GET", url=f"{app.app_settings.hf_url}/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path}",
+                        method="GET", url=url,
                         headers=headers,
                         timeout=WORKER_API_TIMEOUT,
                     ) as response:

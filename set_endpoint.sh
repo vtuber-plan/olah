@@ -1,1 +1,0 @@
-export HF_ENDPOINT=http://localhost:8090
