@@ -1,3 +1,4 @@
 fastapi
 httpx
-pydantic
+pydantic==1.10.8
+toml==0.10.2

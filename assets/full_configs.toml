@@ -1,0 +1,36 @@
+[basic]
+host = "localhost"
+port = 8090
+ssl-key = ""
+ssl-cert = ""
+repos-path = "./repos"
+hf-url = "https://huggingface.co"
+hf-lfs-url = "https://cdn-lfs.huggingface.co"
+mirror-url = "http://localhost:8090"
+mirror-lfs-url = "http://localhost:8090"
+
+[accessibility]
+[[accessibility.proxy]]
+repo = "cais/mmlu"
+allow = true
+
+[[accessibility.proxy]]
+repo = "adept/fuyu-8b"
+allow = false
+
+[[accessibility.proxy]]
+repo = "mistralai/*"
+allow = true
+
+[[accessibility.proxy]]
+repo = "mistralai/Mistral.*"
+allow = false
+use_re = true
+
+[[accessibility.cache]]
+repo = "cais/mmlu"
+allow = true
+
+[[accessibility.cache]]
+repo = "adept/fuyu-8b"
+allow = false

@@ -8,22 +8,26 @@ from typing import Literal
 from fastapi import Request
 
 import httpx
-
+from olah.configs import OlahConfig
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-async def check_commit_hf(app, repo_type: Literal["model", "dataset"], org: str, model: str, commit: str) -> bool:
+async def check_commit_hf(app, repo_type: Literal["model", "dataset"], org: str, repo: str, commit: str) -> bool:
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{app.app_settings.hf_url}/api/{repo_type}s/{org}/{model}/revision/{commit}",
+        response = await client.get(f"{app.app_settings.hf_url}/api/{repo_type}s/{org}/{repo}/revision/{commit}",
                    timeout=WORKER_API_TIMEOUT)
     return response.status_code == 200
 
-async def meta_generator(app, repo_type: Literal["model", "dataset"], org: str, model: str, commit: str, request: Request):
+async def check_rules_hf(app, repo_type: Literal["model", "dataset"], org: str, repo: str) -> bool:
+    config: OlahConfig = app.app_settings.config
+    return config.proxy.allow(f"{org}/{repo}")
+
+async def meta_generator(app, repo_type: Literal["model", "dataset"], org: str, repo: str, commit: str, request: Request):
     headers = {k: v for k, v in request.headers.items()}
     headers.pop("host")
 
     # save
     repos_path = app.app_settings.repos_path
-    save_dir = os.path.join(repos_path, f"api/{repo_type}s/{org}/{model}/revision/{commit}")
+    save_dir = os.path.join(repos_path, f"api/{repo_type}s/{org}/{repo}/revision/{commit}")
     save_path = os.path.join(save_dir, "meta.json")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
@@ -44,7 +48,7 @@ async def meta_generator(app, repo_type: Literal["model", "dataset"], org: str, 
             async with httpx.AsyncClient() as client:
                 with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_file:
                     async with client.stream(
-                        method="GET", url=f"{app.app_settings.hf_url}/api/{repo_type}s/{org}/{model}/revision/{commit}",
+                        method="GET", url=f"{app.app_settings.hf_url}/api/{repo_type}s/{org}/{repo}/revision/{commit}",
                         headers=headers,
                         timeout=WORKER_API_TIMEOUT,
                     ) as response:
