@@ -90,8 +90,16 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
                         break
 
                     chunk = raw_chunk
-                    if cur_pos > sub_chunk_start_pos:
+                    if cur_pos >= sub_chunk_start_pos and cur_pos < sub_chunk_start_pos + len(raw_chunk):
                         chunk = chunk[cur_pos - sub_chunk_start_pos:]
+                    elif cur_pos >= sub_chunk_start_pos + len(raw_chunk):
+                        chunk = bytes([])
+                    elif cur_pos < sub_chunk_start_pos:
+                        pass
+
+                    if cur_pos + len(chunk) > block_end_pos:
+                        chunk = chunk[:-(cur_pos + len(chunk) - block_end_pos)]
+                        print("Warning: This maybe a bug, sending chunk is larger than content length.")
                     
                     if len(chunk) != 0:
                         yield chunk
@@ -117,10 +125,17 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
                                 temp_file.write(raw_chunk)
 
                                 stream_chunk = raw_chunk
-                                # if cur_pos + len(raw_chunk) > chunk_end_pos:
-                                #     stream_chunk = stream_chunk[:-(cur_pos + len(raw_chunk) - chunk_end_pos)]
+                                
                                 if cur_pos > sub_chunk_start_pos and cur_pos < sub_chunk_start_pos + len(raw_chunk):
                                     stream_chunk = stream_chunk[cur_pos - sub_chunk_start_pos:]
+                                elif cur_pos >= sub_chunk_start_pos + len(raw_chunk):
+                                    stream_chunk = bytes([])
+                                elif cur_pos < sub_chunk_start_pos:
+                                    pass
+
+                                if cur_pos + len(stream_chunk) > block_end_pos:
+                                    stream_chunk = stream_chunk[:-(cur_pos + len(stream_chunk) - block_end_pos)]
+                                    print("Warning: This maybe a bug, sending chunk is larger than content length.")
 
                                 if len(stream_chunk) != 0:
                                     yield stream_chunk
