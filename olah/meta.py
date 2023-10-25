@@ -11,15 +11,7 @@ import httpx
 from olah.configs import OlahConfig
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-async def check_commit_hf(app, repo_type: Literal["model", "dataset"], org: str, repo: str, commit: str) -> bool:
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{app.app_settings.hf_url}/api/{repo_type}s/{org}/{repo}/revision/{commit}",
-                   timeout=WORKER_API_TIMEOUT)
-    return response.status_code == 200
-
-async def check_rules_hf(app, repo_type: Literal["model", "dataset"], org: str, repo: str) -> bool:
-    config: OlahConfig = app.app_settings.config
-    return config.proxy.allow(f"{org}/{repo}")
+from olah.utls import check_cache_rules_hf
 
 async def meta_generator(app, repo_type: Literal["model", "dataset"], org: str, repo: str, commit: str, request: Request):
     headers = {k: v for k, v in request.headers.items()}
@@ -33,6 +25,7 @@ async def meta_generator(app, repo_type: Literal["model", "dataset"], org: str, 
         os.makedirs(save_dir, exist_ok=True)
     
     use_cache = os.path.exists(save_path)
+    allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
     # proxy
     if use_cache:
         yield request.headers
@@ -47,6 +40,8 @@ async def meta_generator(app, repo_type: Literal["model", "dataset"], org: str, 
             temp_file_path = None
             async with httpx.AsyncClient() as client:
                 with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_file:
+                    if not allow_cache:
+                        temp_file = open(os.devnull, 'wb')
                     async with client.stream(
                         method="GET", url=f"{app.app_settings.hf_url}/api/{repo_type}s/{org}/{repo}/revision/{commit}",
                         headers=headers,
@@ -60,9 +55,12 @@ async def meta_generator(app, repo_type: Literal["model", "dataset"], org: str, 
                                 continue
                             temp_file.write(raw_chunk)
                             yield raw_chunk
-                    temp_file_path = temp_file.name
-                    
-                shutil.copyfile(temp_file_path, save_path)
+                    if not allow_cache:
+                        temp_file_path = None
+                    else:
+                        temp_file_path = temp_file.name
+                if temp_file_path is not None:
+                    shutil.copyfile(temp_file_path, save_path)
         finally:
             if temp_file_path is not None:
                 os.remove(temp_file_path)

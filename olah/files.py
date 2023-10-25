@@ -9,6 +9,7 @@ from fastapi import Request
 import httpx
 
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
+from olah.utls import check_cache_rules_hf
 
 async def file_head_generator(app, repo_type: Literal["model", "dataset"], org: str, repo: str, commit: str, file_path: str, request: Request):
     headers = {k: v for k, v in request.headers.items()}
@@ -22,6 +23,7 @@ async def file_head_generator(app, repo_type: Literal["model", "dataset"], org: 
         os.makedirs(save_dir, exist_ok=True)
     
     use_cache = os.path.exists(save_path)
+    allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
 
     # proxy
     if use_cache:
@@ -43,8 +45,9 @@ async def file_head_generator(app, repo_type: Literal["model", "dataset"], org: 
             ) as response:
                 response_headers = response.headers
                 response_headers = {k: v for k, v in response_headers.items()}
-                with open(save_path, "w", encoding="utf-8") as f:
-                    f.write(json.dumps(response_headers, ensure_ascii=False))
+                if allow_cache:
+                    with open(save_path, "w", encoding="utf-8") as f:
+                        f.write(json.dumps(response_headers, ensure_ascii=False))
                 if "location" in response_headers:
                     response_headers["location"] = response_headers["location"].replace(app.app_settings.hf_lfs_url, app.app_settings.mirror_lfs_url)
                 yield response_headers
@@ -66,6 +69,7 @@ async def file_get_generator(app, repo_type: Literal["model", "dataset"], org: s
         os.makedirs(save_dir, exist_ok=True)
     
     use_cache = os.path.exists(save_path)
+    allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
 
     # proxy
     if use_cache:
@@ -85,6 +89,8 @@ async def file_get_generator(app, repo_type: Literal["model", "dataset"], org: s
                 url = f"{app.app_settings.hf_url}/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path}"
             async with httpx.AsyncClient() as client:
                 with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_file:
+                    if not allow_cache:
+                        temp_file = open(os.devnull, 'wb')
                     async with client.stream(
                         method="GET", url=url,
                         headers=headers,
@@ -98,9 +104,12 @@ async def file_get_generator(app, repo_type: Literal["model", "dataset"], org: s
                                 continue
                             temp_file.write(raw_chunk)
                             yield raw_chunk
-                    temp_file_path = temp_file.name
-
-                shutil.copyfile(temp_file_path, save_path)
+                    if not allow_cache:
+                        temp_file_path = None
+                    else:
+                        temp_file_path = temp_file.name
+                if temp_file_path is not None:
+                    shutil.copyfile(temp_file_path, save_path)
         finally:
             if temp_file_path is not None:
                 os.remove(temp_file_path)

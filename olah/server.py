@@ -13,7 +13,8 @@ import pytz
 from olah.configs import OlahConfig
 from olah.files import file_get_generator, file_head_generator
 from olah.lfs import lfs_get_generator
-from olah.meta import check_commit_hf, check_rules_hf, meta_generator
+from olah.meta import meta_generator
+from olah.utls import check_proxy_rules_hf, check_commit_hf
 
 app = FastAPI(debug=False)
 
@@ -29,7 +30,7 @@ class AppSettings(BaseSettings):
 
 @app.get("/api/{repo_type}s/{org}/{repo}/revision/{commit}")
 async def meta_proxy(repo_type: str, org: str, repo: str, commit: str, request: Request):
-    if not await check_rules_hf(app, repo_type, org, repo):
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
@@ -40,7 +41,7 @@ async def meta_proxy(repo_type: str, org: str, repo: str, commit: str, request: 
 @app.head("/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path:path}")
 @app.head("/{org}/{repo}/resolve/{commit}/{file_path:path}")
 async def file_head_proxy(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str = "model"):
-    if not await check_rules_hf(app, repo_type, org, repo):
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
@@ -51,7 +52,7 @@ async def file_head_proxy(org: str, repo: str, commit: str, file_path: str, requ
 @app.get("/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path:path}")
 @app.get("/{org}/{repo}/resolve/{commit}/{file_path:path}")
 async def file_proxy(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str = "model"):
-    if not await check_rules_hf(app, repo_type, org, repo):
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
