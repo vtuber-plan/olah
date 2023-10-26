@@ -5,6 +5,7 @@ Other languages: [中文](README_zh.md)
 ## Features
 * Models mirror
 * Datasets mirror
+* Spaces mirror
 
 ## Install
 
@@ -76,7 +77,6 @@ python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
 
 ## Future Work
 
-* Space Mirror
 * Authentication
 * Administrator and user system
 * OOS backend support

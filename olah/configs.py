@@ -91,8 +91,6 @@ class OlahConfig(object):
         self.cache = OlahRuleList.from_list(DEFAULT_CACHE_RULES)
 
         if path is not None:
-            self.proxy.clear()
-            self.cache.clear()
             self.read_toml(path)
     
     def empty_str(self, s: str) -> Optional[str]:
@@ -104,18 +102,19 @@ class OlahConfig(object):
     def read_toml(self, path: str):
         config = toml.load(path)
 
-        basic = config["basic"]
-        accessibility = config["accessibility"]
+        if "basic" in config:
+            basic = config["basic"]
+            self.host = basic.get("host", self.host)
+            self.port = basic.get("port", self.port)
+            self.ssl_key = self.empty_str(basic.get("ssl-key", self.ssl_key))
+            self.ssl_cert = self.empty_str(basic.get("ssl-cert", self.ssl_cert))
+            self.repos_path = basic.get("repos-path", self.repos_path)
+            self.hf_url = basic.get("hf-url", self.hf_url)
+            self.hf_lfs_url = basic.get("hf-lfs-url", self.hf_lfs_url)
+            self.mirror_url = basic.get("mirror-url", self.mirror_url)
+            self.mirror_lfs_url = basic.get("mirror-lfs-url", self.mirror_lfs_url)
 
-        self.host = basic["host"]
-        self.port = basic["port"]
-        self.ssl_key = self.empty_str(basic["ssl-key"])
-        self.ssl_cert = self.empty_str(basic["ssl-cert"])
-        self.repos_path = basic["repos-path"]
-        self.hf_url = basic["hf-url"]
-        self.hf_lfs_url = basic["hf-lfs-url"]
-        self.mirror_url = basic["mirror-url"]
-        self.mirror_lfs_url = basic["mirror-lfs-url"]
-
-        self.proxy = OlahRuleList.from_list(accessibility["proxy"])
-        self.cache = OlahRuleList.from_list(accessibility["cache"])
+        if "accessibility" in config:
+            accessibility = config["accessibility"]
+            self.proxy = OlahRuleList.from_list(accessibility.get("proxy", self.proxy))
+            self.cache = OlahRuleList.from_list(accessibility.get("cache", self.cache))
