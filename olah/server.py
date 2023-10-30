@@ -14,7 +14,7 @@ from olah.configs import OlahConfig
 from olah.files import file_get_generator, file_head_generator
 from olah.lfs import lfs_get_generator
 from olah.meta import meta_generator
-from olah.utls import check_proxy_rules_hf, check_commit_hf
+from olah.utls import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf
 
 app = FastAPI(debug=False)
 
@@ -27,6 +27,16 @@ class AppSettings(BaseSettings):
     mirror_url: str = "http://localhost:8090"
     mirror_lfs_url: str = "http://localhost:8090"
 
+@app.get("/api/{repo_type}s/{org}/{repo}")
+async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+    if not await check_commit_hf(app, repo_type, org, repo, None):
+        return Response(content="This repository is not accessible. ", status_code=404)
+    new_commit = await get_newest_commit_hf(app, repo_type, org, repo)
+    generator = meta_generator(app, repo_type, org, repo, new_commit, request)
+    headers = await generator.__anext__()
+    return StreamingResponse(generator, headers=headers)
 
 @app.get("/api/{repo_type}s/{org}/{repo}/revision/{commit}")
 async def meta_proxy(repo_type: str, org: str, repo: str, commit: str, request: Request):
@@ -45,7 +55,8 @@ async def file_head_proxy(org: str, repo: str, commit: str, file_path: str, requ
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
-    generator = file_head_generator(app, repo_type, org, repo, commit, file_path, request)
+    commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
+    generator = file_head_generator(app, repo_type, org, repo, commit_sha, file_path, request)
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
@@ -56,7 +67,8 @@ async def file_proxy(org: str, repo: str, commit: str, file_path: str, request: 
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
-    generator = file_get_generator(app, repo_type, org, repo, commit, file_path, request)
+    commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
+    generator = file_get_generator(app, repo_type, org, repo, commit_sha, file_path, request)
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
