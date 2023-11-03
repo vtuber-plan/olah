@@ -34,6 +34,8 @@ async def get_newest_commit_hf_offline(app, repo_type: Literal["model", "dataset
 
 async def get_newest_commit_hf(app, repo_type: Literal["model", "dataset", "space"], org: str, repo: str) -> str:
     url = f"{app.app_settings.hf_url}/api/{repo_type}s/{org}/{repo}"
+    if app.app_settings.offline:
+        return get_newest_commit_hf_offline(app, repo_type, org, repo)
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, timeout=WORKER_API_TIMEOUT)
@@ -55,6 +57,8 @@ async def get_commit_hf_offline(app, repo_type: Literal["model", "dataset", "spa
 
 async def get_commit_hf(app, repo_type: Literal["model", "dataset", "space"], org: str, repo: str, commit: str) -> str:
     url = f"{app.app_settings.hf_url}/api/{repo_type}s/{org}/{repo}/revision/{commit}"
+    if app.app_settings.offline:
+        return get_commit_hf_offline(app, repo_type, org, repo, commit)
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url,

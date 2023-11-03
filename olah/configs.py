@@ -87,6 +87,7 @@ class OlahConfig(object):
         self.mirror_lfs_url = "http://localhost:8090"
 
         # accessibility
+        self.offline = True
         self.proxy = OlahRuleList.from_list(DEFAULT_PROXY_RULES)
         self.cache = OlahRuleList.from_list(DEFAULT_CACHE_RULES)
 
@@ -116,5 +117,6 @@ class OlahConfig(object):
 
         if "accessibility" in config:
             accessibility = config["accessibility"]
+            self.offline = accessibility.get("offline", self.offline)
             self.proxy = OlahRuleList.from_list(accessibility.get("proxy", self.proxy))
             self.cache = OlahRuleList.from_list(accessibility.get("cache", self.cache))
