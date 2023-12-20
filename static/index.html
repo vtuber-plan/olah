@@ -1,0 +1,27 @@
+<html>
+    <head>
+        <title>Olah HuggingFace Mirror</title>
+    </head>
+    <body>
+        <script type="module" src="https://md-block.verou.me/md-block.js"></script>
+        <h1> Welcome to Olah! </h1>
+        <md-block>
+            # Use Mirror URL with huggingface-cli
+            Then set the Environment Variable `HF_ENDPOINT` to the mirror site (Here is http://localhost:8090).
+            ```bash
+            export HF_ENDPOINT=http://localhost:8090
+            ```
+    
+            Starting from now on, all download operations in the HuggingFace library will be proxied through this mirror site.
+            ```python
+            from huggingface_hub import snapshot_download
+    
+            snapshot_download(repo_id='Qwen/Qwen-7B', repo_type='model',
+                            local_dir='./model_dir', resume_download=True,
+                            max_workers=8)
+    
+            ```
+        </md-block>
+        
+    </body>
+</html>

@@ -6,10 +6,9 @@ import tempfile
 import shutil
 from typing import Annotated, Union
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import HTMLResponse, StreamingResponse, Response
 import httpx
 from pydantic import BaseSettings
-import pytz
 from olah.configs import OlahConfig
 from olah.files import file_get_generator, file_head_generator
 from olah.lfs import lfs_get_generator
@@ -30,9 +29,9 @@ class AppSettings(BaseSettings):
 @app.get("/api/{repo_type}s/{org}/{repo}")
 async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+        return Response(content="This repository is forbidden by the mirror.", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, None):
-        return Response(content="This repository is not accessible. ", status_code=404)
+        return Response(content="This repository is not accessible.", status_code=404)
     new_commit = await get_newest_commit_hf(app, repo_type, org, repo)
     generator = meta_generator(app, repo_type, org, repo, new_commit, request)
     headers = await generator.__anext__()
@@ -89,6 +88,12 @@ async def lfs_proxy(hash_file: str, request: Request):
     generator = lfs_get_generator(app, repo_type, lfs_url, save_path, request)
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    with open(os.path.join(os.path.dirname(__file__), "../static/index.html"), "r", encoding="utf-8") as f:
+        page = f.read()
+    return page
 
 if __name__ in ["__main__", "olah.server"]:
     parser = argparse.ArgumentParser(
