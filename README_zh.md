@@ -52,6 +52,10 @@ $env:HF_ENDPOINT = "http://localhost:8090"
 ```
 
 从现在开始，HuggingFace库中的所有下载操作都将通过此镜像站点代理进行。
+```bash
+pip install -U huggingface_hub
+```
+
 ```python
 from huggingface_hub import snapshot_download
 
@@ -62,9 +66,6 @@ snapshot_download(repo_id='Qwen/Qwen-7B', repo_type='model',
 ```
 
 或者你也可以使用huggingface cli直接下载模型和数据集.
-```bash
-pip install -U huggingface_hub
-```
 
 下载GPT2:
 ```bash

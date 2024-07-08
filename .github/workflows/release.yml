@@ -3,7 +3,7 @@ run-name: Olah GitHub Actions to release
 on:
   push:
     tags:
-      - "[0-9]+.[0-9]+.[0-9]+"
+      - "v*"
 
 jobs:
   build:
@@ -36,7 +36,7 @@ jobs:
       - name: Test Olah
         run: |
           cd ${{ github.workspace }}
-          python -m unittest discover olah/tests
+          python -m unittest discover tests
 
       - name: Build Olah
         run: |

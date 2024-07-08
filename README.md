@@ -55,6 +55,10 @@ $env:HF_ENDPOINT = "http://localhost:8090"
 ```
 
 Starting from now on, all download operations in the HuggingFace library will be proxied through this mirror site.
+```bash
+pip install -U huggingface_hub
+```
+
 ```python
 from huggingface_hub import snapshot_download
 
@@ -64,9 +68,6 @@ snapshot_download(repo_id='Qwen/Qwen-7B', repo_type='model',
 ```
 
 Or you can download models and datasets by using huggingface cli.
-```bash
-pip install -U huggingface_hub
-```
 
 Download GPT2:
 ```bash
