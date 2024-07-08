@@ -35,4 +35,4 @@ jobs:
       - name: Test Olah
         run: |
           cd ${{ github.workspace }}
-          python -m unittest discover tests
+          python -m pytest tests
