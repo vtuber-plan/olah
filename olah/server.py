@@ -13,7 +13,7 @@ from olah.configs import OlahConfig
 from olah.files import cdn_file_get_generator, file_get_generator, file_head_generator
 from olah.lfs import lfs_get_generator
 from olah.meta import meta_generator
-from olah.utls import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf
+from olah.utils import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf
 
 app = FastAPI(debug=False)
 

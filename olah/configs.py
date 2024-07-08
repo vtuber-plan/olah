@@ -93,8 +93,8 @@ class OlahConfig(object):
         self.repos_path = "./repos"
         self.hf_url = "https://huggingface.co"
         self.hf_lfs_url = "https://cdn-lfs.huggingface.co"
-        self.mirror_url = "http://localhost:8090"
-        self.mirror_lfs_url = "http://localhost:8090"
+        self.mirror_url = f"http://{self.host}:{self.port}"
+        self.mirror_lfs_url = f"http://{self.host}:{self.port}"
 
         # accessibility
         self.offline = False
@@ -103,6 +103,11 @@ class OlahConfig(object):
 
         if path is not None:
             self.read_toml(path)
+        
+        # refresh urls
+        self.mirror_url = f"http://{self.host}:{self.port}"
+        self.mirror_lfs_url = f"http://{self.host}:{self.port}"
+
     
     def empty_str(self, s: str) -> Optional[str]:
         if s == "":

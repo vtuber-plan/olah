@@ -98,3 +98,11 @@ async def check_cache_rules_hf(app, repo_type: Optional[Literal["models", "datas
     config: OlahConfig = app.app_settings.config
     org_repo = get_org_repo(org, repo)
     return config.cache.allow(f"{org_repo}")
+
+def make_dirs(path: str):
+    if os.path.isdir(path):
+        save_dir = path
+    else:
+        save_dir = os.path.dirname(path)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)

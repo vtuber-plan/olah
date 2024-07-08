@@ -11,7 +11,6 @@ def test_dataset():
     snapshot_download(repo_id='Nerfgun3/bad_prompt', repo_type='dataset',
                     local_dir='./dataset_dir', max_workers=8)
 
-    # 终止子进程
     process.terminate()
 
 def test_model():
@@ -21,5 +20,4 @@ def test_model():
     snapshot_download(repo_id='prajjwal1/bert-tiny', repo_type='model',
                     local_dir='./model_dir', max_workers=8)
 
-    # 终止子进程
     process.terminate()

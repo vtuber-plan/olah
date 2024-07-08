@@ -11,7 +11,7 @@ import httpx
 from olah.configs import OlahConfig
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-from olah.utls import check_cache_rules_hf
+from olah.utils import check_cache_rules_hf
 
 async def meta_cache_generator(app: FastAPI, save_path: str):
     yield {}
