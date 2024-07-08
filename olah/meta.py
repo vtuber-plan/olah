@@ -52,20 +52,20 @@ async def meta_proxy_generator(app: FastAPI, headers: Dict[str, str], meta_url: 
         if temp_file_path is not None:
             os.remove(temp_file_path)
 
-async def meta_generator(app: FastAPI, repo_type: Literal["model", "dataset"], org: str, repo: str, commit: str, request: Request):
+async def meta_generator(app: FastAPI, repo_type: Literal["models", "datasets"], org: str, repo: str, commit: str, request: Request):
     headers = {k: v for k, v in request.headers.items()}
     headers.pop("host")
 
     # save
     repos_path = app.app_settings.repos_path
-    save_dir = os.path.join(repos_path, f"api/{repo_type}s/{org}/{repo}/revision/{commit}")
+    save_dir = os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}")
     save_path = os.path.join(save_dir, "meta.json")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
     
     use_cache = os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
-    meta_url = f"{app.app_settings.hf_url}/api/{repo_type}s/{org}/{repo}/revision/{commit}"
+    meta_url = f"{app.app_settings.hf_url}/api/{repo_type}/{org}/{repo}/revision/{commit}"
     # proxy
     if use_cache:
         async for item in meta_cache_generator(app, save_path):

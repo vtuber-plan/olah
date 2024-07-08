@@ -1,0 +1,38 @@
+name: Olah GitHub Actions for Development
+run-name: Olah GitHub Actions for Development
+on:
+  push:
+    branches: [ "dev" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+      - name: Set up Apache Arrow
+        run: |
+          sudo apt update
+          sudo apt install -y -V ca-certificates lsb-release wget
+          wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+          sudo apt install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+          sudo apt update
+          sudo apt install -y -V libarrow-dev libarrow-glib-dev libparquet-dev libparquet-glib-dev
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Olah
+        run: |
+          cd ${{ github.workspace }}
+          pip install --upgrade pip
+          pip install -e .
+
+      - name: Test Olah
+        run: |
+          cd ${{ github.workspace }}
+          python -m unittest discover olah/tests

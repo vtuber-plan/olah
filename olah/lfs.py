@@ -16,7 +16,7 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
 
     # save
     repos_path = app.app_settings.repos_path
-    save_dir = os.path.join(repos_path, f"lfs/{repo_type}s/{save_path}")
+    save_dir = os.path.join(repos_path, f"lfs/{repo_type}/{save_path}")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
     

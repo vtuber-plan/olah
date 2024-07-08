@@ -7,6 +7,11 @@ import fnmatch
 
 DEFAULT_PROXY_RULES = [
     {
+        "repo": "*",
+        "allow": True,
+        "use_re": False
+    },
+    {
         "repo": "*/*",
         "allow": True,
         "use_re": False
@@ -14,6 +19,11 @@ DEFAULT_PROXY_RULES = [
 ]
 
 DEFAULT_CACHE_RULES = [
+    {
+        "repo": "*",
+        "allow": True,
+        "use_re": False
+    },
     {
         "repo": "*/*",
         "allow": True,
@@ -87,7 +97,7 @@ class OlahConfig(object):
         self.mirror_lfs_url = "http://localhost:8090"
 
         # accessibility
-        self.offline = True
+        self.offline = False
         self.proxy = OlahRuleList.from_list(DEFAULT_PROXY_RULES)
         self.cache = OlahRuleList.from_list(DEFAULT_CACHE_RULES)
 
@@ -100,7 +110,7 @@ class OlahConfig(object):
         else:
             return s
 
-    def read_toml(self, path: str):
+    def read_toml(self, path: str) -> None:
         config = toml.load(path)
 
         if "basic" in config:
