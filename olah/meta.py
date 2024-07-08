@@ -26,9 +26,12 @@ async def meta_proxy_generator(app: FastAPI, headers: Dict[str, str], meta_url: 
     try:
         temp_file_path = None
         async with httpx.AsyncClient() as client:
-            with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_file:
+            with tempfile.NamedTemporaryFile(mode="wb", delete=True) as temp_file:
+                temp_file_path = temp_file.name
                 if not allow_cache:
-                    temp_file = open(os.devnull, 'wb')
+                    write_temp_file = False
+                else:
+                    write_temp_file = True
                 async with client.stream(
                     method="GET", url=meta_url,
                     headers=headers,
@@ -40,16 +43,14 @@ async def meta_proxy_generator(app: FastAPI, headers: Dict[str, str], meta_url: 
                     async for raw_chunk in response.aiter_raw():
                         if not raw_chunk:
                             continue
-                        temp_file.write(raw_chunk)
+                        if write_temp_file:
+                            temp_file.write(raw_chunk)
                         yield raw_chunk
-                if not allow_cache:
-                    temp_file_path = None
-                else:
-                    temp_file_path = temp_file.name
-            if temp_file_path is not None:
-                shutil.copyfile(temp_file_path, save_path)
+                if temp_file_path is not None:
+                    temp_file.flush()
+                    shutil.copyfile(temp_file_path, save_path)
     finally:
-        if temp_file_path is not None:
+        if temp_file_path is not None and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
 async def meta_generator(app: FastAPI, repo_type: Literal["models", "datasets"], org: str, repo: str, commit: str, request: Request):

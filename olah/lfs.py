@@ -145,6 +145,7 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
                                 if raw_bytes >= block_end_pos - block_start_pos:
                                     break
                         temp_file_path = temp_file.name
+                        temp_file.flush()
                         shutil.copyfile(temp_file_path, save_path)
             finally:
                 if temp_file_path is not None and os.path.exists(temp_file_path):

@@ -24,7 +24,12 @@ async def _file_cache_stream(save_path: str, head_path: str, request: Request):
     if request.method.lower() == "head":
         with open(head_path, "r", encoding="utf-8") as f:
             response_headers = json.loads(f.read())
-        yield FILE_HEADER_TEMPLATE
+        new_headers = {k:v for k, v in FILE_HEADER_TEMPLATE.items()}
+        new_headers["content-type"] = response_headers["content-type"]
+        new_headers["content-length"] = response_headers["content-length"]
+        new_headers["x-repo-commit"] = response_headers["x-repo-commit"]
+        new_headers["etag"] = response_headers["etag"]
+        yield new_headers
     elif request.method.lower() == "get":
         yield FILE_HEADER_TEMPLATE
     else:
@@ -45,10 +50,13 @@ async def _file_realtime_stream(
     try:
         async with httpx.AsyncClient() as client:
             with tempfile.NamedTemporaryFile(mode="wb", delete=True) as temp_file:
+                temp_file_path = temp_file.name
+
                 if not allow_cache or request.method.lower() == "head":
                     write_temp_file = False
                 else:
                     write_temp_file = True
+
                 async with client.stream(
                     method=method,
                     url=url,
@@ -73,11 +81,9 @@ async def _file_realtime_stream(
                         if write_temp_file:
                             temp_file.write(raw_chunk)
                         yield raw_chunk
-                if not allow_cache:
-                    temp_file_path = None
-                else:
-                    temp_file_path = temp_file.name
-                if temp_file_path is not None:
+
+                if temp_file_path is not None and write_temp_file:
+                    temp_file.flush()
                     shutil.copyfile(temp_file_path, save_path)
     finally:
         if temp_file_path is not None and os.path.exists(temp_file_path):
@@ -199,12 +205,12 @@ async def cdn_file_get_generator(
     else:
         redirected_url = str(request.url)
         redirected_url = redirected_url.replace(app.app_settings.mirror_lfs_url, app.app_settings.hf_lfs_url)
- 
+
         return _file_realtime_stream(
             app=app,
             save_path=save_path,
             head_path=head_path,
-            url=str(redirected_url),
+            url=redirected_url,
             request=request,
             method="GET",
             allow_cache=allow_cache,
