@@ -32,6 +32,7 @@ jobs:
           cd ${{ github.workspace }}
           pip install --upgrade pip
           pip install -e .
+          pip install -r requirements
 
       - name: Test Olah
         run: |
