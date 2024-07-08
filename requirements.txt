@@ -3,3 +3,4 @@ httpx
 pydantic==1.10.8
 toml==0.10.2
 huggingface_hub==0.23.3
+pytest==8.2.2
