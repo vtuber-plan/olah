@@ -2,7 +2,7 @@
 import datetime
 import os
 import glob
-from typing import Literal, Optional
+from typing import Literal, Optional, Tuple
 import json
 import httpx
 from olah.configs import OlahConfig
@@ -14,6 +14,16 @@ def get_org_repo(org: Optional[str], repo: str) -> str:
     else:
         org_repo = f"{org}/{repo}"
     return org_repo
+
+def parse_org_repo(org_repo: str) -> Tuple[str, str]:
+    if "/" in org_repo and org_repo.count("/") != 1:
+        return None, None
+    if "/" in org_repo:
+        org, repo = org_repo.split("/")
+    else:
+        org = None
+        repo = org_repo
+    return org, repo
 
 def get_meta_save_path(repos_path: str, repo_type: str, org: Optional[str], repo: str, commit: str) -> str:
     return os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}")
@@ -69,9 +79,8 @@ async def get_commit_hf(app, repo_type: Optional[Literal["models", "datasets", "
         return await get_commit_hf_offline(app, repo_type, org, repo, commit)
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url,
-                    timeout=WORKER_API_TIMEOUT)
-            if response.status_code != 200:
+            response = await client.get(url, timeout=WORKER_API_TIMEOUT, follow_redirects=True)
+            if response.status_code not in [200, 307]:
                 return await get_commit_hf_offline(app, repo_type, org, repo, commit)
             obj = json.loads(response.text)
         return obj.get("sha", None)

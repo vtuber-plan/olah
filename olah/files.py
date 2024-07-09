@@ -8,7 +8,13 @@ from fastapi import Request
 import httpx
 from starlette.datastructures import URL
 
-from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
+from olah.constants import (
+    CHUNK_SIZE,
+    WORKER_API_TIMEOUT,
+    HUGGINGFACE_HEADER_X_REPO_COMMIT,
+    HUGGINGFACE_HEADER_X_LINKED_ETAG,
+    HUGGINGFACE_HEADER_X_LINKED_SIZE,
+)
 from olah.utils import check_cache_rules_hf, get_org_repo, make_dirs
 FILE_HEADER_TEMPLATE = {
     "accept-ranges": "bytes",
@@ -27,7 +33,9 @@ async def _file_cache_stream(save_path: str, head_path: str, request: Request):
         new_headers = {k:v for k, v in FILE_HEADER_TEMPLATE.items()}
         new_headers["content-type"] = response_headers["content-type"]
         new_headers["content-length"] = response_headers["content-length"]
-        new_headers["x-repo-commit"] = response_headers["x-repo-commit"]
+        new_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT] = response_headers.get(HUGGINGFACE_HEADER_X_REPO_COMMIT, None)
+        new_headers[HUGGINGFACE_HEADER_X_LINKED_ETAG] = response_headers.get(HUGGINGFACE_HEADER_X_LINKED_ETAG, None)
+        new_headers[HUGGINGFACE_HEADER_X_LINKED_SIZE] = response_headers.get(HUGGINGFACE_HEADER_X_LINKED_SIZE, None)
         new_headers["etag"] = response_headers["etag"]
         yield new_headers
     elif request.method.lower() == "get":
@@ -56,10 +64,21 @@ async def _file_realtime_stream(
                     write_temp_file = False
                 else:
                     write_temp_file = True
-
+                
                 async with client.stream(
                     method=method,
                     url=url,
+                    headers=request_headers,
+                    timeout=WORKER_API_TIMEOUT,
+                ) as response:
+                    if response.status_code >= 300 and response.status_code <= 399:
+                        redirect_loc = app.app_settings.hf_url + response.headers["location"]
+                    else:
+                        redirect_loc = url
+
+                async with client.stream(
+                    method=method,
+                    url=redirect_loc,
                     headers=request_headers,
                     timeout=WORKER_API_TIMEOUT,
                 ) as response:
@@ -69,11 +88,11 @@ async def _file_realtime_stream(
                         if request.method.lower() == "head":
                             with open(head_path, "w", encoding="utf-8") as f:
                                 f.write(json.dumps(response_headers_dict, ensure_ascii=False))
-                    if "location" in response_headers:
-                        response_headers["location"] = response_headers["location"].replace(
+                    if "location" in response_headers_dict:
+                        response_headers_dict["location"] = response_headers_dict["location"].replace(
                             app.app_settings.hf_lfs_url, app.app_settings.mirror_lfs_url
                         )
-                    yield response_headers
+                    yield response_headers_dict
 
                     async for raw_chunk in response.aiter_raw():
                         if not raw_chunk:
@@ -98,6 +117,7 @@ async def file_head_generator(
     file_path: str,
     request: Request,
 ):
+    org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.app_settings.repos_path
     head_path = os.path.join(
@@ -117,9 +137,9 @@ async def file_head_generator(
         return _file_cache_stream(save_path=save_path, head_path=head_path, request=request)
     else:
         if repo_type == "models":
-            url = f"{app.app_settings.hf_url}/{org}/{repo}/resolve/{commit}/{file_path}"
+            url = f"{app.app_settings.hf_url}/{org_repo}/resolve/{commit}/{file_path}"
         else:
-            url = f"{app.app_settings.hf_url}/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path}"
+            url = f"{app.app_settings.hf_url}/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
         return _file_realtime_stream(
             app=app,
             save_path=save_path,
@@ -140,6 +160,7 @@ async def file_get_generator(
     file_path: str,
     request: Request,
 ):
+    org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.app_settings.repos_path
     head_path = os.path.join(
@@ -159,9 +180,9 @@ async def file_get_generator(
         return _file_cache_stream(save_path=save_path, head_path=head_path, request=request)
     else:
         if repo_type == "models":
-            url = f"{app.app_settings.hf_url}/{org}/{repo}/resolve/{commit}/{file_path}"
+            url = f"{app.app_settings.hf_url}/{org_repo}/resolve/{commit}/{file_path}"
         else:
-            url = f"{app.app_settings.hf_url}/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path}"
+            url = f"{app.app_settings.hf_url}/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
         return _file_realtime_stream(
             app=app,
             save_path=save_path,

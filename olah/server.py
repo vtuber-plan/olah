@@ -13,7 +13,7 @@ from olah.configs import OlahConfig
 from olah.files import cdn_file_get_generator, file_get_generator, file_head_generator
 from olah.lfs import lfs_get_generator
 from olah.meta import meta_generator
-from olah.utils import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf
+from olah.utils import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf, parse_org_repo
 
 app = FastAPI(debug=False)
 
@@ -28,13 +28,10 @@ class AppSettings(BaseSettings):
 
 @app.get("/api/{repo_type}/{org_repo}")
 async def meta_proxy(repo_type: str, org_repo: str, request: Request):
-    if "/" in org_repo and org_repo.count("/") != 1:
+    org, repo = parse_org_repo(org_repo)
+    if org is None and repo is None:
         return Response(content="This repository is not accessible.", status_code=404)
-    if "/" in org_repo:
-        org, repo = org_repo.split("/")
-    else:
-        org = None
-        repo = org_repo
+
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror.", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, None):
@@ -56,13 +53,10 @@ async def meta_proxy_commit2(repo_type: str, org: str, repo: str, commit: str, r
 
 @app.get("/api/{repo_type}/{org_repo}/revision/{commit}")
 async def meta_proxy_commit(repo_type: str, org_repo: str, commit: str, request: Request):
-    if "/" in org_repo and org_repo.count("/") != 1:
+    org, repo = parse_org_repo(org_repo)
+    if org is None and repo is None:
         return Response(content="This repository is not accessible.", status_code=404)
-    if "/" in org_repo:
-        org, repo = org_repo.split("/")
-    else:
-        org = None
-        repo = org_repo
+
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
@@ -72,8 +66,7 @@ async def meta_proxy_commit(repo_type: str, org_repo: str, commit: str, request:
     return StreamingResponse(generator, headers=headers)
 
 @app.head("/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path:path}")
-@app.head("/{org}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_head_proxy2(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str = "models"):
+async def file_head_proxy2(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str):
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
@@ -83,29 +76,45 @@ async def file_head_proxy2(org: str, repo: str, commit: str, file_path: str, req
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
-@app.head("/{repo_type}/{org_repo}/resolve/{commit}/{file_path:path}")
-@app.head("/{org_repo}/resolve/{commit}/{file_path:path}")
-async def file_head_proxy(org_repo: str, commit: str, file_path: str, request: Request, repo_type: str = "models"):
-    if "/" in org_repo and org_repo.count("/") != 1:
-        return Response(content="This repository is not accessible.", status_code=404)
-    if "/" in org_repo:
-        org, repo = org_repo.split("/")
+@app.head("/{org_or_repo_type}/{repo}/resolve/{commit}/{file_path:path}")
+async def file_head_proxy(org_or_repo_type: str, repo: str, commit: str, file_path: str, request: Request):
+    if org_or_repo_type in ["models", "datasets", "spaces"]:
+        repo_type: str = org_or_repo_type
+        org, repo = parse_org_repo(repo)
+        if org is None and repo is None:
+            return Response(content="This repository is not accessible.", status_code=404)
     else:
-        org = None
-        repo = org_repo
+        repo_type: str = "models"
+        org, repo = org_or_repo_type, repo
 
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
-    if not await check_commit_hf(app, repo_type, org, repo, commit):
+    if org is not None and not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
+    commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
+    generator = await file_head_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    headers = await generator.__anext__()
+    return StreamingResponse(generator, headers=headers)
+
+@app.head("/{org_repo}/resolve/{commit}/{file_path:path}")
+async def file_head_proxy_default_type(org_repo: str, commit: str, file_path: str, request: Request):
+    repo_type: str = "models"
+    org, repo = parse_org_repo(org_repo)
+    if org is None and repo is None:
+        return Response(content="This repository is not accessible.", status_code=404)
+
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+    if org is not None and not await check_commit_hf(app, repo_type, org, repo, commit):
+        return Response(content="This repository is not accessible. ", status_code=404)
+    
     commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
     generator = await file_head_generator(app, repo_type, org, repo, commit_sha, file_path, request)
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
 @app.get("/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path:path}")
-@app.get("/{org}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_proxy2(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str = "models"):
+async def file_proxy2(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str):
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
@@ -115,16 +124,32 @@ async def file_proxy2(org: str, repo: str, commit: str, file_path: str, request:
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
-@app.get("/{repo_type}/{org_repo}/resolve/{commit}/{file_path:path}")
-@app.get("/{org_repo}/resolve/{commit}/{file_path:path}")
-async def file_proxy(org_repo: str, commit: str, file_path: str, request: Request, repo_type: str = "models"):
-    if "/" in org_repo and org_repo.count("/") != 1:
-        return Response(content="This repository is not accessible.", status_code=404)
-    if "/" in org_repo:
-        org, repo = org_repo.split("/")
+@app.get("/{org_or_repo_type}/{repo}/resolve/{commit}/{file_path:path}")
+async def file_proxy2_default_type(org_or_repo_type: str, repo: str, commit: str, file_path: str, request: Request):
+    if org_or_repo_type in ["models", "datasets", "spaces"]:
+        repo_type: str = org_or_repo_type
+        org, repo = parse_org_repo(repo)
+        if org is None and repo is None:
+            return Response(content="This repository is not accessible.", status_code=404)
     else:
-        org = None
-        repo = org_repo
+        repo_type: str = "models"
+        org, repo = org_or_repo_type, repo
+
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+    if org is not None and not await check_commit_hf(app, repo_type, org, repo, commit):
+        return Response(content="This repository is not accessible. ", status_code=404)
+    commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
+    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    headers = await generator.__anext__()
+    return StreamingResponse(generator, headers=headers)
+
+@app.get("/{org_repo}/resolve/{commit}/{file_path:path}")
+async def file_proxy_default_type(org_repo: str, commit: str, file_path: str, request: Request):
+    repo_type: str = "models"
+    org, repo = parse_org_repo(org_repo)
+    if org is None and repo is None:
+        return Response(content="This repository is not accessible.", status_code=404)
 
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
@@ -134,16 +159,13 @@ async def file_proxy(org_repo: str, commit: str, file_path: str, request: Reques
     generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path, request)
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
+
 
 @app.get("/{repo_type}/{org_repo}/{hash_file}")
 async def cdn_file_proxy(org_repo: str, hash_file: str, request: Request, repo_type: str = "models"):
-    if "/" in org_repo and org_repo.count("/") != 1:
+    org, repo = parse_org_repo(org_repo)
+    if org is None and repo is None:
         return Response(content="This repository is not accessible.", status_code=404)
-    if "/" in org_repo:
-        org, repo = org_repo.split("/")
-    else:
-        org = None
-        repo = org_repo
 
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)

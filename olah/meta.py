@@ -11,7 +11,7 @@ import httpx
 from olah.configs import OlahConfig
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-from olah.utils import check_cache_rules_hf
+from olah.utils import check_cache_rules_hf, get_org_repo, make_dirs
 
 async def meta_cache_generator(app: FastAPI, save_path: str):
     yield {}
@@ -25,7 +25,7 @@ async def meta_cache_generator(app: FastAPI, save_path: str):
 async def meta_proxy_generator(app: FastAPI, headers: Dict[str, str], meta_url: str, allow_cache: bool, save_path: str):
     try:
         temp_file_path = None
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             with tempfile.NamedTemporaryFile(mode="wb", delete=True) as temp_file:
                 temp_file_path = temp_file.name
                 if not allow_cache:
@@ -61,12 +61,13 @@ async def meta_generator(app: FastAPI, repo_type: Literal["models", "datasets"],
     repos_path = app.app_settings.repos_path
     save_dir = os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}")
     save_path = os.path.join(save_dir, "meta.json")
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir, exist_ok=True)
-    
+    make_dirs(save_path)
+
     use_cache = os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
-    meta_url = f"{app.app_settings.hf_url}/api/{repo_type}/{org}/{repo}/revision/{commit}"
+
+    org_repo = get_org_repo(org, repo)
+    meta_url = f"{app.app_settings.hf_url}/api/{repo_type}/{org_repo}/revision/{commit}"
     # proxy
     if use_cache:
         async for item in meta_cache_generator(app, save_path):
