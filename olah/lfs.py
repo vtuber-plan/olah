@@ -1,3 +1,7 @@
+"""
+废弃方法
+"""
+
 import datetime
 import json
 import os
@@ -8,7 +12,7 @@ import httpx
 import pytz
 
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
-from olah.utils import make_dirs
+from olah.utils.file_utils import make_dirs
 
 
 async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, request: Request):

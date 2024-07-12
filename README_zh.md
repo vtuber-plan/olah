@@ -40,7 +40,7 @@ pip install -e .
 python -m olah.server
 ```
 
-然后将环境变量`HF_ENDPOINT`设置为镜像站点(这里是http://localhost:8090)。
+然后将环境变量`HF_ENDPOINT`设置为镜像站点(这里是http://localhost:8090/)。
 
 Linux: 
 ```bash

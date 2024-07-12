@@ -91,10 +91,14 @@ class OlahConfig(object):
         self.ssl_key = None
         self.ssl_cert = None
         self.repos_path = "./repos"
-        self.hf_url = "https://huggingface.co"
-        self.hf_lfs_url = "https://cdn-lfs.huggingface.co"
-        self.mirror_url = f"http://{self.host}:{self.port}"
-        self.mirror_lfs_url = f"http://{self.host}:{self.port}"
+
+        self.hf_scheme: str = "https"
+        self.hf_netloc: str = "huggingface.co"
+        self.hf_lfs_netloc: str = "cdn-lfs.huggingface.co"
+
+        self.mirror_scheme: str = "http"
+        self.mirror_netloc: str = "localhost:8090"
+        self.mirror_lfs_netloc: str = "localhost:8090"
 
         # accessibility
         self.offline = False
@@ -103,12 +107,19 @@ class OlahConfig(object):
 
         if path is not None:
             self.read_toml(path)
-        
-        # refresh urls
-        self.mirror_url = f"http://{self.host}:{self.port}"
-        self.mirror_lfs_url = f"http://{self.host}:{self.port}"
-
     
+    def hf_url_base(self) -> str:
+        return f"{self.hf_scheme}://{self.hf_netloc}"
+
+    def hf_lfs_url_base(self) -> str:
+        return f"{self.hf_scheme}://{self.hf_lfs_netloc}"
+
+    def mirror_url_base(self) -> str:
+        return f"{self.mirror_scheme}://{self.mirror_netloc}"
+
+    def mirror_lfs_url_base(self) -> str:
+        return f"{self.mirror_scheme}://{self.mirror_lfs_netloc}"
+
     def empty_str(self, s: str) -> Optional[str]:
         if s == "":
             return None
@@ -125,10 +136,14 @@ class OlahConfig(object):
             self.ssl_key = self.empty_str(basic.get("ssl-key", self.ssl_key))
             self.ssl_cert = self.empty_str(basic.get("ssl-cert", self.ssl_cert))
             self.repos_path = basic.get("repos-path", self.repos_path)
-            self.hf_url = basic.get("hf-url", self.hf_url)
-            self.hf_lfs_url = basic.get("hf-lfs-url", self.hf_lfs_url)
-            self.mirror_url = basic.get("mirror-url", self.mirror_url)
-            self.mirror_lfs_url = basic.get("mirror-lfs-url", self.mirror_lfs_url)
+
+            self.hf_scheme = basic.get("hf-scheme", self.hf_scheme)
+            self.hf_netloc = basic.get("hf-netloc", self.hf_netloc)
+            self.hf_lfs_netloc = basic.get("hf-lfs-netloc", self.hf_lfs_netloc)
+
+            self.mirror_scheme = basic.get("mirror-scheme", self.mirror_scheme)
+            self.mirror_netloc = basic.get("mirror-netloc", self.mirror_netloc)
+            self.mirror_lfs_netloc = basic.get("mirror-lfs-netloc", self.mirror_lfs_netloc)
 
         if "accessibility" in config:
             accessibility = config["accessibility"]

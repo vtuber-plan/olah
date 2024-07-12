@@ -4,6 +4,7 @@ import os
 import glob
 from typing import Literal, Optional, Tuple
 import json
+from urllib.parse import ParseResult, urljoin
 import httpx
 from olah.configs import OlahConfig
 from olah.constants import WORKER_API_TIMEOUT
@@ -50,7 +51,7 @@ async def get_newest_commit_hf_offline(app, repo_type: Optional[Literal["models"
     return time_revisions[-1][1]
 
 async def get_newest_commit_hf(app, repo_type: Optional[Literal["models", "datasets", "spaces"]], org: Optional[str], repo: str) -> str:
-    url = f"{app.app_settings.hf_url}/api/{repo_type}/{org}/{repo}"
+    url = urljoin(app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org}/{repo}")
     if app.app_settings.config.offline:
         return get_newest_commit_hf_offline(app, repo_type, org, repo)
     try:
@@ -74,7 +75,7 @@ async def get_commit_hf_offline(app, repo_type: Optional[Literal["models", "data
 
 async def get_commit_hf(app, repo_type: Optional[Literal["models", "datasets", "spaces"]], org: Optional[str], repo: str, commit: str) -> str:
     org_repo = get_org_repo(org, repo)
-    url = f"{app.app_settings.hf_url}/api/{repo_type}/{org_repo}/revision/{commit}"
+    url = urljoin(app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}/revision/{commit}")
     if app.app_settings.config.offline:
         return await get_commit_hf_offline(app, repo_type, org, repo, commit)
     try:
@@ -90,9 +91,9 @@ async def get_commit_hf(app, repo_type: Optional[Literal["models", "datasets", "
 async def check_commit_hf(app, repo_type: Optional[Literal["models", "datasets", "spaces"]], org: Optional[str], repo: str, commit: Optional[str]=None) -> bool:
     org_repo = get_org_repo(org, repo)
     if commit is None:
-        url = f"{app.app_settings.hf_url}/api/{repo_type}/{org_repo}"
+        url = urljoin(app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}")
     else:
-        url = f"{app.app_settings.hf_url}/api/{repo_type}/{org_repo}/revision/{commit}"
+        url = urljoin(app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}/revision/{commit}")
     
     async with httpx.AsyncClient() as client:
         response = await client.get(url, timeout=WORKER_API_TIMEOUT)
@@ -108,10 +109,27 @@ async def check_cache_rules_hf(app, repo_type: Optional[Literal["models", "datas
     org_repo = get_org_repo(org, repo)
     return config.cache.allow(f"{org_repo}")
 
-def make_dirs(path: str):
-    if os.path.isdir(path):
-        save_dir = path
+def get_url_tail(parsed_url: ParseResult) -> str:
+    url_tail = parsed_url.path
+    if len(parsed_url.params) != 0:
+        url_tail += f";{parsed_url.params}"
+    if len(parsed_url.query) != 0:
+        url_tail += f"?{parsed_url.query}"
+    if len(parsed_url.fragment) != 0:
+        url_tail += f"#{parsed_url.fragment}"
+    return url_tail
+
+def parse_range_params(file_range: str, file_size: int) -> Tuple[int, int]:
+    # 'bytes=1887436800-'
+    if file_range.startswith("bytes="):
+        file_range = file_range[6:]
+    start_pos, end_pos = file_range.split("-")
+    if len(start_pos) != 0:
+        start_pos = int(start_pos)
     else:
-        save_dir = os.path.dirname(path)
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir, exist_ok=True)
+        start_pos = 0
+    if len(end_pos) != 0:
+        end_pos = int(end_pos)
+    else:
+        end_pos = file_size
+    return start_pos, end_pos

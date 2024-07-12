@@ -2,11 +2,13 @@ import json
 import os
 import shutil
 import tempfile
-from typing import Literal
+from typing import Literal, Optional
 from fastapi import Request
 
+from requests.structures import CaseInsensitiveDict
 import httpx
 from starlette.datastructures import URL
+from urllib.parse import urlparse, urljoin
 
 from olah.constants import (
     CHUNK_SIZE,
@@ -15,7 +17,7 @@ from olah.constants import (
     HUGGINGFACE_HEADER_X_LINKED_ETAG,
     HUGGINGFACE_HEADER_X_LINKED_SIZE,
 )
-from olah.utils import check_cache_rules_hf, get_org_repo, make_dirs
+from olah.utils import check_cache_rules_hf, get_org_repo, get_url_tail, make_dirs
 FILE_HEADER_TEMPLATE = {
     "accept-ranges": "bytes",
     "access-control-allow-origin": "*",
@@ -30,12 +32,16 @@ async def _file_cache_stream(save_path: str, head_path: str, request: Request):
     if request.method.lower() == "head":
         with open(head_path, "r", encoding="utf-8") as f:
             response_headers = json.loads(f.read())
-        new_headers = {k:v for k, v in FILE_HEADER_TEMPLATE.items()}
+        response_headers = {k.lower():v for k, v in response_headers.items()}
+        new_headers = {k.lower():v for k, v in FILE_HEADER_TEMPLATE.items()}
         new_headers["content-type"] = response_headers["content-type"]
         new_headers["content-length"] = response_headers["content-length"]
-        new_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT] = response_headers.get(HUGGINGFACE_HEADER_X_REPO_COMMIT, None)
-        new_headers[HUGGINGFACE_HEADER_X_LINKED_ETAG] = response_headers.get(HUGGINGFACE_HEADER_X_LINKED_ETAG, None)
-        new_headers[HUGGINGFACE_HEADER_X_LINKED_SIZE] = response_headers.get(HUGGINGFACE_HEADER_X_LINKED_SIZE, None)
+        if HUGGINGFACE_HEADER_X_REPO_COMMIT.lower() in response_headers:
+            new_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = response_headers.get(HUGGINGFACE_HEADER_X_REPO_COMMIT.lower(), "")
+        if HUGGINGFACE_HEADER_X_LINKED_ETAG.lower() in response_headers:
+            new_headers[HUGGINGFACE_HEADER_X_LINKED_ETAG.lower()] = response_headers.get(HUGGINGFACE_HEADER_X_LINKED_ETAG.lower(), "")
+        if HUGGINGFACE_HEADER_X_LINKED_SIZE.lower() in response_headers:
+            new_headers[HUGGINGFACE_HEADER_X_LINKED_SIZE.lower()] = response_headers.get(HUGGINGFACE_HEADER_X_LINKED_SIZE.lower(), "")
         new_headers["etag"] = response_headers["etag"]
         yield new_headers
     elif request.method.lower() == "get":
@@ -49,8 +55,26 @@ async def _file_cache_stream(save_path: str, head_path: str, request: Request):
                 break
             yield chunk
 
+async def _get_redirected_url(client, method: str, url, headers):
+    async with client.stream(
+        method=method,
+        url=url,
+        headers=headers,
+        timeout=WORKER_API_TIMEOUT,
+    ) as response:
+        if response.status_code >= 300 and response.status_code <= 399:
+            from_url = urlparse(url)
+            parsed_url = urlparse(response.headers["location"])
+            if len(parsed_url.netloc) == 0:
+                redirect_loc = urljoin(f"{from_url.scheme}://{from_url.netloc}", response.headers["location"])
+            else:
+                redirect_loc = response.headers["location"]
+        else:
+            redirect_loc = url
+    return redirect_loc
+
 async def _file_realtime_stream(
-    app, save_path: str, head_path: str, url: str, request: Request, method="GET", allow_cache=True
+    app, save_path: str, head_path: str, url: str, request: Request, method="GET", allow_cache=True, commit: Optional[str]=None
 ):
     request_headers = {k: v for k, v in request.headers.items()}
     request_headers.pop("host")
@@ -65,33 +89,26 @@ async def _file_realtime_stream(
                 else:
                     write_temp_file = True
                 
-                async with client.stream(
-                    method=method,
-                    url=url,
-                    headers=request_headers,
-                    timeout=WORKER_API_TIMEOUT,
-                ) as response:
-                    if response.status_code >= 300 and response.status_code <= 399:
-                        redirect_loc = app.app_settings.hf_url + response.headers["location"]
-                    else:
-                        redirect_loc = url
-
+                redirect_loc = await _get_redirected_url(client, method, url, request_headers)
                 async with client.stream(
                     method=method,
                     url=redirect_loc,
                     headers=request_headers,
                     timeout=WORKER_API_TIMEOUT,
                 ) as response:
-                    response_headers = response.headers
-                    response_headers_dict = {k: v for k, v in response_headers.items()}
+                    response_headers_dict = {k.lower(): v for k, v in response.headers.items()}
                     if allow_cache:
                         if request.method.lower() == "head":
                             with open(head_path, "w", encoding="utf-8") as f:
                                 f.write(json.dumps(response_headers_dict, ensure_ascii=False))
                     if "location" in response_headers_dict:
-                        response_headers_dict["location"] = response_headers_dict["location"].replace(
-                            app.app_settings.hf_lfs_url, app.app_settings.mirror_lfs_url
-                        )
+                        location_url = urlparse(response_headers_dict["location"])
+                        if location_url.netloc == app.app_settings.config.hf_lfs_netloc:
+                            response_headers_dict["location"] = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(location_url))
+                        else:
+                            response_headers_dict["location"] = urljoin(app.app_settings.config.mirror_url_base(), get_url_tail(location_url))
+                    if commit is not None:
+                        response_headers_dict[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
                     yield response_headers_dict
 
                     async for raw_chunk in response.aiter_raw():
@@ -137,9 +154,9 @@ async def file_head_generator(
         return _file_cache_stream(save_path=save_path, head_path=head_path, request=request)
     else:
         if repo_type == "models":
-            url = f"{app.app_settings.hf_url}/{org_repo}/resolve/{commit}/{file_path}"
+            url = urljoin(app.app_settings.config.hf_url_base(), f"/{org_repo}/resolve/{commit}/{file_path}")
         else:
-            url = f"{app.app_settings.hf_url}/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
+            url = urljoin(app.app_settings.config.hf_url_base(), f"/{repo_type}/{org_repo}/resolve/{commit}/{file_path}")
         return _file_realtime_stream(
             app=app,
             save_path=save_path,
@@ -148,6 +165,7 @@ async def file_head_generator(
             request=request,
             method="HEAD",
             allow_cache=allow_cache,
+            commit=commit,
         )
 
 
@@ -180,9 +198,9 @@ async def file_get_generator(
         return _file_cache_stream(save_path=save_path, head_path=head_path, request=request)
     else:
         if repo_type == "models":
-            url = f"{app.app_settings.hf_url}/{org_repo}/resolve/{commit}/{file_path}"
+            url = urljoin(app.app_settings.config.hf_url_base(), f"/{org_repo}/resolve/{commit}/{file_path}")
         else:
-            url = f"{app.app_settings.hf_url}/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
+            url = urljoin(app.app_settings.config.hf_url_base(), f"/{repo_type}/{org_repo}/resolve/{commit}/{file_path}")
         return _file_realtime_stream(
             app=app,
             save_path=save_path,
@@ -191,6 +209,7 @@ async def file_get_generator(
             request=request,
             method="GET",
             allow_cache=allow_cache,
+            commit=commit,
         )
 
 
@@ -224,8 +243,11 @@ async def cdn_file_get_generator(
     if use_cache:
         return _file_cache_stream(save_path=save_path, request=request)
     else:
-        redirected_url = str(request.url)
-        redirected_url = redirected_url.replace(app.app_settings.mirror_lfs_url, app.app_settings.hf_lfs_url)
+        request_url = urlparse(request.url)
+        if request_url.netloc == app.app_settings.config.hf_lfs_netloc:
+            redirected_url = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(request_url))
+        else:
+            redirected_url = urljoin(app.app_settings.config.mirror_url_base(), get_url_tail(request_url))
 
         return _file_realtime_stream(
             app=app,

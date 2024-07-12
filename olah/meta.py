@@ -5,13 +5,15 @@ import os
 import shutil
 import tempfile
 from typing import Dict, Literal
+from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 
 import httpx
 from olah.configs import OlahConfig
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-from olah.utils import check_cache_rules_hf, get_org_repo, make_dirs
+from olah.utils.url_utils import check_cache_rules_hf, get_org_repo
+from olah.utils.file_utils import make_dirs
 
 async def meta_cache_generator(app: FastAPI, save_path: str):
     yield {}
@@ -67,7 +69,7 @@ async def meta_generator(app: FastAPI, repo_type: Literal["models", "datasets"],
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
 
     org_repo = get_org_repo(org, repo)
-    meta_url = f"{app.app_settings.hf_url}/api/{repo_type}/{org_repo}/revision/{commit}"
+    meta_url = urljoin(app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}/revision/{commit}")
     # proxy
     if use_cache:
         async for item in meta_cache_generator(app, save_path):
