@@ -2,7 +2,7 @@
 import datetime
 import os
 import glob
-from typing import Literal, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple
 import json
 from urllib.parse import ParseResult, urljoin
 import httpx
@@ -133,3 +133,10 @@ def parse_range_params(file_range: str, file_size: int) -> Tuple[int, int]:
     else:
         end_pos = file_size
     return start_pos, end_pos
+
+
+class RemoteInfo(object):
+    def __init__(self, method: str, url: str, headers: Dict[str, str]) -> None:
+        self.method = method
+        self.url = url
+        self.headers = headers
