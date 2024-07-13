@@ -7,7 +7,7 @@ from .bitset import Bitset
 
 CURRENT_OLAH_CACHE_VERSION = 8
 DEFAULT_BLOCK_MASK_MAX = 1024 * 1024
-DEFAULT_BLOCK_SIZE = 8 * 1024 * 1024
+DEFAULT_BLOCK_SIZE = 16 * 1024 * 1024
 
 
 class OlahCacheHeader(object):
@@ -183,7 +183,8 @@ class OlahCache(object):
 
     def _test_header_block(self, block_index: int):
         with self.header_lock:
-            self.header.block_mask.test(block_index)
+            result = self.header.block_mask.test(block_index)
+        return result
 
     def flush(self):
         if not self.is_open:
@@ -191,7 +192,7 @@ class OlahCache(object):
         self._flush_header()
     
     def has_block(self, block_index: int) -> bool:
-        self._test_header_block(block_index)
+        return self._test_header_block(block_index)
 
     def read_block(self, block_index: int) -> Optional[bytes]:
         if not self.is_open:
