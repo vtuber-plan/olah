@@ -87,7 +87,8 @@ async def _file_full_header(
         new_headers[HUGGINGFACE_HEADER_X_LINKED_ETAG.lower()] = response_headers_dict.get(HUGGINGFACE_HEADER_X_LINKED_ETAG.lower(), "")
     if HUGGINGFACE_HEADER_X_LINKED_SIZE.lower() in response_headers_dict:
         new_headers[HUGGINGFACE_HEADER_X_LINKED_SIZE.lower()] = response_headers_dict.get(HUGGINGFACE_HEADER_X_LINKED_SIZE.lower(), "")
-    new_headers["etag"] = response_headers_dict["etag"]
+    if "etag" in response_headers_dict:
+        new_headers["etag"] = response_headers_dict["etag"]
     return new_headers
 
 async def _get_file_block_from_cache(cache_file: OlahCache, block_index: int):
@@ -115,8 +116,8 @@ async def _get_file_block_from_remote(client: httpx.AsyncClient, remote_info: Re
     # print(block_start_pos, block_end_pos)
     if len(raw_block) != (block_end_pos - block_start_pos):
         raise Exception(f"The block is incomplete. Expected-{block_end_pos - block_start_pos}. Accepted-{len(raw_block)}")
-    if len(raw_block) < cache_file.header.block_size:
-        raw_block += b"\x00" * (cache_file.header.block_size - len(raw_block))
+    if len(raw_block) < cache_file._get_block_size():
+        raw_block += b"\x00" * (cache_file._get_block_size() - len(raw_block))
     return raw_block
 
 async def _file_chunk_get(
