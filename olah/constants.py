@@ -3,6 +3,7 @@ WORKER_API_TIMEOUT = 15
 CHUNK_SIZE = 4096
 LFS_FILE_BLOCK = 64 * 1024 * 1024
 
+DEFAULT_LOGGER_DIR = "./logs"
 
 from huggingface_hub.constants import (
     _HF_DEFAULT_ENDPOINT,

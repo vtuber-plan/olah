@@ -16,6 +16,8 @@ from olah.lfs import lfs_get_generator, lfs_head_generator
 from olah.meta import meta_generator
 from olah.utils.url_utils import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf, parse_org_repo
 
+from olah.utils.logging import build_logger
+
 app = FastAPI(debug=False)
 
 class AppSettings(BaseSettings):
@@ -239,7 +241,11 @@ if __name__ in ["__main__", "olah.server"]:
     parser.add_argument("--ssl-key", type=str, default=None)
     parser.add_argument("--ssl-cert", type=str, default=None)
     parser.add_argument("--repos-path", type=str, default="./repos")
+    parser.add_argument("--log-path", type=str, default="./logs", help="The folder to save logs")
     args = parser.parse_args()
+    print(args)
+
+    logger = build_logger("olah", "olah.log", logger_dir=args.log_path)
     
     def is_default_value(args, arg_name):
         if hasattr(args, arg_name):
