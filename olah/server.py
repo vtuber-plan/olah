@@ -11,8 +11,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse, Response
 import httpx
 from pydantic import BaseSettings
 from olah.configs import OlahConfig
-from olah.files import cdn_file_get_generator, file_get_generator, file_head_generator
-from olah.lfs import lfs_get_generator
+from olah.files import cdn_file_get_generator, file_get_generator
+from olah.lfs import lfs_get_generator, lfs_head_generator
 from olah.meta import meta_generator
 from olah.utils.url_utils import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf, parse_org_repo
 
@@ -70,38 +70,40 @@ async def meta_proxy_commit(repo_type: str, org_repo: str, commit: str, request:
 # File Head Hooks
 # ======================
 @app.head("/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_head_proxy2(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str):
+async def file_head3(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str):
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
     commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
-    generator = await file_head_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path=file_path, method="HEAD", request=request)
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
 
-@app.head("/{org_or_repo_type}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_head_proxy(org_or_repo_type: str, repo: str, commit: str, file_path: str, request: Request):
+@app.head("/{org_or_repo_type}/{repo_name}/resolve/{commit}/{file_path:path}")
+async def file_head2(org_or_repo_type: str, repo_name: str, commit: str, file_path: str, request: Request):
     if org_or_repo_type in ["models", "datasets", "spaces"]:
         repo_type: str = org_or_repo_type
-        org, repo = parse_org_repo(repo)
+        org, repo = parse_org_repo(repo_name)
         if org is None and repo is None:
             return Response(content="This repository is not accessible.", status_code=404)
     else:
         repo_type: str = "models"
-        org, repo = org_or_repo_type, repo
+        org, repo = org_or_repo_type, repo_name
 
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if org is not None and not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
     commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
-    generator = await file_head_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path=file_path, method="HEAD", request=request)
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
 
 @app.head("/{org_repo}/resolve/{commit}/{file_path:path}")
-async def file_head_proxy_default_type(org_repo: str, commit: str, file_path: str, request: Request):
+async def file_head(org_repo: str, commit: str, file_path: str, request: Request):
     repo_type: str = "models"
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
@@ -113,46 +115,64 @@ async def file_head_proxy_default_type(org_repo: str, commit: str, file_path: st
         return Response(content="This repository is not accessible. ", status_code=404)
     
     commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
-    generator = await file_head_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path=file_path, method="HEAD", request=request)
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
+
+@app.head("/{org_repo}/{hash_file}")
+@app.head("/{repo_type}/{org_repo}/{hash_file}")
+async def cdn_file_head(org_repo: str, hash_file: str, request: Request, repo_type: str = "models"):
+    org, repo = parse_org_repo(org_repo)
+    if org is None and repo is None:
+        return Response(content="This repository is not accessible.", status_code=404)
+
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+
+    generator = await cdn_file_get_generator(app, repo_type, org, repo, hash_file, method="HEAD", request=request)
+    status_code = await generator.__anext__()
+    headers = await generator.__anext__()
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
 
 # ======================
 # File Hooks
 # ======================
 @app.get("/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_proxy2(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str):
+async def file_get3(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str):
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
     commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
-    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path=file_path, method="GET", request=request)
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
 
-@app.get("/{org_or_repo_type}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_proxy2_default_type(org_or_repo_type: str, repo: str, commit: str, file_path: str, request: Request):
+@app.get("/{org_or_repo_type}/{repo_name}/resolve/{commit}/{file_path:path}")
+async def file_get2(org_or_repo_type: str, repo_name: str, commit: str, file_path: str, request: Request):
     if org_or_repo_type in ["models", "datasets", "spaces"]:
         repo_type: str = org_or_repo_type
-        org, repo = parse_org_repo(repo)
+        org, repo = parse_org_repo(repo_name)
         if org is None and repo is None:
             return Response(content="This repository is not accessible.", status_code=404)
     else:
         repo_type: str = "models"
-        org, repo = org_or_repo_type, repo
+        org, repo = org_or_repo_type, repo_name
 
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if org is not None and not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
     commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
-    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path=file_path, method="GET", request=request)
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
 
 @app.get("/{org_repo}/resolve/{commit}/{file_path:path}")
-async def file_proxy_default_type(org_repo: str, commit: str, file_path: str, request: Request):
+async def file_get(org_repo: str, commit: str, file_path: str, request: Request):
     repo_type: str = "models"
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
@@ -163,12 +183,14 @@ async def file_proxy_default_type(org_repo: str, commit: str, file_path: str, re
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
     commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
-    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    generator = await file_get_generator(app, repo_type, org, repo, commit_sha, file_path=file_path, method="GET", request=request)
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
 
+@app.get("/{org_repo}/{hash_file}")
 @app.get("/{repo_type}/{org_repo}/{hash_file}")
-async def cdn_file_proxy(org_repo: str, hash_file: str, request: Request, repo_type: str = "models"):
+async def cdn_file_get(org_repo: str, hash_file: str, request: Request, repo_type: str = "models"):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
         return Response(content="This repository is not accessible.", status_code=404)
@@ -176,30 +198,27 @@ async def cdn_file_proxy(org_repo: str, hash_file: str, request: Request, repo_t
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
 
-    generator = await cdn_file_get_generator(app, repo_type, org, repo, hash_file, request)
+    generator = await cdn_file_get_generator(app, repo_type, org, repo, hash_file, method="GET", request=request)
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
 
 # ======================
 # LFS Hooks
 # ======================
-@app.get("/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}")
-async def lfs_proxy(dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request):
-    repo_type = "models"
-    lfs_url = urljoin(app.app_settings.config.hf_lfs_url_base(), f"/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}")
-    save_path = f"{dir1}/{dir2}/{hash_repo}/{hash_file}"
-    generator = lfs_get_generator(app, repo_type, lfs_url, save_path, request)
+@app.head("/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}")
+async def lfs_head(dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request):
+    generator = await lfs_head_generator(app, dir1, dir2, hash_repo, hash_file, request)
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
 
-@app.get("/datasets/hendrycks_test/{hash_file}")
-async def lfs_proxy(hash_file: str, request: Request):
-    repo_type = "datasets"
-    lfs_url = urljoin(app.app_settings.config.hf_lfs_url_base(), f"/datasets/hendrycks_test/{hash_file}")
-    save_path = f"hendrycks_test/{hash_file}"
-    generator = lfs_get_generator(app, repo_type, lfs_url, save_path, request)
+@app.get("/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}")
+async def lfs_get(dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request):
+    generator = await lfs_get_generator(app, dir1, dir2, hash_repo, hash_file, request)
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
 
 # ======================
 # Web Page Hooks

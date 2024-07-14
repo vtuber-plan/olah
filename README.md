@@ -2,6 +2,11 @@
 Olah is self-hosted lightweight huggingface mirror service. `Olah` means `hello` in Hilichurlian.
 
 Other languages: [中文](README_zh.md)
+
+## Advantages of Olah
+Olah has the capability to cache files in chunks while users download them. Upon subsequent downloads, the files can be directly retrieved from the cache, greatly enhancing download speeds and saving bandwidth.
+Additionally, Olah offers a range of cache control policies. Administrators can configure which repositories are accessible and which ones can be cached through a configuration file.
+
 ## Features
 * Huggingface Data Cache
 * Models mirror

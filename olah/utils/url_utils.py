@@ -2,9 +2,9 @@
 import datetime
 import os
 import glob
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple, Union
 import json
-from urllib.parse import ParseResult, urljoin
+from urllib.parse import ParseResult, urljoin, urlparse
 import httpx
 from olah.configs import OlahConfig
 from olah.constants import WORKER_API_TIMEOUT
@@ -16,7 +16,7 @@ def get_org_repo(org: Optional[str], repo: str) -> str:
         org_repo = f"{org}/{repo}"
     return org_repo
 
-def parse_org_repo(org_repo: str) -> Tuple[str, str]:
+def parse_org_repo(org_repo: str) -> Tuple[Optional[str], Optional[str]]:
     if "/" in org_repo and org_repo.count("/") != 1:
         return None, None
     if "/" in org_repo:
@@ -109,7 +109,9 @@ async def check_cache_rules_hf(app, repo_type: Optional[Literal["models", "datas
     org_repo = get_org_repo(org, repo)
     return config.cache.allow(f"{org_repo}")
 
-def get_url_tail(parsed_url: ParseResult) -> str:
+def get_url_tail(parsed_url: Union[str, ParseResult]) -> str:
+    if isinstance(parsed_url, str):
+        parsed_url = urlparse(parsed_url)
     url_tail = parsed_url.path
     if len(parsed_url.params) != 0:
         url_tail += f";{parsed_url.params}"
