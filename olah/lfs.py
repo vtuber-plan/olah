@@ -1,5 +1,10 @@
-import datetime
-import json
+# coding=utf-8
+# Copyright 2024 XiaHan
+# 
+# Use of this source code is governed by an MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT.
+
 import os
 from typing import Literal
 from fastapi import FastAPI, Header, Request
@@ -10,8 +15,7 @@ from olah.utils.url_utils import check_cache_rules_hf, get_org_repo
 
 
 async def lfs_head_generator(
-    app,
-    dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request
+    app, dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request
 ):
     # save
     repos_path = app.app_settings.repos_path
@@ -39,9 +43,9 @@ async def lfs_head_generator(
         commit=None,
     )
 
+
 async def lfs_get_generator(
-    app,
-    dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request
+    app, dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request
 ):
     # save
     repos_path = app.app_settings.repos_path

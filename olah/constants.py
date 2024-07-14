@@ -1,3 +1,9 @@
+# coding=utf-8
+# Copyright 2024 XiaHan
+# 
+# Use of this source code is governed by an MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT.
 
 WORKER_API_TIMEOUT = 15
 CHUNK_SIZE = 4096

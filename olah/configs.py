@@ -1,4 +1,9 @@
-
+# coding=utf-8
+# Copyright 2024 XiaHan
+# 
+# Use of this source code is governed by an MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT.
 
 from typing import List, Optional
 import toml
@@ -6,30 +11,15 @@ import re
 import fnmatch
 
 DEFAULT_PROXY_RULES = [
-    {
-        "repo": "*",
-        "allow": True,
-        "use_re": False
-    },
-    {
-        "repo": "*/*",
-        "allow": True,
-        "use_re": False
-    }
+    {"repo": "*", "allow": True, "use_re": False},
+    {"repo": "*/*", "allow": True, "use_re": False},
 ]
 
 DEFAULT_CACHE_RULES = [
-    {
-        "repo": "*",
-        "allow": True,
-        "use_re": False
-    },
-    {
-        "repo": "*/*",
-        "allow": True,
-        "use_re": False
-    }
+    {"repo": "*", "allow": True, "use_re": False},
+    {"repo": "*/*", "allow": True, "use_re": False},
 ]
+
 
 class OlahRule(object):
     def __init__(self) -> None:
@@ -48,39 +38,41 @@ class OlahRule(object):
         if "use_re" in data:
             out.use_re = data["use_re"]
         return out
-    
+
     def match(self, repo_name: str) -> bool:
         if self.use_re:
             return self.match_re(repo_name)
         else:
             return self.match_fn(repo_name)
-    
+
     def match_fn(self, repo_name: str) -> bool:
         return fnmatch.fnmatch(repo_name, self.repo)
-    
+
     def match_re(self, repo_name: str) -> bool:
         return re.match(self.repo, repo_name) is not None
+
 
 class OlahRuleList(object):
     def __init__(self) -> None:
         self.rules: List[OlahRule] = []
-    
+
     @staticmethod
     def from_list(data) -> "OlahRuleList":
         out = OlahRuleList()
         for item in data:
             out.rules.append(OlahRule.from_dict(item))
         return out
-    
+
     def clear(self):
         self.rules.clear()
-    
+
     def allow(self, repo_name: str) -> bool:
         allow = False
         for rule in self.rules:
             if rule.match(repo_name):
                 allow = rule.allow
         return allow
+
 
 class OlahConfig(object):
     def __init__(self, path: Optional[str] = None) -> None:
@@ -107,7 +99,7 @@ class OlahConfig(object):
 
         if path is not None:
             self.read_toml(path)
-    
+
     def hf_url_base(self) -> str:
         return f"{self.hf_scheme}://{self.hf_netloc}"
 
@@ -143,7 +135,9 @@ class OlahConfig(object):
 
             self.mirror_scheme = basic.get("mirror-scheme", self.mirror_scheme)
             self.mirror_netloc = basic.get("mirror-netloc", self.mirror_netloc)
-            self.mirror_lfs_netloc = basic.get("mirror-lfs-netloc", self.mirror_lfs_netloc)
+            self.mirror_lfs_netloc = basic.get(
+                "mirror-lfs-netloc", self.mirror_lfs_netloc
+            )
 
         if "accessibility" in config:
             accessibility = config["accessibility"]

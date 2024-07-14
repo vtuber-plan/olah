@@ -1,9 +1,12 @@
-import datetime
-import json
+# coding=utf-8
+# Copyright 2024 XiaHan
+# 
+# Use of this source code is governed by an MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT.
+
 import os
 import argparse
-import tempfile
-import shutil
 from typing import Annotated, Optional, Union
 from urllib.parse import urljoin
 from fastapi import FastAPI, Header, Request
@@ -238,9 +241,9 @@ if __name__ in ["__main__", "olah.server"]:
     parser.add_argument("--config", "-c", type=str, default="")
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8090)
-    parser.add_argument("--ssl-key", type=str, default=None)
-    parser.add_argument("--ssl-cert", type=str, default=None)
-    parser.add_argument("--repos-path", type=str, default="./repos")
+    parser.add_argument("--ssl-key", type=str, default=None, help="The SSL key file path, if HTTPS is used")
+    parser.add_argument("--ssl-cert", type=str, default=None, help="The SSL cert file path, if HTTPS is used")
+    parser.add_argument("--repos-path", type=str, default="./repos", help="The folder to save cached repositories")
     parser.add_argument("--log-path", type=str, default="./logs", help="The folder to save logs")
     args = parser.parse_args()
     print(args)
@@ -282,7 +285,7 @@ if __name__ in ["__main__", "olah.server"]:
             host=args.host,
             port=args.port,
             log_level="info",
-            reload=True,
+            reload=False,
             ssl_keyfile=args.ssl_key,
             ssl_certfile=args.ssl_cert
         )

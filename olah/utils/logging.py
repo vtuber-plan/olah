@@ -1,3 +1,9 @@
+# coding=utf-8
+# Copyright 2024 XiaHan
+# 
+# Use of this source code is governed by an MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT.
 
 from asyncio import AbstractEventLoop
 import json
@@ -52,10 +58,10 @@ def build_logger(logger_name, logger_filename, logger_dir=DEFAULT_LOGGER_DIR) ->
     sl = StreamToLogger(stdout_logger, logging.INFO)
     sys.stdout = sl
 
-    # stderr_logger = logging.getLogger("stderr")
-    # stderr_logger.setLevel(logging.ERROR)
-    # sl = StreamToLogger(stderr_logger, logging.ERROR)
-    # sys.stderr = sl
+    stderr_logger = logging.getLogger("stderr")
+    stderr_logger.setLevel(logging.ERROR)
+    sl = StreamToLogger(stderr_logger, logging.ERROR)
+    sys.stderr = sl
 
     # Get logger
     logger = logging.getLogger(logger_name)

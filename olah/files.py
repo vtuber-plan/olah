@@ -1,7 +1,12 @@
+# coding=utf-8
+# Copyright 2024 XiaHan
+# 
+# Use of this source code is governed by an MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT.
+
 import json
 import os
-import shutil
-import tempfile
 from typing import Dict, Literal, Optional
 from fastapi import Request
 
@@ -296,7 +301,7 @@ async def _file_realtime_stream(
 
 async def file_get_generator(
     app,
-    repo_type: Literal["models", "datasets"],
+    repo_type: Literal["models", "datasets", "spaces"],
     org: str,
     repo: str,
     commit: str,
@@ -337,7 +342,7 @@ async def file_get_generator(
 
 async def cdn_file_get_generator(
     app,
-    repo_type: Literal["models", "datasets"],
+    repo_type: Literal["models", "datasets", "spaces"],
     org: str,
     repo: str,
     file_hash: str,
