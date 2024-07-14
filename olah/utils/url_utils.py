@@ -33,7 +33,7 @@ def parse_org_repo(org_repo: str) -> Tuple[Optional[str], Optional[str]]:
     return org, repo
 
 def get_meta_save_path(repos_path: str, repo_type: str, org: Optional[str], repo: str, commit: str) -> str:
-    return os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}")
+    return os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}/meta.json")
 
 def get_meta_save_dir(repos_path: str, repo_type: str, org: Optional[str], repo: str) -> str:
     return os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/revision")
@@ -108,12 +108,12 @@ async def check_commit_hf(app, repo_type: Optional[Literal["models", "datasets",
 async def check_proxy_rules_hf(app, repo_type: Optional[Literal["models", "datasets", "spaces"]], org: Optional[str], repo: str) -> bool:
     config: OlahConfig = app.app_settings.config
     org_repo = get_org_repo(org, repo)
-    return config.proxy.allow(f"{org_repo}")
+    return config.proxy.allow(org_repo)
 
 async def check_cache_rules_hf(app, repo_type: Optional[Literal["models", "datasets", "spaces"]], org: Optional[str], repo: str) -> bool:
     config: OlahConfig = app.app_settings.config
     org_repo = get_org_repo(org, repo)
-    return config.cache.allow(f"{org_repo}")
+    return config.cache.allow(org_repo)
 
 def get_url_tail(parsed_url: Union[str, ParseResult]) -> str:
     if isinstance(parsed_url, str):

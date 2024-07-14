@@ -12,6 +12,8 @@ mirror-netloc = "localhost:8090"
 mirror-lfs-netloc = "localhost:8090"
 
 [accessibility]
+offline = false
+
 [[accessibility.proxy]]
 repo = "cais/mmlu"
 allow = true

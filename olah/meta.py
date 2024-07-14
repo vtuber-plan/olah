@@ -28,6 +28,40 @@ async def meta_cache_generator(app: FastAPI, save_path: str):
                 break
             yield chunk
 
+async def meta_proxy_cache(
+    app: FastAPI,
+    repo_type: Literal["models", "datasets", "spaces"],
+    org: str,
+    repo: str,
+    commit: str,
+    request: Request,
+):
+    # save
+    repos_path = app.app_settings.repos_path
+    save_dir = os.path.join(
+        repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}"
+    )
+    save_path = os.path.join(save_dir, "meta.json")
+    make_dirs(save_path)
+
+    # url
+    org_repo = get_org_repo(org, repo)
+    meta_url = urljoin(
+        app.app_settings.config.hf_url_base(),
+        f"/api/{repo_type}/{org_repo}/revision/{commit}",
+    )
+    async with httpx.AsyncClient() as client:
+        response = await client.request(
+            method="GET",
+            url=meta_url,
+            timeout=WORKER_API_TIMEOUT,
+            follow_redirects=True,
+        )
+        if response.status_code == 200:
+            with open(save_path, "wb") as meta_file:
+                meta_file.write(response.content)
+        else:
+            raise Exception(f"Cannot get the branch info from the url {meta_url}, status: {response.status_code}")
 
 async def meta_proxy_generator(
     app: FastAPI,

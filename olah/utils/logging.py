@@ -72,7 +72,7 @@ def build_logger(logger_name, logger_filename, logger_dir=DEFAULT_LOGGER_DIR) ->
         os.makedirs(logger_dir, exist_ok=True)
         filename = os.path.join(logger_dir, logger_filename)
         handler = logging.handlers.TimedRotatingFileHandler(
-            filename, when="M", utc=True, encoding="utf-8"
+            filename, when="H", utc=True, encoding="utf-8"
         )
         handler.setFormatter(formatter)
         handler.namer = lambda name: name.replace(".log", "") + ".log"

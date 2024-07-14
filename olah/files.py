@@ -5,6 +5,7 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
+import hashlib
 import json
 import os
 from typing import Dict, Literal, Optional
@@ -27,35 +28,6 @@ from olah.utils.url_utils import RemoteInfo, check_cache_rules_hf, get_org_repo,
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 
-FILE_HEADER_TEMPLATE = {
-    "accept-ranges": "bytes",
-    "access-control-allow-origin": "*",
-    "cache-control": "public, max-age=604800, immutable, s-maxage=604800",
-    # "content-length": None,
-    # "content-type": "binary/octet-stream",
-    # "etag": None,
-    # "last-modified": None,
-}
-
-async def _get_redirected_url(client: httpx.AsyncClient, method: str, url: str, headers: Dict[str, str]):
-    async with client.stream(
-        method=method,
-        url=url,
-        headers=headers,
-        timeout=WORKER_API_TIMEOUT,
-    ) as response:
-        if response.status_code >= 300 and response.status_code <= 399:
-            from_url = urlparse(url)
-            parsed_url = urlparse(response.headers["location"])
-            if len(parsed_url.netloc) == 0:
-                redirect_loc = urljoin(f"{from_url.scheme}://{from_url.netloc}", response.headers["location"])
-            else:
-                redirect_loc = response.headers["location"]
-        else:
-            redirect_loc = url
-
-    return redirect_loc
-
 async def _file_full_header(
         app,
         save_path: str,
@@ -71,22 +43,27 @@ async def _file_full_header(
             response_headers = json.loads(f.read())
         response_headers_dict = {k.lower():v for k, v in response_headers.items()}
     else:
-        if "range" in headers:
-            headers.pop("range")
-        response = await client.request(
-            method=method,
-            url=url,
-            headers=headers,
-            timeout=WORKER_API_TIMEOUT,
-        )
-        response_headers_dict = {k.lower(): v for k, v in response.headers.items()}
-        if allow_cache and method.lower() == "head":
-            with open(head_path, "w", encoding="utf-8") as f:
-                f.write(json.dumps(response_headers_dict, ensure_ascii=False))
+        if not app.app_settings.config.offline:
+            if "range" in headers:
+                headers.pop("range")
+            response = await client.request(
+                method=method,
+                url=url,
+                headers=headers,
+                timeout=WORKER_API_TIMEOUT,
+            )
+            response_headers_dict = {k.lower(): v for k, v in response.headers.items()}
+            if allow_cache and method.lower() == "head" and response.status_code == 200:
+                with open(head_path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(response_headers_dict, ensure_ascii=False))
+        else:
+            response_headers_dict = {}
 
     new_headers = {}
-    new_headers["content-type"] = response_headers_dict["content-type"]
-    new_headers["content-length"] = response_headers_dict["content-length"]
+    if "content-type" in response_headers_dict:
+        new_headers["content-type"] = response_headers_dict["content-type"]
+    if "content-length" in response_headers_dict:
+        new_headers["content-length"] = response_headers_dict["content-length"]
     if HUGGINGFACE_HEADER_X_REPO_COMMIT.lower() in response_headers_dict:
         new_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = response_headers_dict.get(HUGGINGFACE_HEADER_X_REPO_COMMIT.lower(), "")
     if HUGGINGFACE_HEADER_X_LINKED_ETAG.lower() in response_headers_dict:
@@ -228,26 +205,28 @@ async def _file_realtime_stream(
         hf_url = urljoin(app.app_settings.config.hf_lfs_url_base(), get_url_tail(url))
     else:
         hf_url = url
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method="HEAD",
-            url=hf_url,
-            headers=request_headers,
-            timeout=WORKER_API_TIMEOUT,
-        )
-        
-        if response.status_code >= 300 and response.status_code <= 399:
-            from_url = urlparse(url)
-            parsed_url = urlparse(response.headers["location"])
-            new_headers = {k.lower():v for k, v in response.headers.items()}
-            if len(parsed_url.netloc) != 0:
-                new_loc = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(response.headers["location"]))
-                new_headers["location"] = new_loc
+    
+    if not app.app_settings.config.offline:
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method="HEAD",
+                url=hf_url,
+                headers=request_headers,
+                timeout=WORKER_API_TIMEOUT,
+            )
+            
+            if response.status_code >= 300 and response.status_code <= 399:
+                from_url = urlparse(url)
+                parsed_url = urlparse(response.headers["location"])
+                new_headers = {k.lower():v for k, v in response.headers.items()}
+                if len(parsed_url.netloc) != 0:
+                    new_loc = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(response.headers["location"]))
+                    new_headers["location"] = new_loc
 
-            yield response.status_code
-            yield new_headers
-            yield response.content
-            return
+                yield response.status_code
+                yield new_headers
+                yield response.content
+                return
         
     async with httpx.AsyncClient() as client:
         # redirect_loc = await _get_redirected_url(client, method, url, request_headers)
@@ -268,6 +247,13 @@ async def _file_realtime_stream(
             response_headers["content-length"] = str(end_pos - start_pos)
         if commit is not None:
             response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
+
+        if app.app_settings.config.offline and "etag" not in response_headers:
+            # Create fake headers when offline mode
+            sha256_hash = hashlib.sha256()
+            sha256_hash.update(hf_url.encode('utf-8'))
+            content_hash = sha256_hash.hexdigest()
+            response_headers["etag"] = f"\"{content_hash[:32]}-10\""
         yield 200
         yield response_headers
         if method.lower() == "get":

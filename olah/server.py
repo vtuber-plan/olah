@@ -16,7 +16,7 @@ from pydantic import BaseSettings
 from olah.configs import OlahConfig
 from olah.files import cdn_file_get_generator, file_get_generator
 from olah.lfs import lfs_get_generator, lfs_head_generator
-from olah.meta import meta_generator
+from olah.meta import meta_generator, meta_proxy_cache
 from olah.utils.url_utils import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf, parse_org_repo
 
 from olah.utils.logging import build_logger
@@ -52,7 +52,13 @@ async def meta_proxy_commit2(repo_type: str, org: str, repo: str, commit: str, r
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
-    generator = meta_generator(app, repo_type, org, repo, commit, request)
+    commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
+
+    # if branch name and online mode, refresh branch info
+    if commit_sha != commit and not app.app_settings.config.offline:
+        await meta_proxy_cache(app, repo_type, org, repo, commit, request)
+
+    generator = meta_generator(app, repo_type, org, repo, commit_sha, request)
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
@@ -66,7 +72,13 @@ async def meta_proxy_commit(repo_type: str, org_repo: str, commit: str, request:
         return Response(content="This repository is forbidden by the mirror. ", status_code=403)
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
-    generator = meta_generator(app, repo_type, org, repo, commit, request)
+    commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
+
+    # if branch name and online mode, refresh branch info
+    if commit_sha != commit and not app.app_settings.config.offline:
+        await meta_proxy_cache(app, repo_type, org, repo, commit, request)
+
+    generator = meta_generator(app, repo_type, org, repo, commit_sha, request)
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
