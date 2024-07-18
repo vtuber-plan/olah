@@ -5,6 +5,7 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
+from contextlib import asynccontextmanager
 import os
 import argparse
 import traceback
@@ -12,6 +13,7 @@ from typing import Annotated, Optional, Union
 from urllib.parse import urljoin
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, Response
+from fastapi_utils.tasks import repeat_every
 import httpx
 from pydantic import BaseSettings
 from olah.configs import OlahConfig
@@ -22,13 +24,58 @@ from olah.utils.url_utils import check_proxy_rules_hf, check_commit_hf, get_comm
 
 from olah.utils.logging import build_logger
 
-app = FastAPI(debug=False)
+# ======================
+# Utilities
+# ======================
+async def check_connection(url: str) -> bool:
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method="HEAD",
+                url=url,
+                timeout=10,
+            )
+        if response.status_code != 200:
+            return False
+        else:
+            return True
+    except httpx.TimeoutException:
+        return False
+
+
+@repeat_every(seconds=60)
+async def check_hf_connection() -> None:
+    if app.app_settings.config.offline:
+        return
+    hf_online_status = await check_connection(
+        "https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/.gitattributes"
+    )
+    if not hf_online_status:
+        logger.info(
+            "Cannot reach Huggingface Official Site. Trying to connect hf-mirror."
+        )
+        hf_mirror_online_status = await check_connection(
+            "https://hf-mirror.com/datasets/Salesforce/wikitext/resolve/main/.gitattributes"
+        )
+        if not hf_online_status and not hf_mirror_online_status:
+            logger.error("Failed to reach Huggingface Official Site.")
+            logger.error("Failed to reach hf-mirror Site.")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await check_hf_connection()
+    yield
+
+# ======================
+# Application
+# ======================
+app = FastAPI(lifespan=lifespan, debug=False)
 
 class AppSettings(BaseSettings):
     # The address of the model controller.
     config: OlahConfig = OlahConfig()
     repos_path: str = "./repos"
-
 
 # ======================
 # API Hooks
