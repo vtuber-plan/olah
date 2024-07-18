@@ -11,6 +11,7 @@ import logging
 import logging.handlers
 import os
 import platform
+import re
 import sys
 from typing import AsyncGenerator, Generator
 import warnings
@@ -29,11 +30,25 @@ moderation_msg = (
 
 handler = None
 
+# Define a custom formatter without color codes
+class NoColorFormatter(logging.Formatter):
+    color_pattern = re.compile(r'\x1b[^m]*m')  # Regex pattern to match color codes
+
+    def format(self, record):
+        message = super().format(record)
+        # Remove color codes from the log message
+        message = self.color_pattern.sub('', message)
+        return message
 
 def build_logger(logger_name, logger_filename, logger_dir=DEFAULT_LOGGER_DIR) -> logging.Logger:
     global handler
 
     formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    nocolor_formatter = NoColorFormatter(
         fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -74,7 +89,7 @@ def build_logger(logger_name, logger_filename, logger_dir=DEFAULT_LOGGER_DIR) ->
         handler = logging.handlers.TimedRotatingFileHandler(
             filename, when="H", utc=True, encoding="utf-8"
         )
-        handler.setFormatter(formatter)
+        handler.setFormatter(nocolor_formatter)
         handler.namer = lambda name: name.replace(".log", "") + ".log"
 
         for name, item in logging.root.manager.loggerDict.items():

@@ -176,16 +176,19 @@ async def _file_chunk_head(
     allow_cache: bool,
     file_size: int,
 ):
-    async with client.stream(
-        method=method,
-        url=url,
-        headers=headers,
-        timeout=WORKER_API_TIMEOUT,
-    ) as response:
-        async for raw_chunk in response.aiter_raw():
-            if not raw_chunk:
-                continue
-            yield raw_chunk
+    if not app.app_settings.config.offline:
+        async with client.stream(
+            method=method,
+            url=url,
+            headers=headers,
+            timeout=WORKER_API_TIMEOUT,
+        ) as response:
+            async for raw_chunk in response.aiter_raw():
+                if not raw_chunk:
+                    continue
+                yield raw_chunk
+    else:
+        yield b""
 
 
 async def _file_realtime_stream(
@@ -206,6 +209,7 @@ async def _file_realtime_stream(
     else:
         hf_url = url
     
+    # Handle Redirection
     if not app.app_settings.config.offline:
         async with httpx.AsyncClient() as client:
             response = await client.request(
@@ -222,10 +226,24 @@ async def _file_realtime_stream(
                 if len(parsed_url.netloc) != 0:
                     new_loc = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(response.headers["location"]))
                     new_headers["location"] = new_loc
+                
+                if allow_cache:
+                    with open(head_path, "w", encoding="utf-8") as f:
+                        f.write(json.dumps(new_headers, ensure_ascii=False))
 
                 yield response.status_code
                 yield new_headers
                 yield response.content
+                return
+    else:
+        if os.path.exists(head_path):
+            with open(head_path, "r", encoding="utf-8") as f:
+                head_content = json.loads(f.read())
+            
+            if "location" in head_content:
+                yield 302
+                yield head_content
+                yield b""
                 return
         
     async with httpx.AsyncClient() as client:

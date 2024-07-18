@@ -1,4 +1,9 @@
-# olah
+<h1 align="center">Olah</h1>
+
+
+<p align="center">
+<b>自托管的轻量级HuggingFace镜像服务</b>
+
 Olah是一种自托管的轻量级HuggingFace镜像服务。`Olah`来源于丘丘人语，在丘丘人语中意味着`你好`。
 Olah真正地实现了huggingface资源的`镜像`功能，而不仅仅是一个简单的`反向代理`。
 Olah并不会立刻对huggingface全站进行镜像，而是在用户下载的同时在文件块级别对资源进行镜像（或者我们可以说是缓存）。
@@ -105,6 +110,15 @@ python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
 ```
 
 **注意，不同版本之间的缓存数据不能迁移，请删除缓存文件夹后再进行olah的升级**
+
+## 更多配置
+
+更多配置可以通过配置文件进行控制，通过命令参数传入`configs.toml`以设置配置文件路径：
+```bash
+python -m olah.server -c configs.toml
+```
+
+完整的配置文件内容见[assets/full_configs.toml](https://github.com/vtuber-plan/olah/blob/main/assets/full_configs.toml)
 
 ## 许可证
 

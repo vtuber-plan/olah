@@ -73,11 +73,12 @@ async def get_newest_commit_hf(app, repo_type: Optional[Literal["models", "datas
 async def get_commit_hf_offline(app, repo_type: Optional[Literal["models", "datasets", "spaces"]], org: Optional[str], repo: str, commit: str) -> str:
     repos_path = app.app_settings.repos_path
     save_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
-
-    with open(save_path, "r", encoding="utf-8") as f:
-        obj = json.loads(f.read())
-
-    return obj["sha"]
+    if os.path.exists(save_path):
+        with open(save_path, "r", encoding="utf-8") as f:
+            obj = json.loads(f.read())
+        return obj["sha"]
+    else:
+        return None
 
 async def get_commit_hf(app, repo_type: Optional[Literal["models", "datasets", "spaces"]], org: Optional[str], repo: str, commit: str) -> str:
     org_repo = get_org_repo(org, repo)

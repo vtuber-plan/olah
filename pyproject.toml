@@ -13,8 +13,8 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 dependencies = [
-    "fastapi", "httpx", "numpy", "pydantic<=2.8.2", "requests", "toml",
-    "rich>=10.0.0", "shortuuid", "uvicorn", "tenacity>=8.2.2", "pytz"
+    "fastapi", "fastapi-utils", "httpx", "numpy", "pydantic<=2.8.2", "requests", "toml",
+    "rich>=10.0.0", "shortuuid", "uvicorn", "tenacity>=8.2.2", "pytz", "cachetools"
 ]
 
 [project.optional-dependencies]
