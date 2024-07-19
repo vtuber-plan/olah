@@ -18,7 +18,7 @@ import git
 import httpx
 from pydantic import BaseSettings
 from olah.configs import OlahConfig
-from olah.errors import error_repo_not_found
+from olah.errors import error_repo_not_found, error_page_not_found
 from olah.mirror.repos import LocalMirrorRepo
 from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
@@ -85,9 +85,7 @@ class AppSettings(BaseSettings):
 # ======================
 async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, request: Request) -> Response:
     if repo_type not in REPO_TYPES_MAPPING.keys():
-        return Response(
-            content="Invalid repository type. ", status_code=403
-        )
+        return error_page_not_found()
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return error_repo_not_found()
     # Check Mirror Path
@@ -129,7 +127,7 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
 async def meta_proxy(repo_type: str, org_repo: str, request: Request):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
-        return Response(content="This repository is not accessible.", status_code=404)
+        return error_repo_not_found()
     if not app.app_settings.config.offline:
         new_commit = await get_newest_commit_hf(app, repo_type, org, repo)
     else:
@@ -152,7 +150,7 @@ async def meta_proxy_commit2(
 async def meta_proxy_commit(repo_type: str, org_repo: str, commit: str, request: Request):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
-        return Response(content="This repository is not accessible.", status_code=404)
+        return error_repo_not_found()
 
     return await meta_proxy_common(
         repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
@@ -166,9 +164,7 @@ async def file_head_common(
     repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
 ) -> Response:
     if repo_type not in REPO_TYPES_MAPPING.keys():
-        return Response(
-            content="Invalid repository type. ", status_code=403
-        )
+        return error_page_not_found()
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return error_repo_not_found()
 
@@ -235,9 +231,7 @@ async def file_head2(
         repo_type: str = org_or_repo_type
         org, repo = parse_org_repo(repo_name)
         if org is None and repo is None:
-            return Response(
-                content="This repository is not accessible.", status_code=404
-            )
+            return error_repo_not_found()
     else:
         repo_type: str = "models"
         org, repo = org_or_repo_type, repo_name
@@ -257,7 +251,7 @@ async def file_head(org_repo: str, commit: str, file_path: str, request: Request
     repo_type: str = "models"
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
-        return Response(content="This repository is not accessible.", status_code=404)
+        return error_repo_not_found()
     return await file_head_common(
         repo_type=repo_type,
         org=org,
@@ -273,10 +267,10 @@ async def file_head(org_repo: str, commit: str, file_path: str, request: Request
 async def cdn_file_head(org_repo: str, hash_file: str, request: Request, repo_type: str = "models"):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
-        return Response(content="This repository is not accessible.", status_code=404)
+        return error_repo_not_found()
 
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+        return error_repo_not_found()
 
     try:
         generator = await cdn_file_get_generator(app, repo_type, org, repo, hash_file, method="HEAD", request=request)
@@ -294,9 +288,7 @@ async def file_get_common(
     repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
 ) -> Response:
     if repo_type not in REPO_TYPES_MAPPING.keys():
-        return Response(
-            content="Invalid repository type. ", status_code=403
-        )
+        return error_page_not_found()
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return error_repo_not_found()
     # Check Mirror Path
@@ -353,7 +345,7 @@ async def file_get2(org_or_repo_type: str, repo_name: str, commit: str, file_pat
         repo_type: str = org_or_repo_type
         org, repo = parse_org_repo(repo_name)
         if org is None and repo is None:
-            return Response(content="This repository is not accessible.", status_code=404)
+            return error_repo_not_found()
     else:
         repo_type: str = "models"
         org, repo = org_or_repo_type, repo_name
@@ -372,7 +364,7 @@ async def file_get(org_repo: str, commit: str, file_path: str, request: Request)
     repo_type: str = "models"
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
-        return Response(content="This repository is not accessible.", status_code=404)
+        return error_repo_not_found()
 
     return await file_get_common(
         repo_type=repo_type,
@@ -388,10 +380,10 @@ async def file_get(org_repo: str, commit: str, file_path: str, request: Request)
 async def cdn_file_get(org_repo: str, hash_file: str, request: Request, repo_type: str = "models"):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
-        return Response(content="This repository is not accessible.", status_code=404)
+        return error_repo_not_found()
 
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+        return error_repo_not_found()
     try:
         generator = await cdn_file_get_generator(app, repo_type, org, repo, hash_file, method="GET", request=request)
         status_code = await generator.__anext__()

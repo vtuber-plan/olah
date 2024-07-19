@@ -111,6 +111,78 @@ python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
 
 **Note that the cached data between different versions cannot be migrated. Please delete the cache folder before upgrading to the latest version of Olah.**
 
+## More Configurations
+
+Additional configurations can be controlled through a configuration file by passing the `configs.toml` file as a command parameter:
+```bash
+python -m olah.server -c configs.toml
+```
+
+The complete content of the configuration file can be found at [assets/full_configs.toml](https://github.com/vtuber-plan/olah/blob/main/assets/full_configs.toml).
+
+### Configuration Details
+The first section, `basic`, is used to set up basic configurations for the mirror site:
+```toml
+[basic]
+host = "localhost"
+port = 8090
+ssl-key = ""
+ssl-cert = ""
+repos-path = "./repos"
+hf-scheme = "https"
+hf-netloc = "huggingface.co"
+hf-lfs-netloc = "cdn-lfs.huggingface.co"
+mirror-scheme = "http"
+mirror-netloc = "localhost:8090"
+mirror-lfs-netloc = "localhost:8090"
+mirrors-path = ["./mirrors_dir"]
+```
+- `host`: Sets the host address that Olah listens to.
+- `port`: Sets the port that Olah listens to.
+- `ssl-key` and `ssl-cert`: When enabling HTTPS, specify the file paths for the key and certificate.
+- `repos-path`: Specifies the directory for storing cached data.
+- `hf-scheme`: Network protocol for the Hugging Face official site (usually no need to modify).
+- `hf-netloc`: Network location of the Hugging Face official site (usually no need to modify).
+- `hf-lfs-netloc`: Network location for Hugging Face official site's LFS files (usually no need to modify).
+- `mirror-scheme`: Network protocol for the Olah mirror site (should match the above settings; change to HTTPS if providing `ssl-key` and `ssl-cert`).
+- `mirror-netloc`: Network location of the Olah mirror site (should match `host` and `port` settings).
+- `mirror-lfs-netloc`: Network location for Olah mirror site's LFS (should match `host` and `port` settings).
+- `mirrors-path`: Additional mirror file directories. If you have already cloned some Git repositories, you can place them in this directory for downloading. In this example, the directory is `./mirrors_dir`. To add a dataset like `Salesforce/wikitext`, you can place the Git repository in the directory `./mirrors_dir/datasets/Salesforce/wikitext`. Similarly, models can be placed under `./mirrors_dir/models/organization/repository`.
+
+The second section allows for accessibility restrictions:
+```toml
+[accessibility]
+offline = false
+
+[[accessibility.proxy]]
+repo = "cais/mmlu"
+allow = true
+
+[[accessibility.proxy]]
+repo = "adept/fuyu-8b"
+allow = false
+
+[[accessibility.proxy]]
+repo = "mistralai/*"
+allow = true
+
+[[accessibility.proxy]]
+repo = "mistralai/Mistral.*"
+allow = false
+use_re = true
+
+[[accessibility.cache]]
+repo = "cais/mmlu"
+allow = true
+
+[[accessibility.cache]]
+repo = "adept/fuyu-8b"
+allow = false
+```
+- `offline`: Sets whether the Olah mirror site enters offline mode, no longer making requests to the Hugging Face official site for data updates. However, cached repositories can still be downloaded.
+- `proxy`: Determines if the repository can be accessed through a proxy. By default, all repositories are allowed. The `repo` field is used to match the repository name. Regular expressions and wildcards can be used by setting `use_re` to control whether to use regular expressions (default is to use wildcards). The `allow` field controls whether the repository is allowed to be proxied.
+- `cache`: Determines if the repository will be cached. By default, all repositories are allowed. The `repo` field is used to match the repository name. Regular expressions and wildcards can be used by setting `use_re` to control whether to use regular expressions (default is to use wildcards). The `allow` field controls whether the repository is allowed to be cached.
+
 ## Future Work
 
 * Authentication
