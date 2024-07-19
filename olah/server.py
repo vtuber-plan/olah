@@ -12,16 +12,19 @@ import traceback
 from typing import Annotated, Optional, Union
 from urllib.parse import urljoin
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, Response, JSONResponse
 from fastapi_utils.tasks import repeat_every
+import git
 import httpx
 from pydantic import BaseSettings
 from olah.configs import OlahConfig
-from olah.files import cdn_file_get_generator, file_get_generator
-from olah.lfs import lfs_get_generator, lfs_head_generator
-from olah.meta import meta_generator, meta_proxy_cache
+from olah.errors import error_repo_not_found
+from olah.mirror.repos import LocalMirrorRepo
+from olah.proxy.files import cdn_file_get_generator, file_get_generator
+from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
+from olah.proxy.meta import meta_generator, meta_proxy_cache
 from olah.utils.url_utils import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf, parse_org_repo
-
+from olah.constants import REPO_TYPES_MAPPING
 from olah.utils.logging import build_logger
 
 # ======================
@@ -81,25 +84,37 @@ class AppSettings(BaseSettings):
 # API Hooks
 # ======================
 async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, request: Request) -> Response:
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+    if repo_type not in REPO_TYPES_MAPPING.keys():
         return Response(
-            content="This repository is forbidden by the mirror. ", status_code=403
+            content="Invalid repository type. ", status_code=403
         )
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+        return error_repo_not_found()
+    # Check Mirror Path
+    for mirror_path in app.app_settings.config.mirrors_path:
+        try:
+            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            if os.path.exists(git_path):
+                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
+                meta_data = local_repo.get_meta(commit)
+                if meta_data is None:
+                    continue
+                return JSONResponse(content=meta_data)
+        except git.exc.InvalidGitRepositoryError:
+            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
+            continue
+
+    # Proxy the HF File Meta
     try:
         if not app.app_settings.config.offline and not await check_commit_hf(
             app, repo_type, org, repo, commit
         ):
-            return Response(
-                content="This repository is not accessible. ", status_code=404
-            )
+            return error_repo_not_found()
         commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
         if commit_sha is None:
-            return Response(
-                content="This repository is not accessible. ", status_code=404
-            )
-
+            return error_repo_not_found()
         # if branch name and online mode, refresh branch info
-        if commit_sha != commit and not app.app_settings.config.offline:
+        if not app.app_settings.config.offline and commit_sha != commit:
             await meta_proxy_cache(app, repo_type, org, repo, commit, request)
 
         generator = meta_generator(app, repo_type, org, repo, commit_sha, request)
@@ -150,22 +165,36 @@ async def meta_proxy_commit(repo_type: str, org_repo: str, commit: str, request:
 async def file_head_common(
     repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
 ) -> Response:
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+    if repo_type not in REPO_TYPES_MAPPING.keys():
         return Response(
-            content="This repository is forbidden by the mirror. ", status_code=403
+            content="Invalid repository type. ", status_code=403
         )
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+        return error_repo_not_found()
+
+    # Check Mirror Path
+    for mirror_path in app.app_settings.config.mirrors_path:
+        try:
+            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            if os.path.exists(git_path):
+                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
+                head = local_repo.get_file_head(commit_hash=commit, path=file_path)
+                if head is None:
+                    continue
+                return Response(headers=head)
+        except git.exc.InvalidGitRepositoryError:
+            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
+            continue
+    
+    # Proxy the HF File Head
     try:
         if not app.app_settings.config.offline and not await check_commit_hf(
             app, repo_type, org, repo, commit
         ):
-            return Response(
-                content="This repository is not accessible. ", status_code=404
-            )
+            return error_repo_not_found()
         commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
         if commit_sha is None:
-            return Response(
-                content="This repository is not accessible. ", status_code=404
-            )
+            return error_repo_not_found()
         generator = await file_get_generator(
             app,
             repo_type,
@@ -264,20 +293,31 @@ async def cdn_file_head(org_repo: str, hash_file: str, request: Request, repo_ty
 async def file_get_common(
     repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
 ) -> Response:
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+    if repo_type not in REPO_TYPES_MAPPING.keys():
         return Response(
-            content="This repository is forbidden by the mirror. ", status_code=403
+            content="Invalid repository type. ", status_code=403
         )
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+        return error_repo_not_found()
+    # Check Mirror Path
+    for mirror_path in app.app_settings.config.mirrors_path:
+        try:
+            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            if os.path.exists(git_path):
+                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
+                content_stream = local_repo.get_file(commit_hash=commit, path=file_path)
+                if content_stream is None:
+                    continue
+                return StreamingResponse(content_stream)
+        except git.exc.InvalidGitRepositoryError:
+            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
+            continue
     try:
         if not app.app_settings.config.offline and not await check_commit_hf(app, repo_type, org, repo, commit):
-            return Response(
-                content="This repository is not accessible. ", status_code=404
-            )
+            return error_repo_not_found()
         commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
         if commit_sha is None:
-            return Response(
-                content="This repository is not accessible. ", status_code=404
-            )
+            return error_repo_not_found()
         generator = await file_get_generator(
             app,
             repo_type,

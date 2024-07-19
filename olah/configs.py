@@ -92,6 +92,8 @@ class OlahConfig(object):
         self.mirror_netloc: str = "localhost:8090"
         self.mirror_lfs_netloc: str = "localhost:8090"
 
+        self.mirrors_path: List[str] = []
+
         # accessibility
         self.offline = False
         self.proxy = OlahRuleList.from_list(DEFAULT_PROXY_RULES)
@@ -138,6 +140,8 @@ class OlahConfig(object):
             self.mirror_lfs_netloc = basic.get(
                 "mirror-lfs-netloc", self.mirror_lfs_netloc
             )
+
+            self.mirrors_path = basic.get("mirrors-path", self.mirrors_path)
 
         if "accessibility" in config:
             accessibility = config["accessibility"]

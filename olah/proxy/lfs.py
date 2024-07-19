@@ -9,7 +9,7 @@ import os
 from typing import Literal
 from fastapi import FastAPI, Header, Request
 
-from olah.files import _file_realtime_stream
+from olah.proxy.files import _file_realtime_stream
 from olah.utils.file_utils import make_dirs
 from olah.utils.url_utils import check_cache_rules_hf, get_org_repo
 

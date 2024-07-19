@@ -14,7 +14,8 @@ classifiers = [
 ]
 dependencies = [
     "fastapi", "fastapi-utils", "httpx", "numpy", "pydantic<=2.8.2", "requests", "toml",
-    "rich>=10.0.0", "shortuuid", "uvicorn", "tenacity>=8.2.2", "pytz", "cachetools"
+    "rich>=10.0.0", "shortuuid", "uvicorn", "tenacity>=8.2.2", "pytz", "cachetools", "GitPython",
+    "PyYAML"
 ]
 
 [project.optional-dependencies]

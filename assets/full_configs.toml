@@ -10,6 +10,7 @@ hf-lfs-netloc = "cdn-lfs.huggingface.co"
 mirror-scheme = "http"
 mirror-netloc = "localhost:8090"
 mirror-lfs-netloc = "localhost:8090"
+mirrors-path = ["./mirrors_dir"]
 
 [accessibility]
 offline = false

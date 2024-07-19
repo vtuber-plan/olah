@@ -28,6 +28,22 @@ from olah.utils.url_utils import RemoteInfo, check_cache_rules_hf, get_org_repo,
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 
+async def _write_cache_request(head_path: str, status_code: int, headers: Dict[str, str], content: bytes):
+    rq = {
+        "status_code": status_code,
+        "headers": headers,
+        "content": content.hex(),
+    }
+    with open(head_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(rq, ensure_ascii=False))
+
+async def _read_cache_request(head_path: str):
+    with open(head_path, "r", encoding="utf-8") as f:
+        rq = json.loads(f.read())
+    
+    rq["content"] = bytes.fromhex(rq["content"])
+    return rq
+
 async def _file_full_header(
         app,
         save_path: str,
@@ -38,12 +54,18 @@ async def _file_full_header(
         headers: Dict[str, str],
         allow_cache: bool,
     ) -> Tuple[int, Dict[str, str], bytes]:
-    if os.path.exists(head_path):
-        with open(head_path, "r", encoding="utf-8") as f:
-            response_headers = json.loads(f.read())
-        response_headers_dict = {k.lower():v for k, v in response_headers.items()}
-    else:
-        if not app.app_settings.config.offline:
+    assert method.lower() == "head"
+    if not app.app_settings.config.offline:
+        if os.path.exists(head_path):
+            cache_rq = await _read_cache_request(head_path)
+            response_headers_dict = {k.lower():v for k, v in cache_rq["headers"].items()}
+            if "location" in response_headers_dict:
+                parsed_url = urlparse(response_headers_dict["location"])
+                if len(parsed_url.netloc) != 0:
+                    new_loc = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(response_headers_dict["location"]))
+                    response_headers_dict["location"] = new_loc
+            return cache_rq["status_code"], response_headers_dict, cache_rq["content"]
+        else:
             if "range" in headers:
                 headers.pop("range")
             response = await client.request(
@@ -55,11 +77,9 @@ async def _file_full_header(
             response_headers_dict = {k.lower(): v for k, v in response.headers.items()}
             if allow_cache and method.lower() == "head":
                 if response.status_code == 200:
-                    with open(head_path, "w", encoding="utf-8") as f:
-                        f.write(json.dumps(response_headers_dict, ensure_ascii=False))
+                    await _write_cache_request(head_path, response.status_code, response_headers_dict, response.content)
                 elif response.status_code >= 300 and response.status_code <= 399:
-                    with open(head_path, "w", encoding="utf-8") as f:
-                        f.write(json.dumps(response_headers_dict, ensure_ascii=False))
+                    await _write_cache_request(head_path, response.status_code, response_headers_dict, response.content)
                     from_url = urlparse(url)
                     parsed_url = urlparse(response.headers["location"])
                     if len(parsed_url.netloc) != 0:
@@ -68,25 +88,34 @@ async def _file_full_header(
                 else:
                     raise Exception(f"Unexpected HTTP status code {response.status_code}")
             return response.status_code, response_headers_dict, response.content
+    else:
+        if os.path.exists(head_path):
+            cache_rq = await _read_cache_request(head_path)
+            response_headers_dict = {k.lower():v for k, v in cache_rq["headers"].items()}
         else:
             response_headers_dict = {}
+            cache_rq = {
+                "status_code": 200,
+                "headers": response_headers_dict,
+                "content": b"",
+            }
 
-    new_headers = {}
-    if "content-type" in response_headers_dict:
-        new_headers["content-type"] = response_headers_dict["content-type"]
-    if "content-length" in response_headers_dict:
-        new_headers["content-length"] = response_headers_dict["content-length"]
-    if HUGGINGFACE_HEADER_X_REPO_COMMIT.lower() in response_headers_dict:
-        new_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = response_headers_dict.get(HUGGINGFACE_HEADER_X_REPO_COMMIT.lower(), "")
-    if HUGGINGFACE_HEADER_X_LINKED_ETAG.lower() in response_headers_dict:
-        new_headers[HUGGINGFACE_HEADER_X_LINKED_ETAG.lower()] = response_headers_dict.get(HUGGINGFACE_HEADER_X_LINKED_ETAG.lower(), "")
-    if HUGGINGFACE_HEADER_X_LINKED_SIZE.lower() in response_headers_dict:
-        new_headers[HUGGINGFACE_HEADER_X_LINKED_SIZE.lower()] = response_headers_dict.get(HUGGINGFACE_HEADER_X_LINKED_SIZE.lower(), "")
-    if "etag" in response_headers_dict:
-        new_headers["etag"] = response_headers_dict["etag"]
-    if "location" in response_headers_dict:
-        new_headers["location"] = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(response_headers_dict["location"]))
-    return 200, new_headers, b""
+        new_headers = {}
+        if "content-type" in response_headers_dict:
+            new_headers["content-type"] = response_headers_dict["content-type"]
+        if "content-length" in response_headers_dict:
+            new_headers["content-length"] = response_headers_dict["content-length"]
+        if HUGGINGFACE_HEADER_X_REPO_COMMIT.lower() in response_headers_dict:
+            new_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = response_headers_dict.get(HUGGINGFACE_HEADER_X_REPO_COMMIT.lower(), "")
+        if HUGGINGFACE_HEADER_X_LINKED_ETAG.lower() in response_headers_dict:
+            new_headers[HUGGINGFACE_HEADER_X_LINKED_ETAG.lower()] = response_headers_dict.get(HUGGINGFACE_HEADER_X_LINKED_ETAG.lower(), "")
+        if HUGGINGFACE_HEADER_X_LINKED_SIZE.lower() in response_headers_dict:
+            new_headers[HUGGINGFACE_HEADER_X_LINKED_SIZE.lower()] = response_headers_dict.get(HUGGINGFACE_HEADER_X_LINKED_SIZE.lower(), "")
+        if "etag" in response_headers_dict:
+            new_headers["etag"] = response_headers_dict["etag"]
+        if "location" in response_headers_dict:
+            new_headers["location"] = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(response_headers_dict["location"]))
+        return cache_rq["status_code"], new_headers, cache_rq["content"]
 
 async def _get_file_block_from_cache(cache_file: OlahCache, block_index: int):
     raw_block = cache_file.read_block(block_index)
@@ -240,6 +269,7 @@ async def _file_realtime_stream(
             yield head_info
             yield content
             return
+
         file_size = int(head_info["content-length"])
         response_headers = {k: v for k,v in head_info.items()}
         if "range" in request_headers:
