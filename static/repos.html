@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <link rel="stylesheet" type="text/css"
+        href="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.5.0/semantic.min.css">
+    <style>
+        .ui.container {
+            margin-top: 20px;
+        }
+
+        .ui.card {
+            margin-bottom: 20px;
+        }
+
+        .ui.header {
+            margin-top: 10px;
+        }
+
+        .ui.segment {
+            margin-bottom: 30px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="ui container">
+        <h1 class="ui header">Huggingface Mirror Repositories</h1>
+
+        <div class="ui segment">
+            <h2 class="ui header">Data Sets</h2>
+            <div class="ui divided items">
+                {% for dataset_repo in datasets_repos %}
+                <div class="item">
+                    <div class="content">
+                        <div class="header">{{ dataset_repo }}</div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="ui segment">
+            <h2 class="ui header">Models</h2>
+            <div class="ui divided items">
+                {% for model_repo in models_repos %}
+                <div class="item">
+                    <div class="content">
+                        <div class="header">{{ model_repo }}</div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="ui segment">
+            <h2 class="ui header">Spaces</h2>
+            <div class="ui divided items">
+                {% for space_repo in spaces_repos %}
+                <div class="item">
+                    <div class="content">
+                        <div class="header">{{ space_repo }}</div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    <script src="https://code.jquery.com/jquery-3.1.1.min.js"
+        integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8=" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.5.0/semantic.min.js"></script>
+</body>
+
+</html>

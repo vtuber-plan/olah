@@ -7,13 +7,16 @@
 
 from contextlib import asynccontextmanager
 import os
+import glob
 import argparse
 import traceback
 from typing import Annotated, Optional, Union
 from urllib.parse import urljoin
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, Response, JSONResponse
+from fastapi.templating import Jinja2Templates
 from fastapi_utils.tasks import repeat_every
+
 import git
 import httpx
 from pydantic import BaseSettings
@@ -23,7 +26,7 @@ from olah.mirror.repos import LocalMirrorRepo
 from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
 from olah.proxy.meta import meta_generator, meta_proxy_cache
-from olah.utils.url_utils import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf, parse_org_repo
+from olah.utils.url_utils import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf, get_org_repo, parse_org_repo
 from olah.constants import REPO_TYPES_MAPPING
 from olah.utils.logging import build_logger
 
@@ -74,6 +77,7 @@ async def lifespan(app: FastAPI):
 # Application
 # ======================
 app = FastAPI(lifespan=lifespan, debug=False)
+templates = Jinja2Templates(directory="static")
 
 class AppSettings(BaseSettings):
     # The address of the model controller.
@@ -227,7 +231,7 @@ async def file_head3(
 async def file_head2(
     org_or_repo_type: str, repo_name: str, commit: str, file_path: str, request: Request
 ):
-    if org_or_repo_type in ["models", "datasets", "spaces"]:
+    if org_or_repo_type in REPO_TYPES_MAPPING.keys():
         repo_type: str = org_or_repo_type
         org, repo = parse_org_repo(repo_name)
         if org is None and repo is None:
@@ -341,7 +345,7 @@ async def file_get3(org: str, repo: str, commit: str, file_path: str, request: R
 
 @app.get("/{org_or_repo_type}/{repo_name}/resolve/{commit}/{file_path:path}")
 async def file_get2(org_or_repo_type: str, repo_name: str, commit: str, file_path: str, request: Request):
-    if org_or_repo_type in ["models", "datasets", "spaces"]:
+    if org_or_repo_type in REPO_TYPES_MAPPING.keys():
         repo_type: str = org_or_repo_type
         org, repo = parse_org_repo(repo_name)
         if org is None and repo is None:
@@ -415,14 +419,39 @@ async def lfs_get(dir1: str, dir2: str, hash_repo: str, hash_file: str, request:
     except httpx.ConnectTimeout:
         return Response(status_code=504)
 
+
 # ======================
 # Web Page Hooks
 # ======================
 @app.get("/", response_class=HTMLResponse)
-async def index():
-    with open(os.path.join(os.path.dirname(__file__), "../static/index.html"), "r", encoding="utf-8") as f:
-        page = f.read()
-    return page
+async def index(request: Request):
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "scheme": app.app_settings.config.mirror_scheme,
+            "netloc": app.app_settings.config.mirror_netloc,
+        },
+    )
+
+@app.get("/repos", response_class=HTMLResponse)
+async def repos(request: Request):
+    datasets_repos = glob.glob(os.path.join(app.app_settings.config.repos_path, "api/datasets/*/*"))
+    models_repos = glob.glob(os.path.join(app.app_settings.config.repos_path, "api/models/*/*"))
+    spaces_repos = glob.glob(os.path.join(app.app_settings.config.repos_path, "api/spaces/*/*"))
+    datasets_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in datasets_repos]
+    models_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in models_repos]
+    spaces_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in spaces_repos]
+
+    return templates.TemplateResponse(
+        "repos.html",
+        {
+            "request": request,
+            "datasets_repos": datasets_repos,
+            "models_repos": models_repos,
+            "spaces_repos": spaces_repos,
+        },
+    )
 
 if __name__ in ["__main__", "olah.server"]:
     parser = argparse.ArgumentParser(
