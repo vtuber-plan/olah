@@ -11,6 +11,8 @@ LFS_FILE_BLOCK = 64 * 1024 * 1024
 
 DEFAULT_LOGGER_DIR = "./logs"
 
+ORIGINAL_LOC = "oriloc"
+
 from huggingface_hub.constants import (
     REPO_TYPES_MAPPING,
     HUGGINGFACE_CO_URL_TEMPLATE,

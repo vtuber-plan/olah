@@ -15,7 +15,8 @@ from fastapi import FastAPI, Request
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-from olah.utils.url_utils import check_cache_rules_hf, get_org_repo
+from olah.utils.rule_utils import check_cache_rules_hf
+from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
 
@@ -50,10 +51,14 @@ async def meta_proxy_cache(
         app.app_settings.config.hf_url_base(),
         f"/api/{repo_type}/{org_repo}/revision/{commit}",
     )
+    headers = {}
+    if "authorization" in request.headers:
+        headers["authorization"] = request.headers["authorization"]
     async with httpx.AsyncClient() as client:
         response = await client.request(
             method="GET",
             url=meta_url,
+            headers=headers,
             timeout=WORKER_API_TIMEOUT,
             follow_redirects=True,
         )

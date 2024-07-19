@@ -1,6 +1,6 @@
 # coding=utf-8
 # Copyright 2024 XiaHan
-# 
+#
 # Use of this source code is governed by an MIT-style
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
@@ -22,13 +22,39 @@ from olah.constants import (
     HUGGINGFACE_HEADER_X_REPO_COMMIT,
     HUGGINGFACE_HEADER_X_LINKED_ETAG,
     HUGGINGFACE_HEADER_X_LINKED_SIZE,
+    ORIGINAL_LOC,
 )
 from olah.utils.olah_cache import OlahCache
-from olah.utils.url_utils import RemoteInfo, check_cache_rules_hf, get_org_repo, get_url_tail, parse_range_params
+from olah.utils.url_utils import (
+    RemoteInfo,
+    add_query_param,
+    check_url_has_param_name,
+    get_url_param_name,
+    get_url_tail,
+    parse_range_params,
+    remove_query_param,
+)
+from olah.utils.repo_utils import get_org_repo
+from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 
-async def _write_cache_request(head_path: str, status_code: int, headers: Dict[str, str], content: bytes):
+
+async def _write_cache_request(
+    head_path: str, status_code: int, headers: Dict[str, str], content: bytes
+)-> None:
+    """
+    Write the request's status code, headers, and content to a cache file.
+
+    Args:
+        head_path (str): The path to the cache file.
+        status_code (int): The status code of the request.
+        headers (Dict[str, str]): The dictionary of response headers.
+        content (bytes): The content of the request.
+
+    Returns:
+        None
+    """
     rq = {
         "status_code": status_code,
         "headers": headers,
@@ -37,12 +63,23 @@ async def _write_cache_request(head_path: str, status_code: int, headers: Dict[s
     with open(head_path, "w", encoding="utf-8") as f:
         f.write(json.dumps(rq, ensure_ascii=False))
 
-async def _read_cache_request(head_path: str):
+
+async def _read_cache_request(head_path: str) -> Dict[str, str]:
+    """
+    Read the request's status code, headers, and content from a cache file.
+
+    Args:
+        head_path (str): The path to the cache file.
+
+    Returns:
+        Dict[str, str]: A dictionary containing the status code, headers, and content of the request.
+    """
     with open(head_path, "r", encoding="utf-8") as f:
         rq = json.loads(f.read())
-    
+
     rq["content"] = bytes.fromhex(rq["content"])
     return rq
+
 
 async def _file_full_header(
         app,
@@ -85,6 +122,13 @@ async def _file_full_header(
                     if len(parsed_url.netloc) != 0:
                         new_loc = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(response.headers["location"]))
                         response_headers_dict["location"] = new_loc
+                    # Redirect, add original location info
+                    if check_url_has_param_name(response_headers_dict["location"], ORIGINAL_LOC):
+                        raise Exception(f"Invalid field {ORIGINAL_LOC} in the url.")
+                    else:
+                        response_headers_dict["location"] = add_query_param(response_headers_dict["location"], ORIGINAL_LOC, response.headers["location"])
+                elif response.status_code == 403:
+                    pass
                 else:
                     raise Exception(f"Unexpected HTTP status code {response.status_code}")
             return response.status_code, response_headers_dict, response.content
@@ -244,13 +288,26 @@ async def _file_realtime_stream(
     allow_cache=True,
     commit: Optional[str] = None,
 ):
-    request_headers = {k: v for k, v in request.headers.items()}
-    request_headers.pop("host")
-
-    if urlparse(url).netloc == app.app_settings.config.mirror_netloc:
-        hf_url = urljoin(app.app_settings.config.hf_lfs_url_base(), get_url_tail(url))
+    if check_url_has_param_name(url, ORIGINAL_LOC):
+        clean_url = remove_query_param(url, ORIGINAL_LOC)
+        original_loc = get_url_param_name(url, ORIGINAL_LOC)
+        if urlparse(url).netloc in [app.app_settings.config.mirror_netloc, app.app_settings.config.mirror_lfs_netloc]:
+            hf_loc = urlparse(original_loc)
+            if len(hf_loc.netloc) != 0:
+                hf_url = urljoin(f"{hf_loc.scheme}://{hf_loc.netloc}", get_url_tail(clean_url))
+            else:
+                hf_url = url
+        else:
+            hf_url = url
     else:
-        hf_url = url
+        if urlparse(url).netloc in [app.app_settings.config.mirror_netloc, app.app_settings.config.mirror_lfs_netloc]:
+            hf_url = urljoin(app.app_settings.config.hf_lfs_url_base(), get_url_tail(url))
+        else:
+            hf_url = url
+
+    request_headers = {k: v for k, v in request.headers.items()}
+    if "host" in request_headers:
+        request_headers["host"] = urlparse(hf_url).netloc
 
     async with httpx.AsyncClient() as client:
         # redirect_loc = await _get_redirected_url(client, method, url, request_headers)
@@ -270,6 +327,7 @@ async def _file_realtime_stream(
             yield content
             return
 
+    async with httpx.AsyncClient() as client:
         file_size = int(head_info["content-length"])
         response_headers = {k: v for k,v in head_info.items()}
         if "range" in request_headers:

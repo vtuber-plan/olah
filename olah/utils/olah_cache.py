@@ -1,6 +1,6 @@
 # coding=utf-8
 # Copyright 2024 XiaHan
-# 
+#
 # Use of this source code is governed by an MIT-style
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
@@ -34,11 +34,11 @@ class OlahCacheHeader(object):
 
         self._block_mask_size = DEFAULT_BLOCK_MASK_MAX
         self._block_mask = Bitset(DEFAULT_BLOCK_MASK_MAX)
-    
+
     @property
     def version(self) -> int:
         return self._version
-    
+
     @property
     def block_size(self) -> int:
         return self._block_size
@@ -46,7 +46,7 @@ class OlahCacheHeader(object):
     @property
     def file_size(self) -> int:
         return self._file_size
-    
+
     @property
     def block_number(self) -> int:
         return self._block_number
@@ -67,7 +67,7 @@ class OlahCacheHeader(object):
             raise Exception(
                 f"This Olah Cache file is created by older version Olah. Please remove cache files and retry."
             )
-        
+
         if self._version > CURRENT_OLAH_CACHE_VERSION:
             raise Exception(
                 f"This Olah Cache file is created by newer version Olah. Please remove cache files and retry."
@@ -104,12 +104,13 @@ class OlahCacheHeader(object):
         btyes_out = btyes_header + self._block_mask.bits
         stream.write(btyes_out)
 
+
 class OlahCache(object):
     def __init__(self, path: str, block_size: int = DEFAULT_BLOCK_SIZE) -> None:
         self.path: Optional[str] = path
         self.header: Optional[OlahCacheHeader] = None
         self.is_open: bool = False
-        
+
         # Lock
         self._header_lock = threading.Lock()
 
@@ -118,7 +119,6 @@ class OlahCache(object):
         self._prefech_blocks: int = 16
 
         self.open(path, block_size=block_size)
-        
 
     @staticmethod
     def create(path: str, block_size: int = DEFAULT_BLOCK_SIZE):
@@ -155,7 +155,7 @@ class OlahCache(object):
         self.header = None
 
         self._blocks_read_cache.clear()
-        
+
         self.is_open = False
 
     def _flush_header(self):
@@ -173,23 +173,23 @@ class OlahCache(object):
         with self._header_lock:
             block_number = self.header.block_number
         return block_number
-    
+
     def _get_block_size(self) -> int:
         with self._header_lock:
             block_size = self.header.block_size
         return block_size
-    
+
     def _get_header_size(self) -> int:
         with self._header_lock:
             header_size = self.header.get_header_size()
         return header_size
-    
+
     def _resize_header(self, block_num: int, file_size: int):
         with self._header_lock:
             self.header._block_number = block_num
             self.header._file_size = file_size
             self.header._valid_header()
-    
+
     def _set_header_block(self, block_index: int):
         with self._header_lock:
             self.header.block_mask.set(block_index)
@@ -198,7 +198,7 @@ class OlahCache(object):
         with self._header_lock:
             result = self.header.block_mask.test(block_index)
         return result
-    
+
     def _pad_block(self, raw_block: bytes):
         if len(raw_block) < self._get_block_size():
             block = raw_block + b"\x00" * (self._get_block_size() - len(raw_block))
@@ -210,7 +210,7 @@ class OlahCache(object):
         if not self.is_open:
             raise Exception("This file has been close.")
         self._flush_header()
-    
+
     def has_block(self, block_index: int) -> bool:
         return self._test_header_block(block_index)
 
@@ -220,11 +220,11 @@ class OlahCache(object):
 
         if block_index >= self._get_block_number():
             raise Exception("Invalid block index.")
-        
+
         # Check Cache
         if block_index in self._blocks_read_cache:
             return self._blocks_read_cache[block_index]
-    
+
         if not self.has_block(block_index=block_index):
             return None
 
@@ -240,11 +240,13 @@ class OlahCache(object):
                     self._blocks_read_cache[block_index + block_offset] = None
                 else:
                     prefetch_raw_block = f.read(self._get_block_size())
-                    self._blocks_read_cache[block_index + block_offset] = self._pad_block(prefetch_raw_block)
+                    self._blocks_read_cache[block_index + block_offset] = (
+                        self._pad_block(prefetch_raw_block)
+                    )
 
         block = self._pad_block(raw_block)
         return block
-    
+
     def write_block(self, block_index: int, block_bytes: bytes) -> None:
         if not self.is_open:
             raise Exception("This file has been closed.")
@@ -259,25 +261,29 @@ class OlahCache(object):
         with open(self.path, "rb+") as f:
             f.seek(offset)
             if (block_index + 1) * self._get_block_size() > self._get_file_size():
-                real_block_bytes = block_bytes[:self._get_file_size() - block_index * self._get_block_size()]
+                real_block_bytes = block_bytes[
+                    : self._get_file_size() - block_index * self._get_block_size()
+                ]
             else:
                 real_block_bytes = block_bytes
             f.write(real_block_bytes)
-        
+
         self._set_header_block(block_index)
         self._flush_header()
 
         # Clear Cache
         if block_index in self._blocks_read_cache:
             del self._blocks_read_cache[block_index]
-    
+
     def _resize_file_size(self, file_size: int):
         if not self.is_open:
             raise Exception("This file has been closed.")
         if file_size == self._get_file_size():
             return
         if file_size < self._get_file_size():
-            raise Exception("Invalid resize file size. New file size must be greater than the current file size.")
+            raise Exception(
+                "Invalid resize file size. New file size must be greater than the current file size."
+            )
 
         with open(self.path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -287,7 +293,7 @@ class OlahCache(object):
         with open(self.path, "rb+") as f:
             # Extend file size
             f.seek(0, os.SEEK_END)
-            f.write(b'\x00' * (new_bin_size - bin_size))
+            f.write(b"\x00" * (new_bin_size - bin_size))
 
     def resize(self, file_size: int):
         if not self.is_open:
@@ -297,4 +303,3 @@ class OlahCache(object):
         self._resize_file_size(file_size)
         self._resize_header(new_block_num, file_size)
         self._flush_header()
-         

@@ -185,7 +185,6 @@ allow = false
 
 ## Future Work
 
-* Authentication
 * Administrator and user system
 * OOS backend support
 * Mirror Update Schedule Task
