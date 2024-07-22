@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["black==24.4.2", "pylint==3.2.5", "pytest==8.2.2"]
+dev = ["black==24.4.2", "pylint==3.2.5", "pytest==8.3.1"]
 
 [project.urls]
 "Homepage" = "https://github.com/vtuber-plan/olah"
