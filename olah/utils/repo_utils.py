@@ -16,6 +16,17 @@ from olah.constants import WORKER_API_TIMEOUT
 
 
 def get_org_repo(org: Optional[str], repo: str) -> str:
+    """
+    Constructs the organization/repository name.
+
+    Args:
+        org: The organization name (optional).
+        repo: The repository name.
+
+    Returns:
+        The organization/repository name as a string.
+
+    """
     if org is None:
         org_repo = repo
     else:
@@ -24,6 +35,16 @@ def get_org_repo(org: Optional[str], repo: str) -> str:
 
 
 def parse_org_repo(org_repo: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parses the organization/repository name.
+
+    Args:
+        org_repo: The organization/repository name.
+
+    Returns:
+        A tuple containing the organization name and repository name.
+
+    """
     if "/" in org_repo and org_repo.count("/") != 1:
         return None, None
     if "/" in org_repo:
@@ -37,6 +58,20 @@ def parse_org_repo(org_repo: str) -> Tuple[Optional[str], Optional[str]]:
 def get_meta_save_path(
     repos_path: str, repo_type: str, org: Optional[str], repo: str, commit: str
 ) -> str:
+    """
+    Constructs the path to save the meta.json file.
+
+    Args:
+        repos_path: The base path where repositories are stored.
+        repo_type: The type of repository.
+        org: The organization name (optional).
+        repo: The repository name.
+        commit: The commit hash.
+
+    Returns:
+        The path to save the meta.json file as a string.
+
+    """
     return os.path.join(
         repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}/meta.json"
     )
@@ -45,6 +80,19 @@ def get_meta_save_path(
 def get_meta_save_dir(
     repos_path: str, repo_type: str, org: Optional[str], repo: str
 ) -> str:
+    """
+    Constructs the directory path to save the meta.json file.
+
+    Args:
+        repos_path: The base path where repositories are stored.
+        repo_type: The type of repository.
+        org: The organization name (optional).
+        repo: The repository name.
+
+    Returns:
+        The directory path to save the meta.json file as a string.
+
+    """
     return os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/revision")
 
 
@@ -56,6 +104,21 @@ def get_file_save_path(
     commit: str,
     file_path: str,
 ) -> str:
+    """
+    Constructs the path to save a file in the repository.
+
+    Args:
+        repos_path: The base path where repositories are stored.
+        repo_type: The type of repository.
+        org: The organization name (optional).
+        repo: The repository name.
+        commit: The commit hash.
+        file_path: The path of the file within the repository.
+
+    Returns:
+        The path to save the file as a string.
+
+    """
     return os.path.join(
         repos_path, f"heads/{repo_type}/{org}/{repo}/resolve_head/{commit}/{file_path}"
     )
@@ -67,6 +130,19 @@ async def get_newest_commit_hf_offline(
     org: str,
     repo: str,
 ) -> str:
+    """
+    Retrieves the newest commit hash for a repository in offline mode.
+
+    Args:
+        app: The application object.
+        repo_type: The type of repository.
+        org: The organization name.
+        repo: The repository name.
+
+    Returns:
+        The newest commit hash as a string.
+
+    """
     repos_path = app.app_settings.repos_path
     save_dir = get_meta_save_dir(repos_path, repo_type, org, repo)
     files = glob.glob(os.path.join(save_dir, "*", "meta.json"))
@@ -88,6 +164,19 @@ async def get_newest_commit_hf(
     org: Optional[str],
     repo: str,
 ) -> Optional[str]:
+    """
+    Retrieves the newest commit hash for a repository.
+
+    Args:
+        app: The application object.
+        repo_type: The type of repository.
+        org: The organization name (optional).
+        repo: The repository name.
+
+    Returns:
+        The newest commit hash as a string, or None if it cannot be obtained.
+
+    """
     url = urljoin(
         app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org}/{repo}"
     )
@@ -192,6 +281,21 @@ async def check_commit_hf(
     commit: Optional[str] = None,
     authorization: Optional[str] = None,
 ) -> bool:
+    """
+    Checks the commit status of a repository in the Hugging Face ecosystem.
+
+    Args:
+        app: The application object.
+        repo_type: The type of repository (models, datasets, or spaces).
+        org: The organization name (optional).
+        repo: The repository name.
+        commit: The commit hash (optional).
+        authorization: The authorization token (optional).
+
+    Returns:
+        A boolean indicating if the commit is valid (status code 200 or 307) or not.
+
+    """
     org_repo = get_org_repo(org, repo)
     if commit is None:
         url = urljoin(

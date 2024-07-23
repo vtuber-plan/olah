@@ -13,7 +13,13 @@ import traceback
 from typing import Annotated, Optional, Union
 from urllib.parse import urljoin
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, Response, JSONResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    StreamingResponse,
+    Response,
+    JSONResponse,
+)
 from fastapi.templating import Jinja2Templates
 from fastapi_utils.tasks import repeat_every
 
@@ -27,7 +33,12 @@ from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
 from olah.proxy.meta import meta_generator, meta_proxy_cache
 from olah.utils.rule_utils import check_proxy_rules_hf, get_org_repo
-from olah.utils.repo_utils import check_commit_hf, get_commit_hf, get_newest_commit_hf, parse_org_repo
+from olah.utils.repo_utils import (
+    check_commit_hf,
+    get_commit_hf,
+    get_newest_commit_hf,
+    parse_org_repo,
+)
 from olah.constants import REPO_TYPES_MAPPING
 from olah.utils.logging import build_logger
 
@@ -87,7 +98,7 @@ class AppSettings(BaseSettings):
 
 # ======================
 # File Meta Info API Hooks
-# See also: https://huggingface.co/docs/hub/api#repo-listing-api 
+# See also: https://huggingface.co/docs/hub/api#repo-listing-api
 # ======================
 async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, request: Request) -> Response:
     if repo_type not in REPO_TYPES_MAPPING.keys():

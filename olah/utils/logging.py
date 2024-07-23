@@ -1,6 +1,6 @@
 # coding=utf-8
 # Copyright 2024 XiaHan
-# 
+#
 # Use of this source code is governed by an MIT-style
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
@@ -30,17 +30,21 @@ moderation_msg = (
 
 handler = None
 
+
 # Define a custom formatter without color codes
 class NoColorFormatter(logging.Formatter):
-    color_pattern = re.compile(r'\x1b[^m]*m')  # Regex pattern to match color codes
+    color_pattern = re.compile(r"\x1b[^m]*m")  # Regex pattern to match color codes
 
     def format(self, record):
         message = super().format(record)
         # Remove color codes from the log message
-        message = self.color_pattern.sub('', message)
+        message = self.color_pattern.sub("", message)
         return message
 
-def build_logger(logger_name, logger_filename, logger_dir=DEFAULT_LOGGER_DIR) -> logging.Logger:
+
+def build_logger(
+    logger_name, logger_filename, logger_dir=DEFAULT_LOGGER_DIR
+) -> logging.Logger:
     global handler
 
     formatter = logging.Formatter(
