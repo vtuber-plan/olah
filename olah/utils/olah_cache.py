@@ -289,11 +289,16 @@ class OlahCache(object):
             f.seek(0, os.SEEK_END)
             bin_size = f.tell()
 
+        # FIXME: limit the resize method, because it may influence the _block_mask
         new_bin_size = self._get_header_size() + file_size
         with open(self.path, "rb+") as f:
-            # Extend file size
-            f.seek(0, os.SEEK_END)
-            f.write(b"\x00" * (new_bin_size - bin_size))
+            f.seek(new_bin_size - 1)
+            f.write(b'\0')
+            f.truncate()
+            
+            # Extend file size (slow)
+            # f.seek(0, os.SEEK_END)
+            # f.write(b"\x00" * (new_bin_size - bin_size))
 
     def resize(self, file_size: int):
         if not self.is_open:

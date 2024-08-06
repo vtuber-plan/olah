@@ -119,6 +119,8 @@ class AppSettings(BaseSettings):
 # See also: https://huggingface.co/docs/hub/api#repo-listing-api
 # ======================
 async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, request: Request) -> Response:
+    # TODO: the head method of meta apis
+    # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     if repo_type not in REPO_TYPES_MAPPING.keys():
         return error_page_not_found()
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
