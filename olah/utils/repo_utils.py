@@ -311,5 +311,6 @@ async def check_commit_hf(
     if authorization is not None:
         headers["authorization"] = authorization
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=headers, timeout=WORKER_API_TIMEOUT)
-    return response.status_code in [200, 307]
+        response = await client.request(method="HEAD", url=url, headers=headers, timeout=WORKER_API_TIMEOUT)
+        status_code = response.status_code
+    return status_code in [200, 307]

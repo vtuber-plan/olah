@@ -25,7 +25,25 @@ from fastapi_utils.tasks import repeat_every
 
 import git
 import httpx
-from pydantic import BaseSettings
+
+BASE_SETTINGS = False
+if not BASE_SETTINGS:
+    try:
+        from pydantic import BaseSettings
+        BASE_SETTINGS = True
+    except ImportError:
+        BASE_SETTINGS = False
+
+if not BASE_SETTINGS:
+    try:
+        from pydantic_settings import BaseSettings
+        BASE_SETTINGS = True
+    except ImportError:
+        BASE_SETTINGS = False
+
+if not BASE_SETTINGS:
+    raise Exception("Cannot import BaseSettings from pydantic or pydantic-settings")
+
 from olah.configs import OlahConfig
 from olah.errors import error_repo_not_found, error_page_not_found
 from olah.mirror.repos import LocalMirrorRepo
@@ -61,7 +79,7 @@ async def check_connection(url: str) -> bool:
         return False
 
 
-@repeat_every(seconds=60)
+@repeat_every(seconds=60*5)
 async def check_hf_connection() -> None:
     if app.app_settings.config.offline:
         return
