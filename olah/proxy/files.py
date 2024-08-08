@@ -291,19 +291,17 @@ async def _file_realtime_stream(
     if check_url_has_param_name(url, ORIGINAL_LOC):
         clean_url = remove_query_param(url, ORIGINAL_LOC)
         original_loc = get_url_param_name(url, ORIGINAL_LOC)
-        if urlparse(url).netloc in [app.app_settings.config.mirror_netloc, app.app_settings.config.mirror_lfs_netloc]:
-            hf_loc = urlparse(original_loc)
-            if len(hf_loc.netloc) != 0:
-                hf_url = urljoin(f"{hf_loc.scheme}://{hf_loc.netloc}", get_url_tail(clean_url))
-            else:
-                hf_url = url
+
+        hf_loc = urlparse(original_loc)
+        if len(hf_loc.netloc) != 0:
+            hf_url = urljoin(f"{hf_loc.scheme}://{hf_loc.netloc}", get_url_tail(clean_url))
         else:
-            hf_url = url
+            hf_url = urljoin(app.app_settings.config.hf_lfs_url_base(), get_url_tail(clean_url))
     else:
-        if urlparse(url).netloc in [app.app_settings.config.mirror_netloc, app.app_settings.config.mirror_lfs_netloc]:
-            hf_url = urljoin(app.app_settings.config.hf_lfs_url_base(), get_url_tail(url))
-        else:
+        if urlparse(url).netloc in [app.app_settings.config.hf_netloc, app.app_settings.config.hf_lfs_netloc]:
             hf_url = url
+        else:
+            hf_url = urljoin(app.app_settings.config.hf_lfs_url_base(), get_url_tail(url))
 
     request_headers = {k: v for k, v in request.headers.items()}
     if "host" in request_headers:
