@@ -13,7 +13,7 @@ from .bitset import Bitset
 
 CURRENT_OLAH_CACHE_VERSION = 8
 DEFAULT_BLOCK_MASK_MAX = 1024 * 1024
-DEFAULT_BLOCK_SIZE = 16 * 1024 * 1024
+DEFAULT_BLOCK_SIZE = 8 * 1024 * 1024
 
 
 class OlahCacheHeader(object):

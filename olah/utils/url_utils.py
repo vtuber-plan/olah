@@ -63,7 +63,7 @@ def parse_range_params(file_range: str, file_size: int) -> Tuple[int, int]:
     if len(end_pos) != 0:
         end_pos = int(end_pos)
     else:
-        end_pos = file_size
+        end_pos = file_size - 1
     return start_pos, end_pos
 
 
