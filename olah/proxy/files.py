@@ -167,12 +167,6 @@ async def _file_full_header(
                         response.content,
                     )
                 elif response.status_code >= 300 and response.status_code <= 399:
-                    await _write_cache_request(
-                        head_path,
-                        response.status_code,
-                        response_headers_dict,
-                        response.content,
-                    )
                     from_url = urlparse(url)
                     parsed_url = urlparse(response.headers["location"])
                     if len(parsed_url.netloc) != 0:
@@ -192,6 +186,12 @@ async def _file_full_header(
                             ORIGINAL_LOC,
                             response.headers["location"],
                         )
+                    await _write_cache_request(
+                        head_path,
+                        response.status_code,
+                        response_headers_dict,
+                        response.content,
+                    )
                 elif response.status_code == 403:
                     pass
                 else:
