@@ -46,7 +46,10 @@ def get_block_info(pos: int, block_size: int, file_size: int) -> Tuple[int, int,
     block_end_pos = min((cur_block + 1) * block_size, file_size)
     return cur_block, block_start_pos, block_end_pos
 
-def get_contiguous_ranges(cache_file: OlahCache, start_pos: int, end_pos: int) -> List[Tuple[Tuple[int, int], bool]]:
+
+def get_contiguous_ranges(
+    cache_file: OlahCache, start_pos: int, end_pos: int
+) -> List[Tuple[Tuple[int, int], bool]]:
     start_block = start_pos // cache_file._get_block_size()
     end_block = (end_pos - 1) // cache_file._get_block_size()
 
@@ -251,11 +254,13 @@ async def _get_file_range_from_cache(
             raise Exception("Unknown exception: read block which has not been cached.")
         raw_block = cache_file.read_block(cur_block)
         chunk = raw_block[
-            max(start_pos, block_start_pos) - block_start_pos : min(end_pos, block_end_pos) - block_start_pos
+            max(start_pos, block_start_pos)
+            - block_start_pos : min(end_pos, block_end_pos)
+            - block_start_pos
         ]
         yield chunk
         cur_pos += len(chunk)
-    
+
     if cur_pos != end_pos:
         raise Exception("The cache range from {} to {} is incomplete.")
 
@@ -332,7 +337,7 @@ async def _file_chunk_get(
                     range_start_pos,
                     range_end_pos,
                 )
-            
+
             cur_pos = range_start_pos
             stream_cache = bytearray()
             last_block, last_block_start_pos, last_block_end_pos = get_block_info(
@@ -348,7 +353,9 @@ async def _file_chunk_get(
 
                 if cur_block == last_block:
                     continue
-                split_pos = last_block_end_pos - max(last_block_start_pos, range_start_pos)
+                split_pos = last_block_end_pos - max(
+                    last_block_start_pos, range_start_pos
+                )
                 raw_block = stream_cache[:split_pos]
                 stream_cache = stream_cache[split_pos:]
                 if len(raw_block) == cache_file._get_block_size():
@@ -357,14 +364,20 @@ async def _file_chunk_get(
                 last_block, last_block_start_pos, last_block_end_pos = get_block_info(
                     cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
                 )
-            
+
             raw_block = stream_cache
             if cur_block == cache_file._get_block_number() - 1:
-                if len(raw_block) == cache_file._get_file_size() % cache_file._get_block_size():
-                    raw_block += b"\x00" * (cache_file._get_block_size() - len(raw_block))
+                if (
+                    len(raw_block)
+                    == cache_file._get_file_size() % cache_file._get_block_size()
+                ):
+                    raw_block += b"\x00" * (
+                        cache_file._get_block_size() - len(raw_block)
+                    )
+                last_block = cur_block
             if len(raw_block) == cache_file._get_block_size():
-                if not cache_file.has_block(cur_block) and allow_cache:
-                    cache_file.write_block(cur_block, raw_block)
+                if not cache_file.has_block(last_block) and allow_cache:
+                    cache_file.write_block(last_block, raw_block)
 
             if cur_pos != range_end_pos:
                 if is_remote:
@@ -464,7 +477,7 @@ async def _file_realtime_stream(
         except httpx.ConnectError:
             yield 504
             yield {}
-            yield b''
+            yield b""
             return
 
     async with httpx.AsyncClient() as client:
@@ -487,7 +500,6 @@ async def _file_realtime_stream(
         yield 200
         yield response_headers
         if method.lower() == "get":
-            n_bytes = 0
             async for each_chunk in _file_chunk_get(
                 app=app,
                 save_path=save_path,
@@ -500,10 +512,6 @@ async def _file_realtime_stream(
                 file_size=file_size,
             ):
                 yield each_chunk
-                n_bytes += len(each_chunk)
-            
-            if n_bytes != int(response_headers["content-length"]):
-                print(f"{n_bytes} != {response_headers['content-length']}")
         elif method.lower() == "head":
             async for each_chunk in _file_chunk_head(
                 app=app,
