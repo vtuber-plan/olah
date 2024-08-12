@@ -565,6 +565,13 @@ if __name__ in ["__main__", "olah.server"]:
     parser.add_argument("--config", "-c", type=str, default="")
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8090)
+    parser.add_argument("--hf-scheme", type=str, default="https", help="The scheme of huggingface site (http or https)")
+    parser.add_argument("--hf-netloc", type=str, default="huggingface.co")
+    parser.add_argument("--hf-lfs-netloc", type=str, default="cdn-lfs.huggingface.co")
+    parser.add_argument("--mirror-scheme", type=str, default="http", help="The scheme of mirror site (http or https)")
+    parser.add_argument("--mirror-netloc", type=str, default="localhost:8090")
+    parser.add_argument("--mirror-lfs-netloc", type=str, default="localhost:8090")
+    parser.add_argument("--has-lfs-site", action="store_true")
     parser.add_argument("--ssl-key", type=str, default=None, help="The SSL key file path, if HTTPS is used")
     parser.add_argument("--ssl-cert", type=str, default=None, help="The SSL cert file path, if HTTPS is used")
     parser.add_argument("--repos-path", type=str, default="./repos", help="The folder to save cached repositories")
@@ -585,7 +592,22 @@ if __name__ in ["__main__", "olah.server"]:
         config = OlahConfig(args.config)
     else:
         config = OlahConfig()
-    
+        if not is_default_value(args, "hf_scheme"):
+            config.hf_scheme = args.hf_scheme
+        if not is_default_value(args, "hf_netloc"):
+            config.hf_netloc = args.hf_netloc
+        if not is_default_value(args, "hf_lfs_netloc"):
+            config.hf_lfs_netloc = args.hf_lfs_netloc
+        if not is_default_value(args, "mirror_scheme"):
+            config.mirror_scheme = args.mirror_scheme
+        if not is_default_value(args, "mirror_netloc"):
+            config.mirror_netloc = args.mirror_netloc
+        if not is_default_value(args, "mirror_lfs_netloc"):
+            config.mirror_lfs_netloc = args.mirror_lfs_netloc
+        else:
+            if not args.has_lfs_site and not is_default_value(args, "mirror_netloc"):
+                config.mirror_lfs_netloc = args.mirror_netloc
+
     if is_default_value(args, "host"):
         args.host = config.host
     if is_default_value(args, "port"):
