@@ -102,7 +102,11 @@ python -m olah.server
 ```bash
 python -m olah.server --host localhost --port 8090
 ```
-请记得在修改主机和端口时将`--mirror-url`和`--mirror-lfs-url`更改为镜像站点的实际URL。
+**注意：请记得在修改主机和端口时将`--mirror-netloc`和`--mirror-lfs-netloc`更改为镜像站点的实际URL。**
+
+```bash
+python -m olah.server --host 192.168.1.100 --port 8090 --mirror-netloc 192.168.1.100:8090
+```
 
 默认的镜像缓存路径是`./repos`，您可以通过`--repos-path`参数进行更改：
 ```bash

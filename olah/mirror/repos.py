@@ -1,6 +1,6 @@
 # coding=utf-8
 # Copyright 2024 XiaHan
-# 
+#
 # Use of this source code is governed by an MIT-style
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
@@ -15,6 +15,8 @@ from gitdb.base import OStream
 import yaml
 
 from olah.mirror.meta import RepoMeta
+
+
 class LocalMirrorRepo(object):
     def __init__(self, path: str, repo_type: str, org: str, repo: str) -> None:
         self._path = path
@@ -23,21 +25,21 @@ class LocalMirrorRepo(object):
         self._repo = repo
 
         self._git_repo = Repo(self._path)
-    
+
     def _sha256(self, text: Union[str, bytes]) -> str:
         if isinstance(text, bytes) or isinstance(text, bytearray):
             bin = text
         elif isinstance(text, str):
-            bin = text.encode('utf-8')
+            bin = text.encode("utf-8")
         else:
             raise Exception("Invalid sha256 param type.")
         sha256_hash = hashlib.sha256()
         sha256_hash.update(bin)
         hashed_string = sha256_hash.hexdigest()
         return hashed_string
-    
+
     def _match_card(self, readme: str) -> str:
-        pattern = r'\s*---(.*?)---'
+        pattern = r"\s*---(.*?)---"
 
         match = re.match(pattern, readme, flags=re.S)
 
@@ -46,22 +48,23 @@ class LocalMirrorRepo(object):
             return card_string
         else:
             return ""
+
     def _remove_card(self, readme: str) -> str:
-        pattern = r'\s*---(.*?)---'
+        pattern = r"\s*---(.*?)---"
         out = re.sub(pattern, "", readme, flags=re.S)
         return out
-    
+
     def _get_readme(self, commit: Commit) -> str:
         if "README.md" not in commit.tree:
             return ""
         else:
             out: bytes = commit.tree["README.md"].data_stream.read()
             return out.decode()
-    
+
     def _get_description(self, commit: Commit) -> str:
         readme = self._get_readme(commit)
         return self._remove_card(readme)
-    
+
     def _get_entry_files(self, tree, include_dir=False) -> List[str]:
         out_paths = []
         for entry in tree:
@@ -75,7 +78,6 @@ class LocalMirrorRepo(object):
 
     def _get_tree_files(self, commit: Commit) -> List[str]:
         return self._get_entry_files(commit.tree)
-    
 
     def _get_earliest_commit(self) -> Commit:
         earliest_commit = None
@@ -96,12 +98,14 @@ class LocalMirrorRepo(object):
         except gitdb.exc.BadName:
             return None
         meta = RepoMeta()
-        
+
         meta._id = self._sha256(f"{self._org}/{self._repo}/{commit.hexsha}")
         meta.id = f"{self._org}/{self._repo}"
         meta.author = self._org
         meta.sha = commit.hexsha
-        meta.lastModified = self._git_repo.head.commit.committed_datetime.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        meta.lastModified = self._git_repo.head.commit.committed_datetime.strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
         meta.private = False
         meta.gated = False
         meta.disabled = False
@@ -110,9 +114,13 @@ class LocalMirrorRepo(object):
         meta.paperswithcode_id = None
         meta.downloads = 0
         meta.likes = 0
-        meta.cardData = yaml.load(self._match_card(self._get_readme(commit)), Loader=yaml.CLoader)
+        meta.cardData = yaml.load(
+            self._match_card(self._get_readme(commit)), Loader=yaml.CLoader
+        )
         meta.siblings = [{"rfilename": p} for p in self._get_tree_files(commit)]
-        meta.createdAt = self._get_earliest_commit().committed_datetime.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        meta.createdAt = self._get_earliest_commit().committed_datetime.strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
         return meta.to_dict()
 
     def _contain_path(self, path: str, tree: Tree) -> bool:
@@ -149,7 +157,7 @@ class LocalMirrorRepo(object):
             commit = self._git_repo.commit(commit_hash)
         except gitdb.exc.BadName:
             return None
-        
+
         def stream_wrapper(file_bytes: bytes):
             file_stream = io.BytesIO(file_bytes)
             while True:
@@ -158,10 +166,8 @@ class LocalMirrorRepo(object):
                     break
                 else:
                     yield chunk
-        
+
         if not self._contain_path(path, commit.tree):
             return None
         else:
             return stream_wrapper(commit.tree[path].data_stream.read())
-        
-    
