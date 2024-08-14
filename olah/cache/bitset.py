@@ -76,4 +76,4 @@ class Bitset:
         Returns:
             str: A string representation of the Bitset object, showing the binary representation of each byte.
         """
-        return "".join(bin(byte)[2:].zfill(8) for byte in self.bits)
+        return "".join(bin(byte)[2:].zfill(8)[::-1] for byte in self.bits)

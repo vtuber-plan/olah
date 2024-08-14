@@ -24,7 +24,7 @@ from olah.constants import (
     HUGGINGFACE_HEADER_X_LINKED_SIZE,
     ORIGINAL_LOC,
 )
-from olah.utils.olah_cache import OlahCache
+from olah.cache.olah_cache import OlahCache
 from olah.utils.url_utils import (
     RemoteInfo,
     add_query_param,
