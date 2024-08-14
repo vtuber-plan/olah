@@ -15,7 +15,8 @@ from fastapi import FastAPI, Request
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-from olah.utils.url_utils import check_cache_rules_hf, get_org_repo
+from olah.utils.rule_utils import check_cache_rules_hf
+from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
 
@@ -50,10 +51,14 @@ async def meta_proxy_cache(
         app.app_settings.config.hf_url_base(),
         f"/api/{repo_type}/{org_repo}/revision/{commit}",
     )
+    headers = {}
+    if "authorization" in request.headers:
+        headers["authorization"] = request.headers["authorization"]
     async with httpx.AsyncClient() as client:
         response = await client.request(
             method="GET",
             url=meta_url,
+            headers=headers,
             timeout=WORKER_API_TIMEOUT,
             follow_redirects=True,
         )
@@ -70,37 +75,28 @@ async def meta_proxy_generator(
     allow_cache: bool,
     save_path: str,
 ):
-    try:
-        temp_file_path = None
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            with tempfile.NamedTemporaryFile(mode="wb", delete=True) as temp_file:
-                temp_file_path = temp_file.name
-                if not allow_cache:
-                    write_temp_file = False
-                else:
-                    write_temp_file = True
-                async with client.stream(
-                    method="GET",
-                    url=meta_url,
-                    headers=headers,
-                    timeout=WORKER_API_TIMEOUT,
-                ) as response:
-                    response_headers = response.headers
-                    yield response_headers
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        content_chunks = []
+        async with client.stream(
+            method="GET",
+            url=meta_url,
+            headers=headers,
+            timeout=WORKER_API_TIMEOUT,
+        ) as response:
+            response_headers = response.headers
+            yield response_headers
 
-                    async for raw_chunk in response.aiter_raw():
-                        if not raw_chunk:
-                            continue
-                        if write_temp_file:
-                            temp_file.write(raw_chunk)
-                        yield raw_chunk
-                if temp_file_path is not None:
-                    temp_file.flush()
-                    shutil.copyfile(temp_file_path, save_path)
-    finally:
-        if temp_file_path is not None and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+            async for raw_chunk in response.aiter_raw():
+                if not raw_chunk:
+                    continue
+                content_chunks.append(raw_chunk)
+                yield raw_chunk
 
+        content = bytearray()
+        for chunk in content_chunks:
+            content += chunk
+        with open(save_path, "wb") as f:
+            f.write(bytes(content))
 
 async def meta_generator(
     app: FastAPI,

@@ -1,3 +1,9 @@
+# coding=utf-8
+# Copyright 2024 XiaHan
+#
+# Use of this source code is governed by an MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT.
 
 
 class RepoMeta(object):
@@ -18,7 +24,7 @@ class RepoMeta(object):
         self.cardData = None
         self.siblings = None
         self.createdAt = None
-    
+
     def to_dict(self):
         return {
             "_id": self._id,

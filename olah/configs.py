@@ -1,6 +1,6 @@
 # coding=utf-8
 # Copyright 2024 XiaHan
-# 
+#
 # Use of this source code is governed by an MIT-style
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
@@ -88,9 +88,13 @@ class OlahConfig(object):
         self.hf_netloc: str = "huggingface.co"
         self.hf_lfs_netloc: str = "cdn-lfs.huggingface.co"
 
-        self.mirror_scheme: str = "http"
-        self.mirror_netloc: str = "localhost:8090"
-        self.mirror_lfs_netloc: str = "localhost:8090"
+        self.mirror_scheme: str = "http" if self.ssl_key is None else "https"
+        self.mirror_netloc: str = (
+            f"{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}"
+        )
+        self.mirror_lfs_netloc: str = (
+            f"{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}"
+        )
 
         self.mirrors_path: List[str] = []
 

@@ -102,7 +102,10 @@ Or you can specify the host address and listening port:
 ```bash
 python -m olah.server --host localhost --port 8090
 ```
-Please remember to change the `--mirror-url` and `--mirror-lfs-url` to the actual URLs of the mirror site while modifying the host and port.
+**Note: Please change --mirror-netloc and --mirror-lfs-netloc to the actual URLs of the mirror sites when modifying the host and port.**
+```bash
+python -m olah.server --host 192.168.1.100 --port 8090 --mirror-netloc 192.168.1.100:8090
+```
 
 The default mirror cache path is `./repos`, you can change it by `--repos-path` parameter:
 ```bash
@@ -185,7 +188,6 @@ allow = false
 
 ## Future Work
 
-* Authentication
 * Administrator and user system
 * OOS backend support
 * Mirror Update Schedule Task

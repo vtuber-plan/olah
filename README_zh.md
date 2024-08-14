@@ -4,7 +4,7 @@
 <p align="center">
 <b>自托管的轻量级HuggingFace镜像服务</b>
 
-Olah是一种自托管的轻量级HuggingFace镜像服务。`Olah`来源于丘丘人语，在丘丘人语中意味着`你好`。
+Olah是开源的自托管轻量级HuggingFace镜像服务。`Olah`来源于丘丘人语，在丘丘人语中意味着`你好`。
 Olah真正地实现了huggingface资源的`镜像`功能，而不仅仅是一个简单的`反向代理`。
 Olah并不会立刻对huggingface全站进行镜像，而是在用户下载的同时在文件块级别对资源进行镜像（或者我们可以说是缓存）。
 
@@ -102,7 +102,11 @@ python -m olah.server
 ```bash
 python -m olah.server --host localhost --port 8090
 ```
-请记得在修改主机和端口时将`--mirror-url`和`--mirror-lfs-url`更改为镜像站点的实际URL。
+**注意：请记得在修改主机和端口时将`--mirror-netloc`和`--mirror-lfs-netloc`更改为镜像站点的实际URL。**
+
+```bash
+python -m olah.server --host 192.168.1.100 --port 8090 --mirror-netloc 192.168.1.100:8090
+```
 
 默认的镜像缓存路径是`./repos`，您可以通过`--repos-path`参数进行更改：
 ```bash
@@ -137,17 +141,19 @@ mirror-netloc = "localhost:8090"
 mirror-lfs-netloc = "localhost:8090"
 mirrors-path = ["./mirrors_dir"]
 ```
-host: 设置olah监听的host地址
-port: 设置olah监听的端口
-ssl-key和ssl-cert: 当需要开启HTTPS时传入key和cert的文件路径
-repos-path: 用于保存缓存数据的目录
-hf-scheme: huggingface官方站点的网络协议（一般不需要改动）
-hf-netloc: huggingface官方站点的网络位置（一般不需要改动）
-hf-lfs-netloc: huggingface官方站点LFS文件的网络位置（一般不需要改动）
-mirror-scheme: Olah镜像站的网络协议（应当和上面的设置一致，当提供ssl-key和ssl-cert时，应改为https）
-mirror-netloc: Olah镜像站的网络位置（应与host和port设置一致）
-mirror-lfs-netloc: Olah镜像站LFS的网络位置（应与host和port设置一致）
-mirrors-path: 额外的镜像文件目录。当你已经clone了一些git仓库时可以放入该目录下以供下载。此处例子目录为`./mirrors_dir`, 若要添加数据集`Salesforce/wikitext`，可将git仓库放置于`./mirrors_dir/datasets/Salesforce/wikitext`目录。同理，模型放置于`./mirrors_dir/models/organization/repository`下。
+
+- host: 设置olah监听的host地址
+- port: 设置olah监听的端口
+- ssl-key和ssl-cert: 当需要开启HTTPS时传入key和cert的文件路径
+- repos-path: 用于保存缓存数据的目录
+- hf-scheme: huggingface官方站点的网络协议（一般不需要改动）
+- hf-netloc: huggingface官方站点的网络位置（一般不需要改动）
+- hf-lfs-netloc: huggingface官方站点LFS文件的网络位置（一般不需要改动）
+- mirror-scheme: Olah镜像站的网络协议（应当和上面的设置一致，当提供ssl-key和ssl-cert时，应改为https）
+- mirror-netloc: Olah镜像站的网络位置（应与host和port设置一致）
+- mirror-lfs-netloc: Olah镜像站LFS的网络位置（应与host和port设置一致）
+- mirrors-path: 额外的镜像文件目录。当你已经clone了一些git仓库时可以放入该目录下以供下载。此处例子目录为`./mirrors_dir`, 若要添加数据集`Salesforce/wikitext`，可将git仓库放置于`./mirrors_dir/datasets/Salesforce/wikitext`目录。同理，模型放置于`./mirrors_dir/models/organization/repository`下。
+
 
 第二部分可以对可访问性进行限制
 ```toml
@@ -180,9 +186,9 @@ allow = true
 repo = "adept/fuyu-8b"
 allow = false
 ```
-offline: 设置Olah镜像站是否进入离线模式，不再向huggingface官方站点发出请求以进行数据更新，但已经缓存的仓库仍可以下载
-proxy: 用于设置该仓库是否可以被代理，默认全部允许，`repo`用于匹配仓库名字; 可使用正则表达式和通配符两种模式，`use_re`用于控制是否使用正则表达式，默认使用通配符; `allow`控制该规则的属性是允许代理还是不允许代理。
-cache: 用于设置该仓库是否会被缓存，默认全部允许，`repo`用于匹配仓库名字; 可使用正则表达式和通配符两种模式，`use_re`用于控制是否使用正则表达式，默认使用通配符; `allow`控制该规则的属性是允许代理还是不允许缓存。
+- offline: 设置Olah镜像站是否进入离线模式，不再向huggingface官方站点发出请求以进行数据更新，但已经缓存的仓库仍可以下载
+- proxy: 用于设置该仓库是否可以被代理，默认全部允许，`repo`用于匹配仓库名字; 可使用正则表达式和通配符两种模式，`use_re`用于控制是否使用正则表达式，默认使用通配符; `allow`控制该规则的属性是允许代理还是不允许代理。
+- cache: 用于设置该仓库是否会被缓存，默认全部允许，`repo`用于匹配仓库名字; 可使用正则表达式和通配符两种模式，`use_re`用于控制是否使用正则表达式，默认使用通配符; `allow`控制该规则的属性是允许代理还是不允许缓存。
 
 ## 许可证
 

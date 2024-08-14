@@ -1,49 +1,109 @@
 <html>
-    <head>
-        <title>Olah HuggingFace Mirror</title>
-    </head>
-    <body>
-        <script type="module" src="https://md-block.verou.me/md-block.js"></script>
-        <h1> Welcome to Olah! </h1>
-        <md-block>
-            # Use Mirror URL with huggingface-cli
-            Then set the Environment Variable `HF_ENDPOINT` to the mirror site (Here is http://localhost:8090).
 
-            Linux:
-            ```bash
-            export HF_ENDPOINT=http://localhost:8090
-            ```
+<head>
+    <title>Olah HuggingFace Mirror</title>
+    <link rel="stylesheet" type="text/css"
+        href="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.5.0/semantic.min.css">
 
-            Windows Powershell:
-            ```bash
-            $env:HF_ENDPOINT = "http://localhost:8090"
-            ```
-    
-            Starting from now on, all download operations in the HuggingFace library will be proxied through this mirror site.
-            ```python
-            from huggingface_hub import snapshot_download
-    
-            snapshot_download(repo_id='Qwen/Qwen-7B', repo_type='model',
-                            local_dir='./model_dir', resume_download=True,
-                            max_workers=8)
-    
-            ```
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/default.min.css"
+        integrity="sha512-hasIneQUHlh06VNBe7f6ZcHmeRTLIaQWFd43YriJ0UND19bvYRauxthDg8E4eVNPm9bRUhr5JGeqH7FRFXQu5g=="
+        crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"
+        integrity="sha512-6yoqbrcLAHDWAdQmiRlHG4+m0g/CT/V9AGyxabG8j7Jk8j3r3K6due7oqpiRMZqcYe9WM2gPcaNNxnl2ux+3tA=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>hljs.initHighlightingOnLoad();</script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.11/clipboard.min.js"
+        integrity="sha512-7O5pXpc0oCRrxk8RUfDYFgn0nO1t+jLuIOQdOMRp4APB7uZ4vSjspzp5y6YDtDs4VzUSTbWzBFZ/LKJhnyFOKw=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            hljs.initHighlightingOnLoad();
 
-            Or you can download models and datasets by using huggingface cli.
-            ```bash
-            pip install -U huggingface_hub
-            ```
+            var codeBlocks = document.querySelectorAll('pre code');
+            codeBlocks.forEach(function (codeBlock) {
+                var parentPre = codeBlock.parentNode;
+                var copyButton = document.createElement('button');
+                copyButton.className = 'ui icon button copy-button';
+                copyButton.innerHTML = '<i class="copy outline icon"></i>';
+                parentPre.insertBefore(copyButton, codeBlock);
 
-            Download GPT2:
-            ```bash
-            huggingface-cli download --resume-download openai-community/gpt2 --local-dir gpt2
-            ```
+                var clipboard = new ClipboardJS(copyButton, {
+                    target: function (trigger) {
+                        return trigger.nextElementSibling;
+                    }
+                });
 
-            Download WikiText:
-            ```bash
-            huggingface-cli download --repo-type dataset --resume-download Salesforce/wikitext --local-dir wikitext
-            ```
-        </md-block>
-        
-    </body>
+                clipboard.on('success', function (e) {
+                    e.clearSelection();
+                    e.trigger.innerHTML = '<i class="check icon"></i>';
+                    setTimeout(function () {
+                        e.trigger.innerHTML = '<i class="copy outline icon"></i>';
+                    }, 2000);
+                });
+            });
+        });
+    </script>
+    <style>
+        .copy-button {
+            float: right;
+            margin: 10px;
+        }
+
+        pre {
+            background: #f3f3f3;
+            color: #444;
+        }
+
+        .page-container {
+            margin: 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <script src="https://code.jquery.com/jquery-3.1.1.min.js"
+        integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8=" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.5.0/semantic.min.js"></script>
+
+    <script type="module" src="https://md-block.verou.me/md-block.js"></script>
+
+    <div class="page-container">
+        <div class="ui container">
+            <h1 class="ui header">Welcome to Olah!</h1>
+            <div class="ui segment">
+                <h2 class="ui header">Use Mirror URL with huggingface-cli</h2>
+                <p>Set the Environment Variable <code>HF_ENDPOINT</code> to the mirror site (Here is
+                    {{scheme}}://{{netloc}}).</p>
+
+                <p><strong>Linux:</strong></p>
+                <pre><code>export HF_ENDPOINT={{scheme}}://{{netloc}}</code></pre>
+
+                <p><strong>Windows Powershell:</strong></p>
+                <pre><code>$env:HF_ENDPOINT = "{{scheme}}://{{netloc}}"</code></pre>
+
+                <p>Starting from now on, all download operations in the HuggingFace library will be proxied through this
+                    mirror site.</p>
+
+                <pre><code class="language-python">
+from huggingface_hub import snapshot_download
+
+snapshot_download(repo_id='Qwen/Qwen-7B', repo_type='model',
+    local_dir='./model_dir', resume_download=True,
+    max_workers=8)
+</code></pre>
+
+                <p>Or you can download models and datasets by using huggingface cli.</p>
+
+                <pre><code class="language-bash">pip install -U huggingface_hub</code></pre>
+
+                <p>Download GPT2:</p>
+                <pre><code class="language-bash">huggingface-cli download --resume-download openai-community/gpt2 --local-dir gpt2</code></pre>
+
+                <p>Download WikiText:</p>
+                <pre><code class="language-bash">huggingface-cli download --repo-type dataset --resume-download Salesforce/wikitext --local-dir wikitext</code></pre>
+            </div>
+        </div>
+    </div>
+</body>
+
 </html>
