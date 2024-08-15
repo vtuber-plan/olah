@@ -26,6 +26,8 @@ from fastapi_utils.tasks import repeat_every
 import git
 import httpx
 
+from olah.proxy.tree import tree_generator, tree_proxy_cache
+
 BASE_SETTINGS = False
 if not BASE_SETTINGS:
     try:
@@ -184,6 +186,16 @@ async def meta_proxy(repo_type: str, org_repo: str, request: Request):
         repo_type=repo_type, org=org, repo=repo, commit=new_commit, request=request
     )
 
+@app.get("/api/{repo_type}/{org}/{repo}")
+async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
+    if not app.app_settings.config.offline:
+        new_commit = await get_newest_commit_hf(app, repo_type, org, repo)
+    else:
+        new_commit = "main"
+    return await meta_proxy_common(
+        repo_type=repo_type, org=org, repo=repo, commit=new_commit, request=request
+    )
+
 
 @app.get("/api/{repo_type}/{org}/{repo}/revision/{commit}")
 async def meta_proxy_commit2(
@@ -203,6 +215,80 @@ async def meta_proxy_commit(repo_type: str, org_repo: str, commit: str, request:
     return await meta_proxy_common(
         repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
     )
+
+# Git Tree
+async def tree_proxy_common(repo_type: str, org: str, repo: str, commit: str, request: Request) -> Response:
+    # TODO: the head method of meta apis
+    # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
+    if repo_type not in REPO_TYPES_MAPPING.keys():
+        return error_page_not_found()
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+        return error_repo_not_found()
+    # Check Mirror Path
+    for mirror_path in app.app_settings.config.mirrors_path:
+        try:
+            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            if os.path.exists(git_path):
+                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
+                meta_data = local_repo.get_tree(commit)
+                if meta_data is None:
+                    continue
+                return JSONResponse(content=meta_data)
+        except git.exc.InvalidGitRepositoryError:
+            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
+            continue
+
+    # Proxy the HF File Meta
+    try:
+        if not app.app_settings.config.offline and not await check_commit_hf(
+            app,
+            repo_type,
+            org,
+            repo,
+            commit=commit,
+            authorization=request.headers.get("authorization", None),
+        ):
+            return error_repo_not_found()
+        commit_sha = await get_commit_hf(
+            app,
+            repo_type,
+            org,
+            repo,
+            commit=commit,
+            authorization=request.headers.get("authorization", None),
+        )
+        if commit_sha is None:
+            return error_repo_not_found()
+        # if branch name and online mode, refresh branch info
+        if not app.app_settings.config.offline and commit_sha != commit:
+            await tree_proxy_cache(app, repo_type, org, repo, commit, request)
+        generator = tree_generator(app, repo_type, org, repo, commit_sha, request)
+        headers = await generator.__anext__()
+        return StreamingResponse(generator, headers=headers)
+    except httpx.ConnectTimeout:
+        traceback.print_exc()
+        return Response(status_code=504)
+
+
+@app.get("/api/{repo_type}/{org}/{repo}/tree/{commit}")
+async def tree_proxy_commit2(
+    repo_type: str, org: str, repo: str, commit: str, request: Request
+):
+    return await tree_proxy_common(
+        repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
+    )
+
+
+@app.get("/api/{repo_type}/{org_repo}/tree/{commit}")
+async def tree_proxy_commit(repo_type: str, org_repo: str, commit: str, request: Request):
+    org, repo = parse_org_repo(org_repo)
+    if org is None and repo is None:
+        return error_repo_not_found()
+
+    return await tree_proxy_common(
+        repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
+    )
+
 
 # ======================
 # Authentication API Hooks
