@@ -20,7 +20,7 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
 
-async def tree_cache_generator(save_path: str):
+async def _tree_cache_generator(save_path: str):
     yield {}
     with open(save_path, "rb") as f:
         while True:
@@ -70,7 +70,7 @@ async def tree_proxy_cache(
             )
 
 
-async def tree_proxy_generator(
+async def _tree_proxy_generator(
     app: FastAPI,
     headers: Dict[str, str],
     tree_url: str,
@@ -128,10 +128,10 @@ async def tree_generator(
     )
     # proxy
     if use_cache:
-        async for item in tree_cache_generator(app, save_path):
+        async for item in _tree_cache_generator(save_path):
             yield item
     else:
-        async for item in tree_proxy_generator(
+        async for item in _tree_proxy_generator(
             app, headers, tree_url, allow_cache, save_path
         ):
             yield item

@@ -20,7 +20,7 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
 
-async def meta_cache_generator(app: FastAPI, save_path: str):
+async def _meta_cache_generator(save_path: str):
     yield {}
     with open(save_path, "rb") as f:
         while True:
@@ -72,7 +72,7 @@ async def meta_proxy_cache(
             )
 
 
-async def meta_proxy_generator(
+async def _meta_proxy_generator(
     app: FastAPI,
     headers: Dict[str, str],
     meta_url: str,
@@ -132,10 +132,10 @@ async def meta_generator(
     )
     # proxy
     if use_cache:
-        async for item in meta_cache_generator(app, save_path):
+        async for item in _meta_cache_generator(save_path):
             yield item
     else:
-        async for item in meta_proxy_generator(
+        async for item in _meta_proxy_generator(
             app, headers, meta_url, allow_cache, save_path
         ):
             yield item
