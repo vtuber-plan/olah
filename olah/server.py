@@ -230,10 +230,10 @@ async def tree_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
             git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
-                meta_data = local_repo.get_tree(commit)
-                if meta_data is None:
+                tree_data = local_repo.get_tree(commit)
+                if tree_data is None:
                     continue
-                return JSONResponse(content=meta_data)
+                return JSONResponse(content=tree_data)
         except git.exc.InvalidGitRepositoryError:
             logger.warning(f"Local repository {git_path} is not a valid git reposity.")
             continue

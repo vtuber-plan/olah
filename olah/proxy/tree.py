@@ -40,9 +40,7 @@ async def tree_proxy_cache(
 ):
     # save
     repos_path = app.app_settings.repos_path
-    save_dir = os.path.join(
-        repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}"
-    )
+    save_dir = os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}")
     save_path = os.path.join(save_dir, "tree.json")
     make_dirs(save_path)
 
@@ -116,9 +114,7 @@ async def tree_generator(
 
     # save
     repos_path = app.app_settings.repos_path
-    save_dir = os.path.join(
-        repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}"
-    )
+    save_dir = os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}")
     save_path = os.path.join(save_dir, "tree.json")
     make_dirs(save_path)
 
