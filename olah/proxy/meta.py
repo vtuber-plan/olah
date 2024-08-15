@@ -1,6 +1,6 @@
 # coding=utf-8
 # Copyright 2024 XiaHan
-# 
+#
 # Use of this source code is governed by an MIT-style
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
@@ -28,6 +28,7 @@ async def meta_cache_generator(app: FastAPI, save_path: str):
             if not chunk:
                 break
             yield chunk
+
 
 async def meta_proxy_cache(
     app: FastAPI,
@@ -66,7 +67,10 @@ async def meta_proxy_cache(
             with open(save_path, "wb") as meta_file:
                 meta_file.write(response.content)
         else:
-            raise Exception(f"Cannot get the branch info from the url {meta_url}, status: {response.status_code}")
+            raise Exception(
+                f"Cannot get the branch info from the url {meta_url}, status: {response.status_code}"
+            )
+
 
 async def meta_proxy_generator(
     app: FastAPI,
@@ -97,6 +101,7 @@ async def meta_proxy_generator(
             content += chunk
         with open(save_path, "wb") as f:
             f.write(bytes(content))
+
 
 async def meta_generator(
     app: FastAPI,
