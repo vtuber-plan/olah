@@ -173,6 +173,7 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
         return Response(status_code=504)
 
 
+@app.head("/api/{repo_type}/{org_repo}")
 @app.get("/api/{repo_type}/{org_repo}")
 async def meta_proxy(repo_type: str, org_repo: str, request: Request):
     org, repo = parse_org_repo(org_repo)
@@ -180,23 +181,28 @@ async def meta_proxy(repo_type: str, org_repo: str, request: Request):
         return error_repo_not_found()
     if not app.app_settings.config.offline:
         new_commit = await get_newest_commit_hf(app, repo_type, org, repo)
+        if new_commit is None:
+            return error_repo_not_found()
     else:
         new_commit = "main"
     return await meta_proxy_common(
         repo_type=repo_type, org=org, repo=repo, commit=new_commit, request=request
     )
 
+@app.head("/api/{repo_type}/{org}/{repo}")
 @app.get("/api/{repo_type}/{org}/{repo}")
 async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
     if not app.app_settings.config.offline:
         new_commit = await get_newest_commit_hf(app, repo_type, org, repo)
+        if new_commit is None:
+            return error_repo_not_found()
     else:
         new_commit = "main"
     return await meta_proxy_common(
         repo_type=repo_type, org=org, repo=repo, commit=new_commit, request=request
     )
 
-
+@app.head("/api/{repo_type}/{org}/{repo}/revision/{commit}")
 @app.get("/api/{repo_type}/{org}/{repo}/revision/{commit}")
 async def meta_proxy_commit2(
     repo_type: str, org: str, repo: str, commit: str, request: Request
@@ -205,7 +211,7 @@ async def meta_proxy_commit2(
         repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
     )
 
-
+@app.head("/api/{repo_type}/{org_repo}/revision/{commit}")
 @app.get("/api/{repo_type}/{org_repo}/revision/{commit}")
 async def meta_proxy_commit(repo_type: str, org_repo: str, commit: str, request: Request):
     org, repo = parse_org_repo(org_repo)
@@ -230,6 +236,7 @@ async def tree_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
             git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
+                # TODO: Local git repo trees
                 tree_data = local_repo.get_tree(commit)
                 if tree_data is None:
                     continue
@@ -269,7 +276,7 @@ async def tree_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
         traceback.print_exc()
         return Response(status_code=504)
 
-
+@app.head("/api/{repo_type}/{org}/{repo}/tree/{commit}")
 @app.get("/api/{repo_type}/{org}/{repo}/tree/{commit}")
 async def tree_proxy_commit2(
     repo_type: str, org: str, repo: str, commit: str, request: Request
@@ -279,6 +286,7 @@ async def tree_proxy_commit2(
     )
 
 
+@app.head("/api/{repo_type}/{org_repo}/tree/{commit}")
 @app.get("/api/{repo_type}/{org_repo}/tree/{commit}")
 async def tree_proxy_commit(repo_type: str, org_repo: str, commit: str, request: Request):
     org, repo = parse_org_repo(org_repo)

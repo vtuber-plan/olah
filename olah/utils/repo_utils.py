@@ -130,7 +130,7 @@ async def get_newest_commit_hf_offline(
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
     org: str,
     repo: str,
-) -> str:
+) -> Optional[str]:
     """
     Retrieves the newest commit hash for a repository in offline mode.
 
@@ -146,7 +146,7 @@ async def get_newest_commit_hf_offline(
     """
     repos_path = app.app_settings.repos_path
     save_dir = get_meta_save_dir(repos_path, repo_type, org, repo)
-    files = glob.glob(os.path.join(save_dir, "*", "meta.json"))
+    files = glob.glob(os.path.join(save_dir, "*", "meta_head.json"))
 
     time_revisions = []
     for file in files:
@@ -156,7 +156,10 @@ async def get_newest_commit_hf_offline(
             time_revisions.append((datetime_object, obj["sha"]))
 
     time_revisions = sorted(time_revisions)
-    return time_revisions[-1][1]
+    if len(time_revisions) == 0:
+        return None
+    else:
+        return time_revisions[-1][1]
 
 
 async def get_newest_commit_hf(
@@ -182,16 +185,16 @@ async def get_newest_commit_hf(
         app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org}/{repo}"
     )
     if app.app_settings.config.offline:
-        return get_newest_commit_hf_offline(app, repo_type, org, repo)
+        return await get_newest_commit_hf_offline(app, repo_type, org, repo)
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, timeout=WORKER_API_TIMEOUT)
             if response.status_code != 200:
-                return get_newest_commit_hf_offline(app, repo_type, org, repo)
+                return await get_newest_commit_hf_offline(app, repo_type, org, repo)
             obj = json.loads(response.text)
         return obj.get("sha", None)
     except:
-        return get_newest_commit_hf_offline(app, repo_type, org, repo)
+        return await get_newest_commit_hf_offline(app, repo_type, org, repo)
 
 
 async def get_commit_hf_offline(

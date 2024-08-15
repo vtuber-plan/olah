@@ -15,19 +15,16 @@ from fastapi import FastAPI, Request
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
+from olah.utils.cache_utils import _read_cache_request, _write_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
 
 async def _tree_cache_generator(save_path: str):
-    yield {}
-    with open(save_path, "rb") as f:
-        while True:
-            chunk = f.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            yield chunk
+    cache_rq = await _read_cache_request(save_path)
+    yield cache_rq["headers"]
+    yield cache_rq["content"]
 
 
 async def tree_proxy_cache(
@@ -38,10 +35,16 @@ async def tree_proxy_cache(
     commit: str,
     request: Request,
 ):
+    headers = {k: v for k, v in request.headers.items()}
+    headers.pop("host")
+
     # save
+    method = request.method.lower()
     repos_path = app.app_settings.repos_path
-    save_dir = os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}")
-    save_path = os.path.join(save_dir, "tree.json")
+    save_dir = os.path.join(
+        repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}"
+    )
+    save_path = os.path.join(save_dir, f"tree_{method}.json")
     make_dirs(save_path)
 
     # url
@@ -55,15 +58,16 @@ async def tree_proxy_cache(
         headers["authorization"] = request.headers["authorization"]
     async with httpx.AsyncClient() as client:
         response = await client.request(
-            method="GET",
+            method=request.method,
             url=tree_url,
             headers=headers,
             timeout=WORKER_API_TIMEOUT,
             follow_redirects=True,
         )
         if response.status_code == 200:
-            with open(save_path, "wb") as tree_file:
-                tree_file.write(response.content)
+            await _write_cache_request(
+                save_path, response.status_code, response.headers, response.content
+            )
         else:
             raise Exception(
                 f"Cannot get the branch info from the url {tree_url}, status: {response.status_code}"
@@ -75,16 +79,18 @@ async def _tree_proxy_generator(
     headers: Dict[str, str],
     tree_url: str,
     allow_cache: bool,
+    method: str,
     save_path: str,
 ):
     async with httpx.AsyncClient(follow_redirects=True) as client:
         content_chunks = []
         async with client.stream(
-            method="GET",
+            method=method,
             url=tree_url,
             headers=headers,
             timeout=WORKER_API_TIMEOUT,
         ) as response:
+            response_status_code = response.status_code
             response_headers = response.headers
             yield response_headers
 
@@ -97,8 +103,10 @@ async def _tree_proxy_generator(
         content = bytearray()
         for chunk in content_chunks:
             content += chunk
-        with open(save_path, "wb") as f:
-            f.write(bytes(content))
+
+        await _write_cache_request(
+            save_path, response_status_code, response_headers, bytes(content)
+        )
 
 
 async def tree_generator(
@@ -113,9 +121,12 @@ async def tree_generator(
     headers.pop("host")
 
     # save
+    method = request.method.lower()
     repos_path = app.app_settings.repos_path
-    save_dir = os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}")
-    save_path = os.path.join(save_dir, "tree.json")
+    save_dir = os.path.join(
+        repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}"
+    )
+    save_path = os.path.join(save_dir, f"tree_{method}.json")
     make_dirs(save_path)
 
     use_cache = os.path.exists(save_path)
@@ -132,6 +143,6 @@ async def tree_generator(
             yield item
     else:
         async for item in _tree_proxy_generator(
-            app, headers, tree_url, allow_cache, save_path
+            app, headers, tree_url, allow_cache, method, save_path
         ):
             yield item
