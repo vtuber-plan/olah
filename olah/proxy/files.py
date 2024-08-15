@@ -194,6 +194,8 @@ async def _file_full_header(
                     )
                 elif response.status_code == 403:
                     pass
+                elif response.status_code == 404:
+                    pass
                 else:
                     raise Exception(
                         f"Unexpected HTTP status code {response.status_code}"
