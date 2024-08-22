@@ -65,19 +65,70 @@ class LocalMirrorRepo(object):
         readme = self._get_readme(commit)
         return self._remove_card(readme)
 
-    def _get_entry_files(self, tree, include_dir=False) -> List[str]:
+    def _get_tree_files_recursive(self, tree, include_dir=False) -> List[str]:
         out_paths = []
         for entry in tree:
             if entry.type == "tree":
-                out_paths.extend(self._get_entry_files(entry))
+                out_paths.extend(self._get_tree_files_recursive(entry))
                 if include_dir:
                     out_paths.append(entry.path)
             else:
                 out_paths.append(entry.path)
         return out_paths
 
-    def _get_tree_files(self, commit: Commit) -> List[str]:
-        return self._get_entry_files(commit.tree)
+    def _get_commit_files_recursive(self, commit: Commit) -> List[str]:
+        return self._get_tree_files_recursive(commit.tree)
+
+    def _get_tree_files(self, tree: Tree) -> List[Dict[str, Union[int, str]]]:
+        entries = []
+        for entry in tree:
+            lfs = False
+            if entry.type != "tree":
+                t = "file"
+                repr_size = entry.size
+                if repr_size > 120 and repr_size < 150:
+                    # check lfs
+                    lfs_data = entry.data_stream.read().decode("utf-8")
+                    match_groups = re.match(
+                        r"version https://git-lfs\.github\.com/spec/v[0-9]\noid sha256:([0-9a-z]{64})\nsize ([0-9]+?)\n",
+                        lfs_data,
+                    )
+                    if match_groups is not None:
+                        lfs = True
+                        sha256 = match_groups.group(1)
+                        repr_size = int(match_groups.group(2))
+                        lfs_data = {
+                            "oid": sha256,
+                            "size": repr_size,
+                            "pointerSize": entry.size,
+                        }
+            else:
+                t = "directory"
+                repr_size = 0
+
+            if not lfs:
+                entries.append(
+                    {
+                        "type": t,
+                        "oid": entry.hexsha,
+                        "size": repr_size,
+                        "path": entry.name,
+                    }
+                )
+            else:
+                entries.append(
+                    {
+                        "type": t,
+                        "oid": entry.hexsha,
+                        "size": repr_size,
+                        "path": entry.name,
+                        "lfs": lfs_data,
+                    }
+                )
+        return entries
+
+    def _get_commit_files(self, commit: Commit) -> List[Dict[str, Union[int, str]]]:
+        return self._get_tree_files(commit.tree)
 
     def _get_earliest_commit(self) -> Commit:
         earliest_commit = None
@@ -92,7 +143,27 @@ class LocalMirrorRepo(object):
 
         return earliest_commit
 
-    def get_meta(self, commit_hash: str) -> Dict[str, Any]:
+    def get_tree(self, commit_hash: str, path: str) -> Optional[Dict[str, Any]]:
+        try:
+            commit = self._git_repo.commit(commit_hash)
+        except gitdb.exc.BadName:
+            return None
+
+        path_part = path.split("/")
+        tree = commit.tree
+        items = self._get_tree_files(tree=tree)
+        for part in path_part:
+            if len(part.strip()) == 0:
+                continue
+            if part not in [
+                item["path"] for item in items if item["type"] == "directory"
+            ]:
+                return None
+            tree = tree[part]
+            items = self._get_tree_files(tree=tree)
+        return items
+
+    def get_meta(self, commit_hash: str) -> Optional[Dict[str, Any]]:
         try:
             commit = self._git_repo.commit(commit_hash)
         except gitdb.exc.BadName:
@@ -117,7 +188,9 @@ class LocalMirrorRepo(object):
         meta.cardData = yaml.load(
             self._match_card(self._get_readme(commit)), Loader=yaml.CLoader
         )
-        meta.siblings = [{"rfilename": p} for p in self._get_tree_files(commit)]
+        meta.siblings = [
+            {"rfilename": p} for p in self._get_commit_files_recursive(commit)
+        ]
         meta.createdAt = self._get_earliest_commit().committed_datetime.strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
