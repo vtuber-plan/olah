@@ -21,13 +21,6 @@ import torch
 
 from olah.constants import DEFAULT_LOGGER_DIR
 
-server_error_msg = (
-    "**NETWORK ERROR DUE TO HIGH TRAFFIC. PLEASE REGENERATE OR REFRESH THIS PAGE.**"
-)
-moderation_msg = (
-    "YOUR INPUT VIOLATES OUR CONTENT MODERATION GUIDELINES. PLEASE TRY AGAIN."
-)
-
 handler = None
 
 
@@ -141,95 +134,6 @@ class StreamToLogger(object):
             encoded_message = self.linebuf.encode("utf-8", "ignore").decode("utf-8")
             self.logger.log(self.log_level, encoded_message.rstrip())
         self.linebuf = ""
-
-
-def disable_torch_init():
-    """
-    Disable the redundant torch default initialization to accelerate model creation.
-    """
-    import torch
-
-    setattr(torch.nn.Linear, "reset_parameters", lambda self: None)
-    setattr(torch.nn.LayerNorm, "reset_parameters", lambda self: None)
-
-
-def get_gpu_memory(max_gpus=None):
-    """Get available memory for each GPU."""
-    gpu_memory = []
-    num_gpus = (
-        torch.cuda.device_count()
-        if max_gpus is None
-        else min(max_gpus, torch.cuda.device_count())
-    )
-
-    for gpu_id in range(num_gpus):
-        with torch.cuda.device(gpu_id):
-            device = torch.cuda.current_device()
-            gpu_properties = torch.cuda.get_device_properties(device)
-            total_memory = gpu_properties.total_memory / (1024**3)
-            allocated_memory = torch.cuda.memory_allocated() / (1024**3)
-            available_memory = total_memory - allocated_memory
-            gpu_memory.append(available_memory)
-    return gpu_memory
-
-
-def violates_moderation(text):
-    """
-    Check whether the text violates OpenAI moderation API.
-    """
-    url = "https://api.openai.com/v1/moderations"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + os.environ["OPENAI_API_KEY"],
-    }
-    text = text.replace("\n", "")
-    data = "{" + '"input": ' + f'"{text}"' + "}"
-    data = data.encode("utf-8")
-    try:
-        ret = requests.post(url, headers=headers, data=data, timeout=5)
-        flagged = ret.json()["results"][0]["flagged"]
-    except requests.exceptions.RequestException as e:
-        flagged = False
-    except KeyError as e:
-        flagged = False
-
-    return flagged
-
-
-# Flan-t5 trained with HF+FSDP saves corrupted  weights for shared embeddings,
-# Use this function to make sure it can be correctly loaded.
-def clean_flant5_ckpt(ckpt_path):
-    index_file = os.path.join(ckpt_path, "pytorch_model.bin.index.json")
-    index_json = json.load(open(index_file, "r"))
-
-    weightmap = index_json["weight_map"]
-
-    share_weight_file = weightmap["shared.weight"]
-    share_weight = torch.load(os.path.join(ckpt_path, share_weight_file))[
-        "shared.weight"
-    ]
-
-    for weight_name in ["decoder.embed_tokens.weight", "encoder.embed_tokens.weight"]:
-        weight_file = weightmap[weight_name]
-        weight = torch.load(os.path.join(ckpt_path, weight_file))
-        weight[weight_name] = share_weight
-        torch.save(weight, os.path.join(ckpt_path, weight_file))
-
-
-def pretty_print_semaphore(semaphore):
-    if semaphore is None:
-        return "None"
-    return f"Semaphore(value={semaphore._value}, locked={semaphore.locked()})"
-
-
-get_window_url_params_js = """
-function() {
-    const params = new URLSearchParams(window.location.search);
-    url_params = Object.fromEntries(params);
-    console.log("url_params", url_params);
-    return url_params;
-    }
-"""
 
 
 def iter_over_async(

@@ -162,3 +162,12 @@ def remove_query_param(url: str, param_name: str) -> str:
     new_url = urlunparse(parsed_url._replace(query=new_query))
 
     return new_url
+
+
+def clean_path(path: str) -> str:
+    while ".." in path:
+        path = path.replace("..", "")
+    path = path.replace("\\", "/")
+    while "//" in path:
+        path = path.replace("//", "/")
+    return path

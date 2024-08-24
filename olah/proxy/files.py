@@ -24,7 +24,8 @@ from olah.constants import (
     HUGGINGFACE_HEADER_X_LINKED_SIZE,
     ORIGINAL_LOC,
 )
-from olah.utils.olah_cache import OlahCache
+from olah.cache.olah_cache import OlahCache
+from olah.utils.cache_utils import _read_cache_request, _write_cache_request
 from olah.utils.url_utils import (
     RemoteInfo,
     add_query_param,
@@ -79,48 +80,6 @@ def get_contiguous_ranges(
     ranges_and_cache_list.append(((range_start_pos, end_pos), range_is_remote))
     range_start_pos = end_pos
     return ranges_and_cache_list
-
-
-async def _write_cache_request(
-    head_path: str, status_code: int, headers: Dict[str, str], content: bytes
-) -> None:
-    """
-    Write the request's status code, headers, and content to a cache file.
-
-    Args:
-        head_path (str): The path to the cache file.
-        status_code (int): The status code of the request.
-        headers (Dict[str, str]): The dictionary of response headers.
-        content (bytes): The content of the request.
-
-    Returns:
-        None
-    """
-    rq = {
-        "status_code": status_code,
-        "headers": headers,
-        "content": content.hex(),
-    }
-    with open(head_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(rq, ensure_ascii=False))
-
-
-async def _read_cache_request(head_path: str) -> Dict[str, str]:
-    """
-    Read the request's status code, headers, and content from a cache file.
-
-    Args:
-        head_path (str): The path to the cache file.
-
-    Returns:
-        Dict[str, str]: A dictionary containing the status code, headers, and content of the request.
-    """
-    with open(head_path, "r", encoding="utf-8") as f:
-        rq = json.loads(f.read())
-
-    rq["content"] = bytes.fromhex(rq["content"])
-    return rq
-
 
 async def _file_full_header(
     app,
@@ -193,6 +152,8 @@ async def _file_full_header(
                         response.content,
                     )
                 elif response.status_code == 403:
+                    pass
+                elif response.status_code == 404:
                     pass
                 else:
                     raise Exception(

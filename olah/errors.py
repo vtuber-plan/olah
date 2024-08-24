@@ -28,3 +28,13 @@ def error_page_not_found() -> Response:
         },
         status_code=404,
     )
+
+def error_entry_not_found(branch: str, path: str) -> Response:
+    return Response(
+        headers={
+            "x-error-code": "EntryNotFound",
+            "x-error-message": f"{path} does not exist on \"{branch}\"",
+        },
+        status_code=404,
+    )
+

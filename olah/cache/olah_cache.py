@@ -52,7 +52,7 @@ class OlahCacheHeader(object):
         return self._block_number
 
     @property
-    def block_mask(self) -> int:
+    def block_mask(self) -> Bitset:
         return self._block_mask
 
     def get_header_size(self):
@@ -76,11 +76,18 @@ class OlahCacheHeader(object):
     @staticmethod
     def read(stream) -> "OlahCacheHeader":
         obj = OlahCacheHeader()
-        magic, version, block_size, file_size, block_mask_size = struct.unpack(
-            "<4sQQQQ", stream.read(OlahCacheHeader.HEADER_FIX_SIZE)
+        try:
+            magic = struct.unpack(
+                "<4s", stream.read(4)
+            )
+        except struct.error:
+            raise Exception("File is not a Olah cache file.")
+        if magic[0] != OlahCacheHeader.MAGIC_NUMBER:
+            raise Exception("File is not a Olah cache file.")
+        
+        version, block_size, file_size, block_mask_size = struct.unpack(
+            "<QQQQ", stream.read(OlahCacheHeader.HEADER_FIX_SIZE - 4)
         )
-        if magic != OlahCacheHeader.MAGIC_NUMBER:
-            raise Exception("The file is not a valid olah cache file.")
         obj._version = version
         obj._block_size = block_size
         obj._file_size = file_size
