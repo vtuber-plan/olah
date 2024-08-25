@@ -713,6 +713,10 @@ if __name__ in ["__main__", "olah.server"]:
         args.ssl_cert = config.ssl_cert
     if is_default_value(args, "repos_path"):
         args.repos_path = config.repos_path
+    
+    # Post processing
+    if "," in args.host:
+        args.host = args.host.split(",")
 
     app.app_settings = AppSettings(
         config=config,
