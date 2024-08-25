@@ -672,8 +672,7 @@ if __name__ in ["__main__", "olah.server"]:
     parser.add_argument("--repos-path", type=str, default="./repos", help="The folder to save cached repositories")
     parser.add_argument("--log-path", type=str, default="./logs", help="The folder to save logs")
     args = parser.parse_args()
-    print(args)
-
+    
     logger = build_logger("olah", "olah.log", logger_dir=args.log_path)
     
     def is_default_value(args, arg_name):
@@ -714,10 +713,33 @@ if __name__ in ["__main__", "olah.server"]:
     if is_default_value(args, "repos_path"):
         args.repos_path = config.repos_path
     
+    if is_default_value(args, "hf_scheme"):
+        args.hf_scheme = config.hf_scheme
+    if is_default_value(args, "hf_netloc"):
+        args.hf_netloc = config.hf_netloc
+    if is_default_value(args, "hf_lfs_netloc"):
+        args.hf_lfs_netloc = config.hf_lfs_netloc
+    if is_default_value(args, "mirror_scheme"):
+        args.mirror_scheme = config.mirror_scheme
+    if is_default_value(args, "mirror_netloc"):
+        args.mirror_netloc = config.mirror_netloc
+    if is_default_value(args, "mirror_lfs_netloc"):
+        args.mirror_lfs_netloc = config.mirror_lfs_netloc
+
     # Post processing
     if "," in args.host:
         args.host = args.host.split(",")
+    
+    args.mirror_scheme = config.mirror_scheme = "http" if args.ssl_key is None else "https"
+    args.mirror_netloc = config.mirror_netloc = (
+        f"{config.host if config._is_specific_addr(config.host) else 'localhost'}:{config.port}"
+    )
+    args.mirror_lfs_netloc = config.mirror_lfs_netloc = (
+        f"{config.host if config._is_specific_addr(config.host) else 'localhost'}:{config.port}"
+    )
 
+    print(args)
+    # Init app settings
     app.app_settings = AppSettings(
         config=config,
         repos_path=args.repos_path,
