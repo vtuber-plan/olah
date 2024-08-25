@@ -731,12 +731,6 @@ if __name__ in ["__main__", "olah.server"]:
         args.host = args.host.split(",")
     
     args.mirror_scheme = config.mirror_scheme = "http" if args.ssl_key is None else "https"
-    args.mirror_netloc = config.mirror_netloc = (
-        f"{config.host if config._is_specific_addr(config.host) else 'localhost'}:{config.port}"
-    )
-    args.mirror_lfs_netloc = config.mirror_lfs_netloc = (
-        f"{config.host if config._is_specific_addr(config.host) else 'localhost'}:{config.port}"
-    )
 
     print(args)
     # Init app settings
