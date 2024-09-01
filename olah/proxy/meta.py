@@ -97,6 +97,6 @@ async def meta_generator(
             yield item
     else:
         async for item in _meta_proxy_generator(
-            app, headers, meta_url, allow_cache, method, save_path
+            app, headers, meta_url, method, allow_cache, save_path
         ):
             yield item

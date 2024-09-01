@@ -29,9 +29,9 @@ async def _pathsinfo_proxy(
     app: FastAPI,
     headers: Dict[str, str],
     pathsinfo_url: str,
-    allow_cache: bool,
     method: str,
     path: str,
+    allow_cache: bool,
     save_path: str,
 ):
     headers = {k: v for k, v in headers.items()}
@@ -94,7 +94,7 @@ async def pathsinfo_generator(
             status, headers, content = await _pathsinfo_cache(save_path)
         else:
             status, headers, content = await _pathsinfo_proxy(
-                app, headers, pathsinfo_url, allow_cache, method, path, save_path
+                app, headers, pathsinfo_url, method, path, allow_cache, save_path
             )
 
         try:

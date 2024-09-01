@@ -28,9 +28,9 @@ async def _tree_proxy_generator(
     app: FastAPI,
     headers: Dict[str, str],
     tree_url: str,
-    allow_cache: bool,
     method: str,
     recursive: bool,
+    allow_cache: bool,
     save_path: str,
 ):
     async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -102,6 +102,6 @@ async def tree_generator(
             yield item
     else:
         async for item in _tree_proxy_generator(
-            app, headers, tree_url, allow_cache, method, recursive, save_path
+            app, headers, tree_url, method, recursive, allow_cache, save_path
         ):
             yield item
