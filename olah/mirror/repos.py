@@ -66,19 +66,19 @@ class LocalMirrorRepo(object):
         readme = self._get_readme(commit)
         return self._remove_card(readme)
 
-    def _get_tree_filenames_recursive(self, tree, include_dir=False) -> List[str]:
+    def _get_tree_filepaths_recursive(self, tree, include_dir=False) -> List[str]:
         out_paths = []
         for entry in tree:
             if entry.type == "tree":
-                out_paths.extend(self._get_tree_filenames_recursive(entry))
+                out_paths.extend(self._get_tree_filepaths_recursive(entry))
                 if include_dir:
                     out_paths.append(entry.path)
             else:
                 out_paths.append(entry.path)
         return out_paths
 
-    def _get_commit_filenames_recursive(self, commit: Commit) -> List[str]:
-        return self._get_tree_filenames_recursive(commit.tree)
+    def _get_commit_filepaths_recursive(self, commit: Commit) -> List[str]:
+        return self._get_tree_filepaths_recursive(commit.tree)
 
     def _get_path_info(self, entry: IndexObjUnion, expand: bool=False) -> Dict[str, Union[int, str]]:
         lfs = False
@@ -262,7 +262,7 @@ class LocalMirrorRepo(object):
             self._match_card(self._get_readme(commit)), Loader=yaml.CLoader
         )
         meta.siblings = [
-            {"rfilename": p} for p in self._get_commit_filenames_recursive(commit)
+            {"rfilename": p} for p in self._get_commit_filepaths_recursive(commit)
         ]
         meta.createdAt = self._get_earliest_commit().committed_datetime.strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"

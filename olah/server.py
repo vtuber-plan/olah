@@ -322,8 +322,9 @@ async def tree_proxy_common(
                 request=request,
             )
 
+        status_code = await generator.__anext__()
         headers = await generator.__anext__()
-        return StreamingResponse(generator, headers=headers)
+        return StreamingResponse(generator, status_code=status_code, headers=headers)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)

@@ -21,6 +21,7 @@ from olah.utils.file_utils import make_dirs
 
 async def _tree_cache_generator(save_path: str):
     cache_rq = await _read_cache_request(save_path)
+    yield cache_rq["status_code"]
     yield cache_rq["headers"]
     yield cache_rq["content"]
 
@@ -44,6 +45,7 @@ async def _tree_proxy_generator(
         ) as response:
             response_status_code = response.status_code
             response_headers = response.headers
+            yield response_status_code
             yield response_headers
 
             async for raw_chunk in response.aiter_raw():
