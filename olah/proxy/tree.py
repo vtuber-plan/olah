@@ -6,7 +6,7 @@
 # https://opensource.org/licenses/MIT.
 
 import os
-from typing import Dict, Literal
+from typing import Dict, Literal, Mapping
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 
@@ -29,7 +29,7 @@ async def _tree_proxy_generator(
     headers: Dict[str, str],
     tree_url: str,
     method: str,
-    recursive: bool,
+    params: Mapping[str, str],
     allow_cache: bool,
     save_path: str,
 ):
@@ -38,7 +38,7 @@ async def _tree_proxy_generator(
         async with client.stream(
             method=method,
             url=tree_url,
-            params={"recursive": recursive},
+            params=params,
             headers=headers,
             timeout=WORKER_API_TIMEOUT,
         ) as response:
@@ -71,6 +71,7 @@ async def tree_generator(
     commit: str,
     path: str,
     recursive: bool,
+    expand: bool,
     override_cache: bool,
     request: Request,
 ):
@@ -83,10 +84,7 @@ async def tree_generator(
     save_dir = os.path.join(
         repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}/{path}"
     )
-    if not recursive:
-        save_path = os.path.join(save_dir, f"tree_{method}.json")
-    else:
-        save_path = os.path.join(save_dir, f"tree_{method}_recursive.json")
+    save_path = os.path.join(save_dir, f"tree_{method}_recursive_{recursive}_expand_{expand}.json")
 
     use_cache = os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
@@ -102,6 +100,6 @@ async def tree_generator(
             yield item
     else:
         async for item in _tree_proxy_generator(
-            app, headers, tree_url, method, recursive, allow_cache, save_path
+            app, headers, tree_url, method, {"recursive": recursive, "expand": expand}, allow_cache, save_path
         ):
             yield item

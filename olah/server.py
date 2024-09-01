@@ -104,6 +104,7 @@ async def check_hf_connection() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # TODO: Check repo cache path
     await check_hf_connection()
     yield
 
@@ -249,6 +250,7 @@ async def tree_proxy_common(
     commit: str,
     path: str,
     recursive: bool,
+    expand: bool,
     request: Request,
 ) -> Response:
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
@@ -263,7 +265,7 @@ async def tree_proxy_common(
             git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
-                tree_data = local_repo.get_tree(commit, path, recursive=recursive)
+                tree_data = local_repo.get_tree(commit, path, recursive=recursive, expand=expand)
                 if tree_data is None:
                     continue
                 return JSONResponse(content=tree_data)
@@ -302,6 +304,7 @@ async def tree_proxy_common(
                 commit=commit_sha,
                 path=path,
                 recursive=recursive,
+                expand=expand,
                 override_cache=True,
                 request=request,
             )
@@ -314,6 +317,7 @@ async def tree_proxy_common(
                 commit=commit_sha,
                 path=path,
                 recursive=recursive,
+                expand=expand,
                 override_cache=False,
                 request=request,
             )
@@ -335,6 +339,7 @@ async def tree_proxy_commit2(
     file_path: str,
     request: Request,
     recursive: bool = False,
+    expand: bool=False,
 ):
     return await tree_proxy_common(
         repo_type=repo_type,
@@ -343,6 +348,7 @@ async def tree_proxy_commit2(
         commit=commit,
         path=file_path,
         recursive=recursive,
+        expand=expand,
         request=request,
     )
 
@@ -356,6 +362,7 @@ async def tree_proxy_commit(
     file_path: str,
     request: Request,
     recursive: bool = False,
+    expand: bool=False,
 ):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
@@ -368,6 +375,7 @@ async def tree_proxy_commit(
         commit=commit,
         path=file_path,
         recursive=recursive,
+        expand=expand,
         request=request,
     )
 

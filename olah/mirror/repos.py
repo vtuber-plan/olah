@@ -80,7 +80,7 @@ class LocalMirrorRepo(object):
     def _get_commit_filenames_recursive(self, commit: Commit) -> List[str]:
         return self._get_tree_filenames_recursive(commit.tree)
 
-    def _get_path_info(self, entry: IndexObjUnion) -> Dict[str, Union[int, str]]:
+    def _get_path_info(self, entry: IndexObjUnion, expand: bool=False) -> Dict[str, Union[int, str]]:
         lfs = False
         if entry.type != "tree":
             t = "file"
@@ -122,19 +122,39 @@ class LocalMirrorRepo(object):
                 "name": entry.name,
                 "lfs": lfs_data,
             }
+        if expand:
+            last_commit = next(self._git_repo.iter_commits(paths=entry.path, max_count=1))
+            item["lastCommit"] = {
+                "id": last_commit.hexsha,
+                "title": last_commit.message,
+                "date": last_commit.committed_datetime.strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                )
+            }
+            item["security"] = {
+                "blobId": entry.hexsha,
+                "name": entry.name,
+                "safe": True,
+                "indexed": False,
+                "avScan": {
+                    "virusFound": False,
+                    "virusNames": None
+                },
+                "pickleImportScan": None
+            }
         return item
 
     def _get_tree_files(
-        self, tree: Tree, recursive: bool = False
+        self, tree: Tree, recursive: bool = False, expand: bool = False
     ) -> List[Dict[str, Union[int, str]]]:
         entries = []
         for entry in tree:
-            entries.append(self._get_path_info(entry=entry))
+            entries.append(self._get_path_info(entry=entry, expand=expand))
 
         if recursive:
             for entry in tree:
                 if entry.type == "tree":
-                    entries.extend(self._get_tree_files(entry, recursive=recursive))
+                    entries.extend(self._get_tree_files(entry, recursive=recursive, expand=expand))
         return entries
 
     def _get_commit_files(self, commit: Commit) -> List[Dict[str, Union[int, str]]]:
@@ -203,7 +223,7 @@ class LocalMirrorRepo(object):
         return results
 
     def get_tree(
-        self, commit_hash: str, path: str, recursive: bool = False
+        self, commit_hash: str, path: str, recursive: bool = False, expand: bool = False
     ) -> Optional[Dict[str, Any]]:
         try:
             commit = self._git_repo.commit(commit_hash)
@@ -211,7 +231,7 @@ class LocalMirrorRepo(object):
             return None
 
         index_obj = self.get_index_object_by_path(commit_hash=commit_hash, path=path)
-        items = self._get_tree_files(tree=index_obj, recursive=recursive)
+        items = self._get_tree_files(tree=index_obj, recursive=recursive, expand=expand)
         for r in items:
             r.pop("name")
         return items
