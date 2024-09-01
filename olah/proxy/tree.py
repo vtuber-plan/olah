@@ -6,8 +6,6 @@
 # https://opensource.org/licenses/MIT.
 
 import os
-import shutil
-import tempfile
 from typing import Dict, Literal
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
@@ -21,12 +19,6 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
 
-async def _tree_cache_generator(save_path: str):
-    cache_rq = await _read_cache_request(save_path)
-    yield cache_rq["headers"]
-    yield cache_rq["content"]
-
-
 async def tree_proxy_cache(
     app: FastAPI,
     repo_type: Literal["models", "datasets", "spaces"],
@@ -34,6 +26,7 @@ async def tree_proxy_cache(
     repo: str,
     commit: str,
     path: str,
+    recursive: bool,
     request: Request,
 ):
     headers = {k: v for k, v in request.headers.items()}
@@ -45,7 +38,10 @@ async def tree_proxy_cache(
     save_dir = os.path.join(
         repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}/{path}"
     )
-    save_path = os.path.join(save_dir, f"tree_{method}.json")
+    if not recursive:
+        save_path = os.path.join(save_dir, f"tree_{method}.json")
+    else:
+        save_path = os.path.join(save_dir, f"tree_{method}_recursive.json")
 
     # url
     org_repo = get_org_repo(org, repo)
@@ -60,6 +56,7 @@ async def tree_proxy_cache(
         response = await client.request(
             method=request.method,
             url=tree_url,
+            params={"recursive": recursive},
             headers=headers,
             timeout=WORKER_API_TIMEOUT,
             follow_redirects=True,
@@ -77,12 +74,18 @@ async def tree_proxy_cache(
             )
 
 
+async def _tree_cache_generator(save_path: str):
+    cache_rq = await _read_cache_request(save_path)
+    yield cache_rq["headers"]
+    yield cache_rq["content"]
+
 async def _tree_proxy_generator(
     app: FastAPI,
     headers: Dict[str, str],
     tree_url: str,
     allow_cache: bool,
     method: str,
+    recursive: bool,
     save_path: str,
 ):
     async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -90,6 +93,7 @@ async def _tree_proxy_generator(
         async with client.stream(
             method=method,
             url=tree_url,
+            params={"recursive": recursive},
             headers=headers,
             timeout=WORKER_API_TIMEOUT,
         ) as response:
@@ -121,6 +125,7 @@ async def tree_generator(
     repo: str,
     commit: str,
     path: str,
+    recursive: bool,
     request: Request,
 ):
     headers = {k: v for k, v in request.headers.items()}
@@ -132,7 +137,10 @@ async def tree_generator(
     save_dir = os.path.join(
         repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}/{path}"
     )
-    save_path = os.path.join(save_dir, f"tree_{method}.json")
+    if not recursive:
+        save_path = os.path.join(save_dir, f"tree_{method}.json")
+    else:
+        save_path = os.path.join(save_dir, f"tree_{method}_recursive.json")
 
     use_cache = os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
@@ -148,6 +156,6 @@ async def tree_generator(
             yield item
     else:
         async for item in _tree_proxy_generator(
-            app, headers, tree_url, allow_cache, method, save_path
+            app, headers, tree_url, allow_cache, method, recursive, save_path
         ):
             yield item
