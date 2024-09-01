@@ -430,11 +430,27 @@ async def _file_realtime_stream(
                 headers=request_headers,
                 allow_cache=allow_cache,
             )
-            if status_code != 200:
-                yield status_code
-                yield head_info
-                yield content
+            if status_code == 404:
+                yield 404
+                yield {
+                    "x-error-code": "EntryNotFound",
+                    "x-error-message": "Entry not found",
+                }
+                yield "Entry not found"
                 return
+            if status_code != 200:
+                if method.lower() == "head":
+                    yield status_code
+                    yield head_info
+                    yield content
+                    return
+                elif method.lower() == "get":
+                    yield status_code
+                    yield head_info
+                    yield content
+                    return
+                else:
+                    raise Exception("Invalid method in _file_realtime_stream parameter.")
         except httpx.ConnectError:
             yield 504
             yield {}
