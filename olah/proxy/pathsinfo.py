@@ -45,7 +45,7 @@ async def _pathsinfo_proxy(
             timeout=WORKER_API_TIMEOUT,
         )
 
-        if response.status_code == 200:
+        if allow_cache and response.status_code == 200:
             make_dirs(save_path)
             await _write_cache_request(
                 save_path,
@@ -63,6 +63,7 @@ async def pathsinfo_generator(
     repo: str,
     commit: str,
     paths: List[str],
+    override_cache: bool,
     request: Request,
 ):
     headers = {k: v for k, v in request.headers.items()}
@@ -89,10 +90,9 @@ async def pathsinfo_generator(
             f"/api/{repo_type}/{org_repo}/paths-info/{commit}",
         )
         # proxy
-        if use_cache:
+        if use_cache and not override_cache:
             status, headers, content = await _pathsinfo_cache(save_path)
         else:
-            print(path)
             status, headers, content = await _pathsinfo_proxy(
                 app, headers, pathsinfo_url, allow_cache, method, path, save_path
             )

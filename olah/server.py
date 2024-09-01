@@ -123,7 +123,6 @@ class AppSettings(BaseSettings):
 # See also: https://huggingface.co/docs/hub/api#repo-listing-api
 # ======================
 async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, request: Request) -> Response:
-    # TODO: the head method of meta apis
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     if repo_type not in REPO_TYPES_MAPPING.keys():
         return error_page_not_found()
@@ -166,8 +165,25 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
             return error_repo_not_found()
         # if branch name and online mode, refresh branch info
         if not app.app_settings.config.offline and commit_sha != commit:
-            await meta_proxy_cache(app, repo_type, org, repo, commit, request)
-        generator = meta_generator(app, repo_type, org, repo, commit_sha, request)
+            generator = meta_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit=commit_sha,
+                override_cache=True,
+                request=request,
+            )
+        else:
+            generator = meta_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit=commit_sha,
+                override_cache=False,
+                request=request,
+            )
         headers = await generator.__anext__()
         return StreamingResponse(generator, headers=headers)
     except httpx.ConnectTimeout:
@@ -235,7 +251,6 @@ async def tree_proxy_common(
     recursive: bool,
     request: Request,
 ) -> Response:
-    # TODO ?recursive=True
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     path = clean_path(path)
     if repo_type not in REPO_TYPES_MAPPING.keys():
@@ -279,8 +294,30 @@ async def tree_proxy_common(
             return error_repo_not_found()
         # if branch name and online mode, refresh branch info
         if not app.app_settings.config.offline and commit_sha != commit:
-            await tree_proxy_cache(app, repo_type, org, repo, commit, path, recursive, request)
-        generator = tree_generator(app, repo_type, org, repo, commit_sha, path, recursive, request)
+            generator = tree_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit_sha=commit_sha,
+                path=path,
+                recursive=recursive,
+                override_cache=True,
+                request=request,
+            )
+        else:
+            generator = tree_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit_sha=commit_sha,
+                path=path,
+                recursive=recursive,
+                override_cache=False,
+                request=request,
+            )
+
         headers = await generator.__anext__()
         return StreamingResponse(generator, headers=headers)
     except httpx.ConnectTimeout:
@@ -379,7 +416,10 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
         )
         if commit_sha is None:
             return error_repo_not_found()
-        generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, request)
+        if not app.app_settings.config.offline and commit_sha != commit:
+            generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=True, request=request)
+        else:
+            generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=False, request=request)
         headers = await generator.__anext__()
         return StreamingResponse(generator, headers=headers)
     except httpx.ConnectTimeout:

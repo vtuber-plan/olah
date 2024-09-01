@@ -20,66 +20,18 @@ from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
-
 async def _meta_cache_generator(save_path: str):
     cache_rq = await _read_cache_request(save_path)
     yield cache_rq["headers"]
     yield cache_rq["content"]
 
 
-async def meta_proxy_cache(
-    app: FastAPI,
-    repo_type: Literal["models", "datasets", "spaces"],
-    org: str,
-    repo: str,
-    commit: str,
-    request: Request,
-):
-    headers = {k: v for k, v in request.headers.items()}
-    headers.pop("host")
-
-    # save
-    method = request.method.lower()
-    repos_path = app.app_settings.repos_path
-    save_dir = os.path.join(
-        repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}"
-    )
-    save_path = os.path.join(save_dir, f"meta_{method}.json")
-    make_dirs(save_path)
-
-    # url
-    org_repo = get_org_repo(org, repo)
-    meta_url = urljoin(
-        app.app_settings.config.hf_url_base(),
-        f"/api/{repo_type}/{org_repo}/revision/{commit}",
-    )
-    headers = {}
-    if "authorization" in request.headers:
-        headers["authorization"] = request.headers["authorization"]
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method=request.method,
-            url=meta_url,
-            headers=headers,
-            timeout=WORKER_API_TIMEOUT,
-            follow_redirects=True,
-        )
-        if response.status_code == 200:
-            await _write_cache_request(
-                save_path, response.status_code, response.headers, response.content
-            )
-        else:
-            raise Exception(
-                f"Cannot get the branch info from the url {meta_url}, status: {response.status_code}"
-            )
-
-
 async def _meta_proxy_generator(
     app: FastAPI,
     headers: Dict[str, str],
     meta_url: str,
-    allow_cache: bool,
     method: str,
+    allow_cache: bool,
     save_path: str,
 ):
     async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -104,9 +56,10 @@ async def _meta_proxy_generator(
         for chunk in content_chunks:
             content += chunk
 
-        await _write_cache_request(
-            save_path, response_status_code, response_headers, bytes(content)
-        )
+        if allow_cache and response_status_code == 200:
+            await _write_cache_request(
+                save_path, response_status_code, response_headers, bytes(content)
+            )
 
 
 async def meta_generator(
@@ -115,6 +68,7 @@ async def meta_generator(
     org: str,
     repo: str,
     commit: str,
+    override_cache: bool,
     request: Request,
 ):
     headers = {k: v for k, v in request.headers.items()}
@@ -138,7 +92,7 @@ async def meta_generator(
         f"/api/{repo_type}/{org_repo}/revision/{commit}",
     )
     # proxy
-    if use_cache:
+    if use_cache and not override_cache:
         async for item in _meta_cache_generator(save_path):
             yield item
     else:
