@@ -27,7 +27,7 @@ import git
 import httpx
 
 from olah.proxy.pathsinfo import pathsinfo_generator
-from olah.proxy.tree import tree_generator, tree_proxy_cache
+from olah.proxy.tree import tree_generator
 from olah.utils.url_utils import clean_path
 
 BASE_SETTINGS = False
@@ -53,7 +53,7 @@ from olah.errors import error_repo_not_found, error_page_not_found
 from olah.mirror.repos import LocalMirrorRepo
 from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
-from olah.proxy.meta import meta_generator, meta_proxy_cache
+from olah.proxy.meta import meta_generator
 from olah.utils.rule_utils import check_proxy_rules_hf, get_org_repo
 from olah.utils.repo_utils import (
     check_commit_hf,
