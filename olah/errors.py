@@ -38,3 +38,12 @@ def error_entry_not_found(branch: str, path: str) -> Response:
         status_code=404,
     )
 
+def error_revision_not_found(revision: str) -> Response:
+    return JSONResponse(
+        content={"error": f"Invalid rev id: {revision}"},
+        headers={
+            "x-error-code": "RevisionNotFound",
+            "x-error-message": f"Invalid rev id: {revision}",
+        },
+        status_code=404,
+    )

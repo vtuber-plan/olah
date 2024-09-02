@@ -49,7 +49,7 @@ if not BASE_SETTINGS:
     raise Exception("Cannot import BaseSettings from pydantic or pydantic-settings")
 
 from olah.configs import OlahConfig
-from olah.errors import error_repo_not_found, error_page_not_found
+from olah.errors import error_repo_not_found, error_page_not_found, error_revision_not_found
 from olah.mirror.repos import LocalMirrorRepo
 from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
@@ -87,19 +87,13 @@ async def check_connection(url: str) -> bool:
 async def check_hf_connection() -> None:
     if app.app_settings.config.offline:
         return
+    scheme = app.app_settings.config.hf_scheme
+    netloc = app.app_settings.config.hf_netloc
     hf_online_status = await check_connection(
-        "https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/.gitattributes"
+        f"{scheme}://{netloc}/datasets/Salesforce/wikitext/resolve/main/.gitattributes"
     )
     if not hf_online_status:
-        logger.info(
-            "Cannot reach Huggingface Official Site. Trying to connect hf-mirror."
-        )
-        hf_mirror_online_status = await check_connection(
-            "https://hf-mirror.com/datasets/Salesforce/wikitext/resolve/main/.gitattributes"
-        )
-        if not hf_online_status and not hf_mirror_online_status:
-            logger.error("Failed to reach Huggingface Official Site.")
-            logger.error("Failed to reach hf-mirror Site.")
+        logger.error("Failed to reach Huggingface Site.")
 
 
 @asynccontextmanager
@@ -145,21 +139,16 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
 
     # Proxy the HF File Meta
     try:
-        if not app.app_settings.config.offline and not await check_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
-            authorization=request.headers.get("authorization", None),
-        ):
-            return error_repo_not_found()
-        commit_sha = await get_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
+        if not app.app_settings.config.offline:
+            if not await check_commit_hf(app, repo_type, org, repo, commit=None,
+                authorization=request.headers.get("authorization", None),
+            ):
+                return error_repo_not_found()
+            if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
+                authorization=request.headers.get("authorization", None),
+            ):
+                return error_revision_not_found(revision=commit)
+        commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
             authorization=request.headers.get("authorization", None),
         )
         if commit_sha is None:
@@ -275,21 +264,16 @@ async def tree_proxy_common(
 
     # Proxy the HF File Meta
     try:
-        if not app.app_settings.config.offline and not await check_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
-            authorization=request.headers.get("authorization", None),
-        ):
-            return error_repo_not_found()
-        commit_sha = await get_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
+        if not app.app_settings.config.offline:
+            if not await check_commit_hf(app, repo_type, org, repo, commit=None,
+                authorization=request.headers.get("authorization", None),
+            ):
+                return error_repo_not_found()
+            if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
+                authorization=request.headers.get("authorization", None),
+            ):
+                return error_revision_not_found(revision=commit)
+        commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
             authorization=request.headers.get("authorization", None),
         )
         if commit_sha is None:
@@ -381,7 +365,6 @@ async def tree_proxy_commit(
     )
 
 
-# TODO: paths-info
 async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: str, paths: List[str], request: Request) -> Response:
     # TODO: the head method of meta apis
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
@@ -396,31 +379,26 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
             git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
-                tree_data = local_repo.get_pathinfos(commit, paths)
-                if tree_data is None:
+                pathsinfo_data = local_repo.get_pathinfos(commit, paths)
+                if pathsinfo_data is None:
                     continue
-                return JSONResponse(content=tree_data)
+                return JSONResponse(content=pathsinfo_data)
         except git.exc.InvalidGitRepositoryError:
             logger.warning(f"Local repository {git_path} is not a valid git reposity.")
             continue
 
     # Proxy the HF File Meta
     try:
-        if not app.app_settings.config.offline and not await check_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
-            authorization=request.headers.get("authorization", None),
-        ):
-            return error_repo_not_found()
-        commit_sha = await get_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
+        if not app.app_settings.config.offline:
+            if not await check_commit_hf(app, repo_type, org, repo, commit=None,
+                authorization=request.headers.get("authorization", None),
+            ):
+                return error_repo_not_found()
+            if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
+                authorization=request.headers.get("authorization", None),
+            ):
+                return error_revision_not_found(revision=commit)
+        commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
             authorization=request.headers.get("authorization", None),
         )
         if commit_sha is None:

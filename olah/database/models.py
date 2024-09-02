@@ -24,3 +24,12 @@ class BaseModel(Model):
 
 class User(BaseModel):
     username = CharField(unique=True)
+
+
+class DownloadLogs(BaseModel):
+    id = CharField(unique=True)
+    org = CharField()
+    repo = CharField()
+    path = CharField()
+    datetime = DateTimeField()
+    user = CharField()
