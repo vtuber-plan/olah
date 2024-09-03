@@ -7,8 +7,10 @@
 
 from contextlib import asynccontextmanager
 import os
+import shutil
 import glob
 import argparse
+import time
 import traceback
 from typing import Annotated, List, Optional, Union
 from urllib.parse import urljoin
@@ -28,6 +30,7 @@ import httpx
 
 from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.proxy.tree import tree_generator
+from olah.utils.disk_utils import convert_bytes_to_human_readable, convert_to_bytes, get_folder_size, sort_files_by_access_time, sort_files_by_modify_time, sort_files_by_size
 from olah.utils.url_utils import clean_path
 
 BASE_SETTINGS = False
@@ -83,7 +86,7 @@ async def check_connection(url: str) -> bool:
         return False
 
 
-@repeat_every(seconds=60*5)
+@repeat_every(seconds=60 * 5)
 async def check_hf_connection() -> None:
     if app.app_settings.config.offline:
         return
@@ -96,11 +99,62 @@ async def check_hf_connection() -> None:
         logger.error("Failed to reach Huggingface Site.")
 
 
+@repeat_every(seconds=60 * 60)
+async def check_disk_usage() -> None:
+    if app.app_settings.config.offline:
+        return
+    if app.app_settings.config.cache_size_limit is None:
+        return
+
+    limit_size = app.app_settings.config.cache_size_limit
+    current_size = get_folder_size(app.app_settings.config.repos_path)
+
+    limit_size_h = convert_bytes_to_human_readable(limit_size)
+    current_size_h = convert_bytes_to_human_readable(current_size)
+
+    if current_size < limit_size:
+        return
+    logger.warning(
+        f"Cache size exceeded! Limit: {limit_size_h}, Current: {current_size_h}."
+    )
+    logger.info("Cleaning...")
+    files_path = os.path.join(app.app_settings.config.repos_path, "files")
+    lfs_path = os.path.join(app.app_settings.config.repos_path, "lfs")
+
+    if app.app_settings.config.cache_clean_strategy == "LRU":
+        files = sort_files_by_access_time(files_path) + sort_files_by_access_time(
+            lfs_path
+        )
+        files = sorted(files, key=lambda x: x[1])
+    elif app.app_settings.config.cache_clean_strategy == "FIFO":
+        files = sort_files_by_modify_time(files_path) + sort_files_by_modify_time(
+            lfs_path
+        )
+        files = sorted(files, key=lambda x: x[1])
+    elif app.app_settings.config.cache_clean_strategy == "LARGE_FIRST":
+        files = sort_files_by_size(files_path) + sort_files_by_size(lfs_path)
+        files = sorted(files, key=lambda x: x[1], reverse=True)
+
+    for filepath, index in files:
+        if current_size < limit_size:
+            break
+        filesize = os.path.getsize(filepath)
+        os.remove(filepath)
+        current_size -= filesize
+        logger.info(f"Remove file: {filepath}. File Size: {convert_bytes_to_human_readable(filesize)}")
+
+    current_size = get_folder_size(app.app_settings.config.repos_path)
+    current_size_h = convert_bytes_to_human_readable(current_size)
+    logger.info(f"Cleaning finished. Limit: {limit_size_h}, Current: {current_size_h}.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # TODO: Check repo cache path
     await check_hf_connection()
+    await check_disk_usage()
     yield
+
 
 # ======================
 # Application
@@ -111,7 +165,6 @@ templates = Jinja2Templates(directory="static")
 class AppSettings(BaseSettings):
     # The address of the model controller.
     config: OlahConfig = OlahConfig()
-    repos_path: str = "./repos"
 
 # ======================
 # File Meta Info API Hooks
@@ -806,6 +859,8 @@ if __name__ in ["__main__", "olah.server"]:
     parser.add_argument("--ssl-key", type=str, default=None, help="The SSL key file path, if HTTPS is used")
     parser.add_argument("--ssl-cert", type=str, default=None, help="The SSL cert file path, if HTTPS is used")
     parser.add_argument("--repos-path", type=str, default="./repos", help="The folder to save cached repositories")
+    parser.add_argument("--cache-size-limit", type=str, default="", help="The limit size of cache. (Example values: '100MB', '2GB', '500KB')")
+    parser.add_argument("--cache-clean-strategy", type=str, default="LRU", help="The clean strategy of cache. ('LRU', 'FIFO', 'LARGE_FIRST')")
     parser.add_argument("--log-path", type=str, default="./logs", help="The folder to save logs")
     args = parser.parse_args()
     
@@ -822,6 +877,19 @@ if __name__ in ["__main__", "olah.server"]:
         config = OlahConfig(args.config)
     else:
         config = OlahConfig()
+        
+        if not is_default_value(args, "host"):
+            config.host = args.host
+        if not is_default_value(args, "port"):
+            config.port = args.port
+        
+        if not is_default_value(args, "ssl_key"):
+            config.ssl_key = args.ssl_key
+        if not is_default_value(args, "ssl_cert"):
+            config.ssl_cert = args.ssl_cert
+        
+        if not is_default_value(args, "repos_path"):
+            config.repos_path = args.repos_path
         if not is_default_value(args, "hf_scheme"):
             config.hf_scheme = args.hf_scheme
         if not is_default_value(args, "hf_netloc"):
@@ -834,6 +902,10 @@ if __name__ in ["__main__", "olah.server"]:
             config.mirror_netloc = args.mirror_netloc
         if not is_default_value(args, "mirror_lfs_netloc"):
             config.mirror_lfs_netloc = args.mirror_lfs_netloc
+        if not is_default_value(args, "cache_size_limit"):
+            config.cache_size_limit = convert_to_bytes(args.cache_size_limit)
+        if not is_default_value(args, "cache_clean_strategy"):
+            config.cache_clean_strategy = args.cache_clean_strategy
         else:
             if not args.has_lfs_site and not is_default_value(args, "mirror_netloc"):
                 config.mirror_lfs_netloc = args.mirror_netloc
@@ -861,6 +933,11 @@ if __name__ in ["__main__", "olah.server"]:
         args.mirror_netloc = config.mirror_netloc
     if is_default_value(args, "mirror_lfs_netloc"):
         args.mirror_lfs_netloc = config.mirror_lfs_netloc
+    
+    if is_default_value(args, "cache_size_limit"):
+        args.cache_size_limit = config.cache_size_limit
+    if is_default_value(args, "cache_clean_strategy"):
+        args.cache_clean_strategy = config.cache_clean_strategy
 
     # Post processing
     if "," in args.host:
@@ -869,11 +946,19 @@ if __name__ in ["__main__", "olah.server"]:
     args.mirror_scheme = config.mirror_scheme = "http" if args.ssl_key is None else "https"
 
     print(args)
+    # Warnings
+    if config.cache_size_limit is not None:
+        logger.info(f"""
+======== WARNING ========
+Due to the cache_size_limit parameter being set, Olah will periodically delete cache files.
+Please ensure that the cache directory specified in repos_path '{config.repos_path}' is correct.
+Incorrect settings may result in unintended file deletion and loss!!! !!!
+=========================""")
+        for i in range(10):
+            time.sleep(0.2)
+    
     # Init app settings
-    app.app_settings = AppSettings(
-        config=config,
-        repos_path=args.repos_path,
-    )
+    app.app_settings = AppSettings(config=config)
 
     import uvicorn
     if __name__ == "__main__":

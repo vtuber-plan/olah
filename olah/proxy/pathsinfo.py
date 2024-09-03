@@ -69,7 +69,7 @@ async def pathsinfo_generator(
 ):
     headers = {}
     # save
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
 
     final_content = []
     for path in paths:

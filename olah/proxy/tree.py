@@ -82,7 +82,7 @@ async def tree_generator(
 
     # save
     method = request.method.lower()
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     save_dir = os.path.join(
         repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}/{path}"
     )

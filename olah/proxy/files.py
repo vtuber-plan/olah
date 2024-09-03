@@ -28,6 +28,7 @@ from olah.constants import (
 from olah.cache.olah_cache import OlahCache
 from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.utils.cache_utils import _read_cache_request, _write_cache_request
+from olah.utils.disk_utils import touch_file_access_time
 from olah.utils.url_utils import (
     RemoteInfo,
     add_query_param,
@@ -244,6 +245,7 @@ async def _get_file_range_from_remote(
         url=remote_info.url,
         headers=headers,
         timeout=WORKER_API_TIMEOUT,
+        follow_redirects=True,
     ) as response:                
         async for raw_chunk in response.aiter_raw():
             if not raw_chunk:
@@ -307,6 +309,7 @@ async def _file_chunk_get(
     app,
     save_path: str,
     head_path: str,
+    client: httpx.AsyncClient,
     method: str,
     url: str,
     headers: Dict[str, str],
@@ -319,6 +322,10 @@ async def _file_chunk_get(
     else:
         cache_file = OlahCache.create(save_path)
         cache_file.resize(file_size=file_size)
+    
+    # Refresh access time
+    touch_file_access_time(save_path)
+    
     try:
         start_pos, end_pos = parse_range_params(
             headers.get("range", f"bytes={0}-{file_size-1}"), file_size
@@ -328,7 +335,6 @@ async def _file_chunk_get(
         ranges_and_cache_list = get_contiguous_ranges(cache_file, start_pos, end_pos)
         # Stream ranges
         for (range_start_pos, range_end_pos), is_remote in ranges_and_cache_list:
-            client = httpx.AsyncClient()
             if is_remote:
                 generator = _get_file_range_from_remote(
                     client,
@@ -394,7 +400,6 @@ async def _file_chunk_get(
                     raise Exception(
                         f"The size of cached range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
                     )
-            await client.aclose()
     finally:
         cache_file.close()
 
@@ -403,6 +408,7 @@ async def _file_chunk_head(
     app,
     save_path: str,
     head_path: str,
+    client: httpx.AsyncClient,
     method: str,
     url: str,
     headers: Dict[str, str],
@@ -410,17 +416,16 @@ async def _file_chunk_head(
     file_size: int,
 ):
     if not app.app_settings.config.offline:
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                method=method,
-                url=url,
-                headers=headers,
-                timeout=WORKER_API_TIMEOUT,
-            ) as response:
-                async for raw_chunk in response.aiter_raw():
-                    if not raw_chunk:
-                        continue
-                    yield raw_chunk
+        async with client.stream(
+            method=method,
+            url=url,
+            headers=headers,
+            timeout=WORKER_API_TIMEOUT,
+        ) as response:
+            async for raw_chunk in response.aiter_raw():
+                if not raw_chunk:
+                    continue
+                yield raw_chunk
     else:
         yield b""
 
@@ -518,32 +523,36 @@ async def _file_realtime_stream(
                 response_headers["etag"] = f'"{content_hash[:32]}-10"'
     yield 200
     yield response_headers
-    if method.lower() == "get":
-        async for each_chunk in _file_chunk_get(
-            app=app,
-            save_path=save_path,
-            head_path=head_path,
-            method=method,
-            url=hf_url,
-            headers=request_headers,
-            allow_cache=allow_cache,
-            file_size=file_size,
-        ):
-            yield each_chunk
-    elif method.lower() == "head":
-        async for each_chunk in _file_chunk_head(
-            app=app,
-            save_path=save_path,
-            head_path=head_path,
-            method=method,
-            url=hf_url,
-            headers=request_headers,
-            allow_cache=allow_cache,
-            file_size=0,
-        ):
-            yield each_chunk
-    else:
-        raise Exception(f"Unsupported method: {method}")
+    
+    async with httpx.AsyncClient() as client:
+        if method.lower() == "get":
+            async for each_chunk in _file_chunk_get(
+                app=app,
+                save_path=save_path,
+                head_path=head_path,
+                client=client,
+                method=method,
+                url=hf_url,
+                headers=request_headers,
+                allow_cache=allow_cache,
+                file_size=file_size,
+            ):
+                yield each_chunk
+        elif method.lower() == "head":
+            async for each_chunk in _file_chunk_head(
+                app=app,
+                save_path=save_path,
+                head_path=head_path,
+                client=client,
+                method=method,
+                url=hf_url,
+                headers=request_headers,
+                allow_cache=allow_cache,
+                file_size=0,
+            ):
+                yield each_chunk
+        else:
+            raise Exception(f"Unsupported method: {method}")
 
 
 async def file_get_generator(
@@ -558,7 +567,7 @@ async def file_get_generator(
 ):
     org_repo = get_org_repo(org, repo)
     # save
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     head_path = os.path.join(
         repos_path, f"heads/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path}"
     )
@@ -612,7 +621,7 @@ async def cdn_file_get_generator(
 
     org_repo = get_org_repo(org, repo)
     # save
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     head_path = os.path.join(
         repos_path, f"heads/{repo_type}/{org}/{repo}/cdn/{file_hash}"
     )

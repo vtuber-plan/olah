@@ -5,10 +5,12 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 import toml
 import re
 import fnmatch
+
+from olah.utils.disk_utils import convert_to_bytes
 
 DEFAULT_PROXY_RULES = [
     {"repo": "*", "allow": True, "use_re": False},
@@ -83,6 +85,8 @@ class OlahConfig(object):
         self.ssl_key = None
         self.ssl_cert = None
         self.repos_path = "./repos"
+        self.cache_size_limit: Optional[int] = None
+        self.cache_clean_strategy: Literal["LRU", "FIFO", "LARGE_FIRST"] = "LRU"
 
         self.hf_scheme: str = "https"
         self.hf_netloc: str = "huggingface.co"
@@ -140,6 +144,8 @@ class OlahConfig(object):
             self.ssl_key = self.empty_str(basic.get("ssl-key", self.ssl_key))
             self.ssl_cert = self.empty_str(basic.get("ssl-cert", self.ssl_cert))
             self.repos_path = basic.get("repos-path", self.repos_path)
+            self.cache_size_limit = convert_to_bytes(basic.get("cache-size-limit", self.cache_size_limit))
+            self.cache_clean_strategy = basic.get("cache-clean-strategy", self.cache_clean_strategy)
 
             self.hf_scheme = basic.get("hf-scheme", self.hf_scheme)
             self.hf_netloc = basic.get("hf-netloc", self.hf_netloc)

@@ -144,7 +144,7 @@ async def get_newest_commit_hf_offline(
         The newest commit hash as a string.
 
     """
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     save_dir = get_meta_save_dir(repos_path, repo_type, org, repo)
     files = glob.glob(os.path.join(save_dir, "*", "meta_head.json"))
 
@@ -219,7 +219,7 @@ async def get_commit_hf_offline(
     Returns:
         The commit SHA as a string if available in the offline cache, or None if the information is not cached.
     """
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     save_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
     if os.path.exists(save_path):
         with open(save_path, "r", encoding="utf-8") as f:

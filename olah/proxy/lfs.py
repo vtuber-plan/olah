@@ -17,7 +17,7 @@ async def lfs_head_generator(
     app, dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request
 ):
     # save
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     head_path = os.path.join(
         repos_path, f"lfs/heads/{dir1}/{dir2}/{hash_repo}/{hash_file}"
     )
@@ -47,7 +47,7 @@ async def lfs_get_generator(
     app, dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request
 ):
     # save
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     head_path = os.path.join(
         repos_path, f"lfs/heads/{dir1}/{dir2}/{hash_repo}/{hash_file}"
     )
