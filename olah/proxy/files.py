@@ -241,17 +241,18 @@ async def _get_file_range_from_remote(
         headers=remote_info.headers,
         timeout=WORKER_API_TIMEOUT,
     ) as response:
-        response_content_length = int(response.headers["content-length"])
         async for raw_chunk in response.aiter_raw():
             if not raw_chunk:
                 continue
             yield raw_chunk
             chunk_bytes += len(raw_chunk)
 
-    if end_pos - start_pos != response_content_length:
-        raise Exception(
-            f"The content of the response is incomplete. Expected-{end_pos - start_pos}. Accepted-{response_content_length}"
-        )
+    if "content-length" in response.headers:
+        response_content_length = int(response.headers["content-length"])
+        if end_pos - start_pos != response_content_length:
+            raise Exception(
+                f"The content of the response is incomplete. Expected-{end_pos - start_pos}. Accepted-{response_content_length}"
+            )
     if end_pos - start_pos != chunk_bytes:
         raise Exception(
             f"The block is incomplete. Expected-{end_pos - start_pos}. Accepted-{chunk_bytes}"
