@@ -35,7 +35,8 @@ async def _pathsinfo_proxy(
     save_path: str,
 ):
     headers = {k: v for k, v in headers.items()}
-    headers.pop("content-length")
+    if "content-length" in headers:
+        headers.pop("content-length")
     async with httpx.AsyncClient(follow_redirects=True) as client:
         response = await client.request(
             method=method,
@@ -64,13 +65,10 @@ async def pathsinfo_generator(
     commit: str,
     paths: List[str],
     override_cache: bool,
-    request: Request,
+    method: str,
 ):
-    headers = {k: v for k, v in request.headers.items()}
-    headers.pop("host")
-
+    headers = {}
     # save
-    method = request.method.lower()
     repos_path = app.app_settings.repos_path
 
     final_content = []

@@ -404,9 +404,9 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
         if commit_sha is None:
             return error_repo_not_found()
         if not app.app_settings.config.offline and commit_sha != commit:
-            generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=True, request=request)
+            generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=True, method=request.method.lower())
         else:
-            generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=False, request=request)
+            generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=False, method=request.method.lower())
         headers = await generator.__anext__()
         return StreamingResponse(generator, headers=headers)
     except httpx.ConnectTimeout:

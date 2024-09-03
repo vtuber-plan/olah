@@ -61,7 +61,7 @@ async def _meta_proxy_generator(
                 save_path, response_status_code, response_headers, bytes(content)
             )
 
-
+# TODO: remove param `request`
 async def meta_generator(
     app: FastAPI,
     repo_type: Literal["models", "datasets", "spaces"],
