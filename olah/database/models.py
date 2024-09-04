@@ -41,9 +41,7 @@ class FileLevelLRU(BaseModel):
 
 db.connect()
 db.create_tables([
-    User,
     Token,
-    UserToken,
     DownloadLogs,
     FileLevelLRU,
 ])

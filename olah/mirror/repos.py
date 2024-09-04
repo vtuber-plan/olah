@@ -219,7 +219,8 @@ class LocalMirrorRepo(object):
                 results.append(self._get_path_info(index_obj))
         
         for r in results:
-            r.pop("name")
+            if "name" in r:
+                r.pop("name")
         return results
 
     def get_tree(

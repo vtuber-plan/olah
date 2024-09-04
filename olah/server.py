@@ -842,7 +842,8 @@ async def repos(request: Request):
         },
     )
 
-if __name__ in ["__main__", "olah.server"]:
+
+def init():
     parser = argparse.ArgumentParser(
         description="Olah Huggingface Mirror Server."
     )
@@ -959,9 +960,12 @@ Incorrect settings may result in unintended file deletion and loss!!! !!!
     
     # Init app settings
     app.app_settings = AppSettings(config=config)
+    return args
 
-    import uvicorn
+def main():
+    args = init()
     if __name__ == "__main__":
+        import uvicorn
         uvicorn.run(
             "olah.server:app",
             host=args.host,
@@ -971,3 +975,19 @@ Incorrect settings may result in unintended file deletion and loss!!! !!!
             ssl_keyfile=args.ssl_key,
             ssl_certfile=args.ssl_cert
         )
+
+def cli():
+    args = init()
+    import uvicorn
+    uvicorn.run(
+        "olah.server:app",
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        reload=False,
+        ssl_keyfile=args.ssl_key,
+        ssl_certfile=args.ssl_cert
+    )
+
+if __name__ in ["olah.server", "__main__"]:
+    main()

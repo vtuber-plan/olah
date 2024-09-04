@@ -25,6 +25,9 @@ dev = ["black==24.4.2", "pylint==3.2.5", "pytest==8.2.2"]
 "Homepage" = "https://github.com/vtuber-plan/olah"
 "Bug Tracker" = "https://github.com/vtuber-plan/olah/issues"
 
+[project.scripts]
+olah-cli = "olah.server:cli"
+
 [tool.setuptools.packages.find]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
 

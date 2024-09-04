@@ -10,7 +10,7 @@ import json
 from typing import Dict, Mapping, Union
 
 
-async def _write_cache_request(
+async def write_cache_request(
     save_path: str,
     status_code: int,
     headers: Union[Dict[str, str], Mapping],
@@ -39,7 +39,7 @@ async def _write_cache_request(
         f.write(json.dumps(rq, ensure_ascii=False))
 
 
-async def _read_cache_request(save_path: str) -> Dict[str, str]:
+async def read_cache_request(save_path: str) -> Dict[str, str]:
     """
     Read the request's status code, headers, and content from a cache file.
 

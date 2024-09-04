@@ -15,13 +15,13 @@ from fastapi import FastAPI, Request
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-from olah.utils.cache_utils import _read_cache_request, _write_cache_request
+from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
 async def _meta_cache_generator(save_path: str):
-    cache_rq = await _read_cache_request(save_path)
+    cache_rq = await read_cache_request(save_path)
     yield cache_rq["headers"]
     yield cache_rq["content"]
 
@@ -57,7 +57,7 @@ async def _meta_proxy_generator(
             content += chunk
 
         if allow_cache and response_status_code == 200:
-            await _write_cache_request(
+            await write_cache_request(
                 save_path, response_status_code, response_headers, bytes(content)
             )
 

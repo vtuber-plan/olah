@@ -27,7 +27,7 @@ from olah.constants import (
 )
 from olah.cache.olah_cache import OlahCache
 from olah.proxy.pathsinfo import pathsinfo_generator
-from olah.utils.cache_utils import _read_cache_request, _write_cache_request
+from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.disk_utils import touch_file_access_time
 from olah.utils.url_utils import (
     RemoteInfo,
@@ -97,7 +97,7 @@ async def _file_full_header(
     assert method.lower() == "head"
     if not app.app_settings.config.offline:
         if os.path.exists(head_path):
-            cache_rq = await _read_cache_request(head_path)
+            cache_rq = await read_cache_request(head_path)
             response_headers_dict = {
                 k.lower(): v for k, v in cache_rq["headers"].items()
             }
@@ -122,7 +122,7 @@ async def _file_full_header(
             response_headers_dict = {k.lower(): v for k, v in response.headers.items()}
             if allow_cache and method.lower() == "head":
                 if response.status_code == 200:
-                    await _write_cache_request(
+                    await write_cache_request(
                         head_path,
                         response.status_code,
                         response_headers_dict,
@@ -148,7 +148,7 @@ async def _file_full_header(
                             ORIGINAL_LOC,
                             response.headers["location"],
                         )
-                    await _write_cache_request(
+                    await write_cache_request(
                         head_path,
                         response.status_code,
                         response_headers_dict,
@@ -165,7 +165,7 @@ async def _file_full_header(
             return response.status_code, response_headers_dict, response.content
     else:
         if os.path.exists(head_path):
-            cache_rq = await _read_cache_request(head_path)
+            cache_rq = await read_cache_request(head_path)
             response_headers_dict = {
                 k.lower(): v for k, v in cache_rq["headers"].items()
             }
