@@ -236,6 +236,30 @@ class LocalMirrorRepo(object):
         for r in items:
             r.pop("name")
         return items
+    
+    def get_commits(self, commit_hash: str) -> Optional[Dict[str, Any]]:
+        try:
+            commit = self._git_repo.commit(commit_hash)
+        except gitdb.exc.BadName:
+            return None
+
+        parent_commits: List[Commit] = list(commit.parents)
+        parent_commits = parent_commits.insert(0, commit)
+        items = []
+        for each_commit in parent_commits:
+            item = {
+                "id": each_commit.hexsha,
+                "title": each_commit.message,
+                "message": "",
+                "authors": [],
+                "date": each_commit.committed_datetime.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            }
+            item["authors"].append({
+                "name": each_commit.author.name,
+                "avatar": None
+            })
+            items.append(item)
+        return items
 
     def get_meta(self, commit_hash: str) -> Optional[Dict[str, Any]]:
         try:

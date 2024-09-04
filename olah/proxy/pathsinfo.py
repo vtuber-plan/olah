@@ -102,5 +102,6 @@ async def pathsinfo_generator(
         if status == 200 and isinstance(content_json, list):
             final_content.extend(content_json)
 
+    yield 200
     yield {'content-type': 'application/json'}
     yield json.dumps(final_content, ensure_ascii=True)

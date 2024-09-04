@@ -28,6 +28,7 @@ from fastapi_utils.tasks import repeat_every
 import git
 import httpx
 
+from olah.proxy.commits import commits_generator
 from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.proxy.tree import tree_generator
 from olah.utils.disk_utils import convert_bytes_to_human_readable, convert_to_bytes, get_folder_size, sort_files_by_access_time, sort_files_by_modify_time, sort_files_by_size
@@ -66,6 +67,8 @@ from olah.utils.repo_utils import (
 )
 from olah.constants import REPO_TYPES_MAPPING
 from olah.utils.logging import build_logger
+
+logger = None
 
 # ======================
 # Utilities
@@ -165,6 +168,15 @@ templates = Jinja2Templates(directory="static")
 class AppSettings(BaseSettings):
     # The address of the model controller.
     config: OlahConfig = OlahConfig()
+
+
+# ======================
+# Exception handlers
+# ======================
+@app.exception_handler(404)
+async def custom_404_handler(_, __):
+    return error_page_not_found()
+
 
 # ======================
 # File Meta Info API Hooks
@@ -417,7 +429,7 @@ async def tree_proxy_commit(
         request=request,
     )
 
-
+# Git Pathsinfo
 async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: str, paths: List[str], request: Request) -> Response:
     # TODO: the head method of meta apis
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
@@ -440,7 +452,7 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
             logger.warning(f"Local repository {git_path} is not a valid git reposity.")
             continue
 
-    # Proxy the HF File Meta
+    # Proxy the HF File pathsinfo
     try:
         if not app.app_settings.config.offline:
             if not await check_commit_hf(app, repo_type, org, repo, commit=None,
@@ -460,8 +472,9 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
             generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=True, method=request.method.lower())
         else:
             generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=False, method=request.method.lower())
+        status_code = await generator.__anext__()
         headers = await generator.__anext__()
-        return StreamingResponse(generator, headers=headers)
+        return StreamingResponse(generator, status_code=status_code, headers=headers)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -487,6 +500,92 @@ async def pathsinfo_proxy_commit(repo_type: str, org_repo: str, commit: str, pat
         repo_type=repo_type, org=org, repo=repo, commit=commit, paths=paths, request=request
     )
 
+# Git Commits
+async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str, request: Request) -> Response:
+    # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
+    if repo_type not in REPO_TYPES_MAPPING.keys():
+        return error_page_not_found()
+    if not await check_proxy_rules_hf(app, repo_type, org, repo):
+        return error_repo_not_found()
+    # Check Mirror Path
+    for mirror_path in app.app_settings.config.mirrors_path:
+        try:
+            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            if os.path.exists(git_path):
+                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
+                commits_data = local_repo.get_commits(commit)
+                if commits_data is None:
+                    continue
+                return JSONResponse(content=commits_data)
+        except git.exc.InvalidGitRepositoryError:
+            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
+            continue
+
+    # Proxy the HF File Commits
+    try:
+        if not app.app_settings.config.offline:
+            if not await check_commit_hf(app, repo_type, org, repo, commit=None,
+                authorization=request.headers.get("authorization", None),
+            ):
+                return error_repo_not_found()
+            if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
+                authorization=request.headers.get("authorization", None),
+            ):
+                return error_revision_not_found(revision=commit)
+        commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
+            authorization=request.headers.get("authorization", None),
+        )
+        if commit_sha is None:
+            return error_repo_not_found()
+        # if branch name and online mode, refresh branch info
+        if not app.app_settings.config.offline and commit_sha != commit:
+            generator = commits_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit=commit_sha,
+                override_cache=True,
+                request=request,
+            )
+        else:
+            generator = commits_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit=commit_sha,
+                override_cache=False,
+                request=request,
+            )
+        status_code = await generator.__anext__()
+        headers = await generator.__anext__()
+        return StreamingResponse(generator, status_code=status_code, headers=headers)
+    except httpx.ConnectTimeout:
+        traceback.print_exc()
+        return Response(status_code=504)
+
+
+@app.head("/api/{repo_type}/{org}/{repo}/commits/{commit}")
+@app.get("/api/{repo_type}/{org}/{repo}/commits/{commit}")
+async def commits_proxy_commit2(
+    repo_type: str, org: str, repo: str, commit: str, request: Request
+):
+    return await commits_proxy_common(
+        repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
+    )
+
+
+@app.head("/api/{repo_type}/{org_repo}/commits/{commit}")
+@app.get("/api/{repo_type}/{org_repo}/commits/{commit}")
+async def commits_proxy_commit(repo_type: str, org_repo: str, commit: str, request: Request):
+    org, repo = parse_org_repo(org_repo)
+    if org is None and repo is None:
+        return error_repo_not_found()
+
+    return await commits_proxy_common(
+        repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
+    )
 
 # ======================
 # Authentication API Hooks

@@ -26,6 +26,7 @@ from olah.constants import (
     ORIGINAL_LOC,
 )
 from olah.cache.olah_cache import OlahCache
+from olah.errors import error_entry_not_found, error_proxy_invalid_data, error_proxy_timeout
 from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.disk_utils import touch_file_access_time
@@ -474,27 +475,38 @@ async def _file_realtime_stream(
 
     
     generator = pathsinfo_generator(app, repo_type, org, repo, commit, [file_path], override_cache=False, method="post")
+    status_code = await generator.__anext__()
     headers = await generator.__anext__()
     content = await generator.__anext__()
     try:
         pathsinfo = json.loads(content)
     except json.JSONDecodeError:
-        yield 504
-        yield {}
-        yield b""
+        response = error_proxy_invalid_data()
+        yield response.status_code
+        yield response.headers
+        yield response.body
+        return
+
+    if len(pathsinfo) == 0:
+        response = error_entry_not_found()
+        yield response.status_code
+        yield response.headers
+        yield response.body
         return
     
     if len(pathsinfo) != 1:
-        yield 504
-        yield {}
-        yield b""
+        response = error_proxy_timeout()
+        yield response.status_code
+        yield response.headers
+        yield response.body
         return
     
     pathinfo = pathsinfo[0]
     if "size" not in pathinfo:
-        yield 504
-        yield {}
-        yield b""
+        response = error_proxy_timeout()
+        yield response.status_code
+        yield response.headers
+        yield response.body
         return
     file_size = pathinfo["size"]
 
