@@ -243,8 +243,7 @@ class LocalMirrorRepo(object):
         except gitdb.exc.BadName:
             return None
 
-        parent_commits: List[Commit] = list(commit.parents)
-        parent_commits = parent_commits.insert(0, commit)
+        parent_commits = [commit] + [each_commit for each_commit in commit.iter_parents()]
         items = []
         for each_commit in parent_commits:
             item = {
