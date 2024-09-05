@@ -255,7 +255,13 @@ async def meta_proxy(repo_type: str, org_repo: str, request: Request):
     if org is None and repo is None:
         return error_repo_not_found()
     if not app.app_settings.config.offline:
-        new_commit = await get_newest_commit_hf(app, repo_type, org, repo)
+        new_commit = await get_newest_commit_hf(
+            app,
+            repo_type,
+            org,
+            repo,
+            authorization=request.headers.get("authorization", None),
+        )
         if new_commit is None:
             return error_repo_not_found()
     else:
@@ -269,11 +275,18 @@ async def meta_proxy(repo_type: str, org_repo: str, request: Request):
         authorization=request.headers.get("authorization", None),
     )
 
+
 @app.head("/api/{repo_type}/{org}/{repo}")
 @app.get("/api/{repo_type}/{org}/{repo}")
 async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
     if not app.app_settings.config.offline:
-        new_commit = await get_newest_commit_hf(app, repo_type, org, repo)
+        new_commit = await get_newest_commit_hf(
+            app,
+            repo_type,
+            org,
+            repo,
+            authorization=request.headers.get("authorization", None),
+        )
         if new_commit is None:
             return error_repo_not_found()
     else:

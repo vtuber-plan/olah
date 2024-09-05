@@ -167,6 +167,7 @@ async def get_newest_commit_hf(
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
     org: Optional[str],
     repo: str,
+    authorization: Optional[str] = None,
 ) -> Optional[str]:
     """
     Retrieves the newest commit hash for a repository.
@@ -188,7 +189,7 @@ async def get_newest_commit_hf(
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=WORKER_API_TIMEOUT)
+            response = await client.get(url, headers={"authorization": authorization}, timeout=WORKER_API_TIMEOUT)
             if response.status_code != 200:
                 return await get_newest_commit_hf_offline(app, repo_type, org, repo)
             obj = json.loads(response.text)

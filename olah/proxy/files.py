@@ -238,7 +238,9 @@ async def _get_file_range_from_remote(
     end_pos: int,
 ):
     headers = {}
+    headers["authorization"] = remote_info.headers.get("authorization", None)
     headers["range"] = f"bytes={start_pos}-{end_pos - 1}"
+
     chunk_bytes = 0
     raw_data = b""
     async with client.stream(
@@ -537,7 +539,14 @@ async def _file_realtime_stream(
     else:
         if method.lower() == "head":
             async with httpx.AsyncClient() as client:
-                response = await client.request(method="head", url=hf_url,headers={},timeout=WORKER_API_TIMEOUT)
+                response = await client.request(
+                    method="head",
+                    url=hf_url,
+                    headers={
+                        "authorization": request.headers.get("authorization", None)
+                    },
+                    timeout=WORKER_API_TIMEOUT,
+                )
             if "etag" in response.headers:
                 response_headers["etag"] = response.headers["etag"]
             else:
