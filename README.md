@@ -50,7 +50,7 @@ pip install -e .
 ## Quick Start
 Run the command in the console: 
 ```bash
-python -m olah.server
+olah-cli
 ```
 
 Then set the Environment Variable `HF_ENDPOINT` to the mirror site (Here is http://localhost:8090).
@@ -95,21 +95,21 @@ You can check the path `./repos`, in which olah stores all cached datasets and m
 ## Start the server
 Run the command in the console: 
 ```bash
-python -m olah.server
+olah-cli
 ```
 
 Or you can specify the host address and listening port:
 ```bash
-python -m olah.server --host localhost --port 8090
+olah-cli --host localhost --port 8090
 ```
 **Note: Please change --mirror-netloc and --mirror-lfs-netloc to the actual URLs of the mirror sites when modifying the host and port.**
 ```bash
-python -m olah.server --host 192.168.1.100 --port 8090 --mirror-netloc 192.168.1.100:8090
+olah-cli --host 192.168.1.100 --port 8090 --mirror-netloc 192.168.1.100:8090
 ```
 
 The default mirror cache path is `./repos`, you can change it by `--repos-path` parameter:
 ```bash
-python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
+olah-cli --host localhost --port 8090 --repos-path ./hf_mirrors
 ```
 
 **Note that the cached data between different versions cannot be migrated. Please delete the cache folder before upgrading to the latest version of Olah.**
@@ -118,7 +118,7 @@ python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
 
 Additional configurations can be controlled through a configuration file by passing the `configs.toml` file as a command parameter:
 ```bash
-python -m olah.server -c configs.toml
+olah-cli -c configs.toml
 ```
 
 The complete content of the configuration file can be found at [assets/full_configs.toml](https://github.com/vtuber-plan/olah/blob/main/assets/full_configs.toml).

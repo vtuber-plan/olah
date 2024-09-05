@@ -95,22 +95,22 @@ huggingface-cli download --repo-type dataset --resume-download Salesforce/wikite
 ## 启动服务器
 在控制台运行以下命令：
 ```bash
-python -m olah.server
+olah-cli
 ```
 
 或者您可以指定主机地址和监听端口：
 ```bash
-python -m olah.server --host localhost --port 8090
+olah-cli --host localhost --port 8090
 ```
 **注意：请记得在修改主机和端口时将`--mirror-netloc`和`--mirror-lfs-netloc`更改为镜像站点的实际URL。**
 
 ```bash
-python -m olah.server --host 192.168.1.100 --port 8090 --mirror-netloc 192.168.1.100:8090
+olah-cli --host 192.168.1.100 --port 8090 --mirror-netloc 192.168.1.100:8090
 ```
 
 默认的镜像缓存路径是`./repos`，您可以通过`--repos-path`参数进行更改：
 ```bash
-python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
+olah-cli --host localhost --port 8090 --repos-path ./hf_mirrors
 ```
 
 **注意，不同版本之间的缓存数据不能迁移，请删除缓存文件夹后再进行olah的升级**
@@ -119,7 +119,7 @@ python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
 
 更多配置可以通过配置文件进行控制，通过命令参数传入`configs.toml`以设置配置文件路径：
 ```bash
-python -m olah.server -c configs.toml
+olah-cli -c configs.toml
 ```
 
 完整的配置文件内容见[assets/full_configs.toml](https://github.com/vtuber-plan/olah/blob/main/assets/full_configs.toml)

@@ -7,7 +7,6 @@
 
 from contextlib import asynccontextmanager
 import os
-import shutil
 import glob
 import argparse
 import time
