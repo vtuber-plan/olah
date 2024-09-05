@@ -473,8 +473,17 @@ async def _file_realtime_stream(
     if "host" in request_headers:
         request_headers["host"] = urlparse(hf_url).netloc
 
-    
-    generator = pathsinfo_generator(app, repo_type, org, repo, commit, [file_path], override_cache=False, method="post")
+    generator = pathsinfo_generator(
+        app,
+        repo_type,
+        org,
+        repo,
+        commit,
+        [file_path],
+        override_cache=False,
+        method="post",
+        authorization=request.headers.get("authorization", None),
+    )
     status_code = await generator.__anext__()
     headers = await generator.__anext__()
     content = await generator.__anext__()
@@ -493,14 +502,14 @@ async def _file_realtime_stream(
         yield response.headers
         yield response.body
         return
-    
+
     if len(pathsinfo) != 1:
         response = error_proxy_timeout()
         yield response.status_code
         yield response.headers
         yield response.body
         return
-    
+
     pathinfo = pathsinfo[0]
     if "size" not in pathinfo:
         response = error_proxy_timeout()
@@ -535,7 +544,7 @@ async def _file_realtime_stream(
                 response_headers["etag"] = f'"{content_hash[:32]}-10"'
     yield 200
     yield response_headers
-    
+
     async with httpx.AsyncClient() as client:
         if method.lower() == "get":
             async for each_chunk in _file_chunk_get(

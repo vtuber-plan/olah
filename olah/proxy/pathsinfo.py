@@ -7,7 +7,7 @@
 
 import json
 import os
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Optional
 from urllib.parse import quote, urljoin
 from fastapi import FastAPI, Request
 
@@ -66,8 +66,12 @@ async def pathsinfo_generator(
     paths: List[str],
     override_cache: bool,
     method: str,
+    authorization: Optional[str],
 ):
     headers = {}
+    if authorization is not None:
+        headers["authorization"] = authorization
+
     # save
     repos_path = app.app_settings.config.repos_path
 

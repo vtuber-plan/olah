@@ -182,7 +182,7 @@ async def custom_404_handler(_, __):
 # File Meta Info API Hooks
 # See also: https://huggingface.co/docs/hub/api#repo-listing-api
 # ======================
-async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, request: Request) -> Response:
+async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     if repo_type not in REPO_TYPES_MAPPING.keys():
         return error_page_not_found()
@@ -206,15 +206,15 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
     try:
         if not app.app_settings.config.offline:
             if not await check_commit_hf(app, repo_type, org, repo, commit=None,
-                authorization=request.headers.get("authorization", None),
+                authorization=authorization,
             ):
                 return error_repo_not_found()
             if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
-                authorization=request.headers.get("authorization", None),
+                authorization=authorization,
             ):
                 return error_revision_not_found(revision=commit)
         commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
-            authorization=request.headers.get("authorization", None),
+            authorization=authorization,
         )
         if commit_sha is None:
             return error_repo_not_found()
@@ -227,7 +227,8 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
                 repo=repo,
                 commit=commit_sha,
                 override_cache=True,
-                request=request,
+                method=method,
+                authorization=authorization,
             )
         else:
             generator = meta_generator(
@@ -237,7 +238,8 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, re
                 repo=repo,
                 commit=commit_sha,
                 override_cache=False,
-                request=request,
+                method=method,
+                authorization=authorization,
             )
         headers = await generator.__anext__()
         return StreamingResponse(generator, headers=headers)
@@ -259,7 +261,12 @@ async def meta_proxy(repo_type: str, org_repo: str, request: Request):
     else:
         new_commit = "main"
     return await meta_proxy_common(
-        repo_type=repo_type, org=org, repo=repo, commit=new_commit, request=request
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=new_commit,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
 
 @app.head("/api/{repo_type}/{org}/{repo}")
@@ -272,8 +279,14 @@ async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
     else:
         new_commit = "main"
     return await meta_proxy_common(
-        repo_type=repo_type, org=org, repo=repo, commit=new_commit, request=request
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=new_commit,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
+
 
 @app.head("/api/{repo_type}/{org}/{repo}/revision/{commit}")
 @app.get("/api/{repo_type}/{org}/{repo}/revision/{commit}")
@@ -281,18 +294,31 @@ async def meta_proxy_commit2(
     repo_type: str, org: str, repo: str, commit: str, request: Request
 ):
     return await meta_proxy_common(
-        repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=commit,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
+
 
 @app.head("/api/{repo_type}/{org_repo}/revision/{commit}")
 @app.get("/api/{repo_type}/{org_repo}/revision/{commit}")
-async def meta_proxy_commit(repo_type: str, org_repo: str, commit: str, request: Request):
+async def meta_proxy_commit(
+    repo_type: str, org_repo: str, commit: str, request: Request
+):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
         return error_repo_not_found()
 
     return await meta_proxy_common(
-        repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=commit,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
 
 
@@ -305,7 +331,8 @@ async def tree_proxy_common(
     path: str,
     recursive: bool,
     expand: bool,
-    request: Request,
+    method: str,
+    authorization: Optional[str]
 ) -> Response:
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     path = clean_path(path)
@@ -331,15 +358,15 @@ async def tree_proxy_common(
     try:
         if not app.app_settings.config.offline:
             if not await check_commit_hf(app, repo_type, org, repo, commit=None,
-                authorization=request.headers.get("authorization", None),
+                authorization=authorization,
             ):
                 return error_repo_not_found()
             if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
-                authorization=request.headers.get("authorization", None),
+                authorization=authorization,
             ):
                 return error_revision_not_found(revision=commit)
         commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
-            authorization=request.headers.get("authorization", None),
+            authorization=authorization,
         )
         if commit_sha is None:
             return error_repo_not_found()
@@ -355,7 +382,8 @@ async def tree_proxy_common(
                 recursive=recursive,
                 expand=expand,
                 override_cache=True,
-                request=request,
+                method=method,
+                authorization=authorization,
             )
         else:
             generator = tree_generator(
@@ -368,7 +396,8 @@ async def tree_proxy_common(
                 recursive=recursive,
                 expand=expand,
                 override_cache=False,
-                request=request,
+                method=method,
+                authorization=authorization,
             )
 
         status_code = await generator.__anext__()
@@ -399,7 +428,8 @@ async def tree_proxy_commit2(
         path=file_path,
         recursive=recursive,
         expand=expand,
-        request=request,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
 
 
@@ -426,11 +456,12 @@ async def tree_proxy_commit(
         path=file_path,
         recursive=recursive,
         expand=expand,
-        request=request,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
 
 # Git Pathsinfo
-async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: str, paths: List[str], request: Request) -> Response:
+async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: str, paths: List[str], method: str, authorization: Optional[str]) -> Response:
     # TODO: the head method of meta apis
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     paths = [clean_path(path) for path in paths]
@@ -456,22 +487,42 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
     try:
         if not app.app_settings.config.offline:
             if not await check_commit_hf(app, repo_type, org, repo, commit=None,
-                authorization=request.headers.get("authorization", None),
+                authorization=authorization,
             ):
                 return error_repo_not_found()
             if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
-                authorization=request.headers.get("authorization", None),
+                authorization=authorization,
             ):
                 return error_revision_not_found(revision=commit)
         commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
-            authorization=request.headers.get("authorization", None),
+            authorization=authorization,
         )
         if commit_sha is None:
             return error_repo_not_found()
         if not app.app_settings.config.offline and commit_sha != commit:
-            generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=True, method=request.method.lower())
+            generator = pathsinfo_generator(
+                app,
+                repo_type,
+                org,
+                repo,
+                commit_sha,
+                paths,
+                override_cache=True,
+                method=method,
+                authorization=authorization,
+            )
         else:
-            generator = pathsinfo_generator(app, repo_type, org, repo, commit_sha, paths, override_cache=False, method=request.method.lower())
+            generator = pathsinfo_generator(
+                app,
+                repo_type,
+                org,
+                repo,
+                commit_sha,
+                paths,
+                override_cache=False,
+                method=method,
+                authorization=authorization,
+            )
         status_code = await generator.__anext__()
         headers = await generator.__anext__()
         return StreamingResponse(generator, status_code=status_code, headers=headers)
@@ -479,29 +530,54 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
         traceback.print_exc()
         return Response(status_code=504)
 
+
 @app.head("/api/{repo_type}/{org}/{repo}/paths-info/{commit}")
 @app.post("/api/{repo_type}/{org}/{repo}/paths-info/{commit}")
 async def pathsinfo_proxy_commit2(
-    repo_type: str, org: str, repo: str, commit: str, paths: Annotated[List[str], Form()], request: Request
+    repo_type: str,
+    org: str,
+    repo: str,
+    commit: str,
+    paths: Annotated[List[str], Form()],
+    request: Request,
 ):
     return await pathsinfo_proxy_common(
-        repo_type=repo_type, org=org, repo=repo, commit=commit, paths=paths, request=request
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=commit,
+        paths=paths,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
 
 
 @app.head("/api/{repo_type}/{org_repo}/paths-info/{commit}")
 @app.post("/api/{repo_type}/{org_repo}/paths-info/{commit}")
-async def pathsinfo_proxy_commit(repo_type: str, org_repo: str, commit: str, paths: Annotated[List[str], Form()], request: Request):
+async def pathsinfo_proxy_commit(
+    repo_type: str,
+    org_repo: str,
+    commit: str,
+    paths: Annotated[List[str], Form()],
+    request: Request,
+):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
         return error_repo_not_found()
 
     return await pathsinfo_proxy_common(
-        repo_type=repo_type, org=org, repo=repo, commit=commit, paths=paths, request=request
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=commit,
+        paths=paths,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
 
+
 # Git Commits
-async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str, request: Request) -> Response:
+async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     if repo_type not in REPO_TYPES_MAPPING.keys():
         return error_page_not_found()
@@ -525,15 +601,15 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
     try:
         if not app.app_settings.config.offline:
             if not await check_commit_hf(app, repo_type, org, repo, commit=None,
-                authorization=request.headers.get("authorization", None),
+                authorization=authorization,
             ):
                 return error_repo_not_found()
             if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
-                authorization=request.headers.get("authorization", None),
+                authorization=authorization,
             ):
                 return error_revision_not_found(revision=commit)
         commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
-            authorization=request.headers.get("authorization", None),
+            authorization=authorization,
         )
         if commit_sha is None:
             return error_repo_not_found()
@@ -546,7 +622,8 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
                 repo=repo,
                 commit=commit_sha,
                 override_cache=True,
-                request=request,
+                method=method,
+                authorization=authorization,
             )
         else:
             generator = commits_generator(
@@ -556,7 +633,8 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
                 repo=repo,
                 commit=commit_sha,
                 override_cache=False,
-                request=request,
+                method=method,
+                authorization=authorization,
             )
         status_code = await generator.__anext__()
         headers = await generator.__anext__()
@@ -572,20 +650,33 @@ async def commits_proxy_commit2(
     repo_type: str, org: str, repo: str, commit: str, request: Request
 ):
     return await commits_proxy_common(
-        repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=commit,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
 
 
 @app.head("/api/{repo_type}/{org_repo}/commits/{commit}")
 @app.get("/api/{repo_type}/{org_repo}/commits/{commit}")
-async def commits_proxy_commit(repo_type: str, org_repo: str, commit: str, request: Request):
+async def commits_proxy_commit(
+    repo_type: str, org_repo: str, commit: str, request: Request
+):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
         return error_repo_not_found()
 
     return await commits_proxy_common(
-        repo_type=repo_type, org=org, repo=repo, commit=commit, request=request
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=commit,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
     )
+
 
 # ======================
 # Authentication API Hooks

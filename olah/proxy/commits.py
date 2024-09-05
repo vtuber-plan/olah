@@ -6,7 +6,7 @@
 # https://opensource.org/licenses/MIT.
 
 import os
-from typing import Dict, Literal, Mapping
+from typing import Dict, Literal, Mapping, Optional
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 
@@ -73,13 +73,14 @@ async def commits_generator(
     repo: str,
     commit: str,
     override_cache: bool,
-    request: Request,
+    method: str,
+    authorization: Optional[str],
 ):
-    headers = {k: v for k, v in request.headers.items()}
-    headers.pop("host")
+    headers = {}
+    if authorization is not None:
+        headers["authorization"] = authorization
 
     # save
-    method = request.method.lower()
     repos_path = app.app_settings.config.repos_path
     save_dir = os.path.join(
         repos_path, f"api/{repo_type}/{org}/{repo}/commits/{commit}"
