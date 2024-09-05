@@ -13,6 +13,7 @@ from fastapi import Request
 
 from requests.structures import CaseInsensitiveDict
 import httpx
+import zlib
 from starlette.datastructures import URL
 from urllib.parse import urlparse, urljoin
 
@@ -25,7 +26,10 @@ from olah.constants import (
     ORIGINAL_LOC,
 )
 from olah.cache.olah_cache import OlahCache
-from olah.utils.cache_utils import _read_cache_request, _write_cache_request
+from olah.errors import error_entry_not_found, error_proxy_invalid_data, error_proxy_timeout
+from olah.proxy.pathsinfo import pathsinfo_generator
+from olah.utils.cache_utils import read_cache_request, write_cache_request
+from olah.utils.disk_utils import touch_file_access_time
 from olah.utils.url_utils import (
     RemoteInfo,
     add_query_param,
@@ -94,7 +98,7 @@ async def _file_full_header(
     assert method.lower() == "head"
     if not app.app_settings.config.offline:
         if os.path.exists(head_path):
-            cache_rq = await _read_cache_request(head_path)
+            cache_rq = await read_cache_request(head_path)
             response_headers_dict = {
                 k.lower(): v for k, v in cache_rq["headers"].items()
             }
@@ -119,7 +123,7 @@ async def _file_full_header(
             response_headers_dict = {k.lower(): v for k, v in response.headers.items()}
             if allow_cache and method.lower() == "head":
                 if response.status_code == 200:
-                    await _write_cache_request(
+                    await write_cache_request(
                         head_path,
                         response.status_code,
                         response_headers_dict,
@@ -145,7 +149,7 @@ async def _file_full_header(
                             ORIGINAL_LOC,
                             response.headers["location"],
                         )
-                    await _write_cache_request(
+                    await write_cache_request(
                         head_path,
                         response.status_code,
                         response_headers_dict,
@@ -162,7 +166,7 @@ async def _file_full_header(
             return response.status_code, response_headers_dict, response.content
     else:
         if os.path.exists(head_path):
-            cache_rq = await _read_cache_request(head_path)
+            cache_rq = await read_cache_request(head_path)
             response_headers_dict = {
                 k.lower(): v for k, v in cache_rq["headers"].items()
             }
@@ -233,25 +237,71 @@ async def _get_file_range_from_remote(
     start_pos: int,
     end_pos: int,
 ):
-    remote_info.headers["range"] = f"bytes={start_pos}-{end_pos - 1}"
+    headers = {}
+    headers["authorization"] = remote_info.headers.get("authorization", None)
+    headers["range"] = f"bytes={start_pos}-{end_pos - 1}"
+
     chunk_bytes = 0
+    raw_data = b""
     async with client.stream(
         method=remote_info.method,
         url=remote_info.url,
-        headers=remote_info.headers,
+        headers=headers,
         timeout=WORKER_API_TIMEOUT,
-    ) as response:
-        response_content_length = int(response.headers["content-length"])
+        follow_redirects=True,
+    ) as response:                
         async for raw_chunk in response.aiter_raw():
             if not raw_chunk:
                 continue
-            yield raw_chunk
+            if "content-encoding" in response.headers:
+                raw_data += raw_chunk
+            else:
+                yield raw_chunk
             chunk_bytes += len(raw_chunk)
 
-    if end_pos - start_pos != response_content_length:
-        raise Exception(
-            f"The content of the response is incomplete. Expected-{end_pos - start_pos}. Accepted-{response_content_length}"
-        )
+    # If result is compressed
+    if "content-encoding" in response.headers:
+        final_data = raw_data
+        algorithms = response.headers["content-encoding"].split(',')
+        for algo in algorithms:
+            algo = algo.strip().lower()
+            if algo == "gzip":
+                try:
+                    final_data = zlib.decompress(raw_data, zlib.MAX_WBITS | 16)  # 解压缩
+                except Exception as e:
+                    print(f"Error decompressing gzip data: {e}")
+            elif algo == "compress":
+                print(f"Unsupported decompression algorithm: {algo}")
+            elif algo == "deflate":
+                try: 
+                    final_data = zlib.decompress(raw_data)
+                except Exception as e:
+                    print(f"Error decompressing deflate data: {e}")
+            elif algo == "br":
+                try:
+                    import brotli
+                    final_data = brotli.decompress(raw_data)
+                except Exception as e:
+                    print(f"Error decompressing Brotli data: {e}")
+            elif algo == "zstd":
+                try:
+                    import zstandard
+                    final_data = zstandard.ZstdDecompressor().decompress(raw_data)
+                except Exception as e:
+                    print(f"Error decompressing Zstandard data: {e}")
+            else:
+                print(f"Unsupported compression algorithm: {algo}")
+        chunk_bytes = len(final_data)
+        yield final_data
+    if "content-length" in response.headers:
+        if "content-encoding" in response.headers:
+            response_content_length = len(final_data)
+        else:
+            response_content_length = int(response.headers["content-length"])
+        if end_pos - start_pos != response_content_length:
+            raise Exception(
+                f"The content of the response is incomplete. Expected-{end_pos - start_pos}. Accepted-{response_content_length}"
+            )
     if end_pos - start_pos != chunk_bytes:
         raise Exception(
             f"The block is incomplete. Expected-{end_pos - start_pos}. Accepted-{chunk_bytes}"
@@ -275,6 +325,10 @@ async def _file_chunk_get(
     else:
         cache_file = OlahCache.create(save_path)
         cache_file.resize(file_size=file_size)
+    
+    # Refresh access time
+    touch_file_access_time(save_path)
+    
     try:
         start_pos, end_pos = parse_range_params(
             headers.get("range", f"bytes={0}-{file_size-1}"), file_size
@@ -381,6 +435,10 @@ async def _file_chunk_head(
 
 async def _file_realtime_stream(
     app,
+    repo_type: Literal["models", "datasets", "spaces"],
+    org: str,
+    repo: str,
+    file_path: str,
     save_path: str,
     head_path: str,
     url: str,
@@ -417,49 +475,86 @@ async def _file_realtime_stream(
     if "host" in request_headers:
         request_headers["host"] = urlparse(hf_url).netloc
 
-    async with httpx.AsyncClient() as client:
-        # redirect_loc = await _get_redirected_url(client, method, url, request_headers)
-        try:
-            status_code, head_info, content = await _file_full_header(
-                app=app,
-                save_path=save_path,
-                head_path=head_path,
-                client=client,
-                method="HEAD",
-                url=hf_url,
-                headers=request_headers,
-                allow_cache=allow_cache,
-            )
-            if status_code != 200:
-                yield status_code
-                yield head_info
-                yield content
-                return
-        except httpx.ConnectError:
-            yield 504
-            yield {}
-            yield b""
-            return
+    generator = pathsinfo_generator(
+        app,
+        repo_type,
+        org,
+        repo,
+        commit,
+        [file_path],
+        override_cache=False,
+        method="post",
+        authorization=request.headers.get("authorization", None),
+    )
+    status_code = await generator.__anext__()
+    headers = await generator.__anext__()
+    content = await generator.__anext__()
+    try:
+        pathsinfo = json.loads(content)
+    except json.JSONDecodeError:
+        response = error_proxy_invalid_data()
+        yield response.status_code
+        yield response.headers
+        yield response.body
+        return
+
+    if len(pathsinfo) == 0:
+        response = error_entry_not_found()
+        yield response.status_code
+        yield response.headers
+        yield response.body
+        return
+
+    if len(pathsinfo) != 1:
+        response = error_proxy_timeout()
+        yield response.status_code
+        yield response.headers
+        yield response.body
+        return
+
+    pathinfo = pathsinfo[0]
+    if "size" not in pathinfo:
+        response = error_proxy_timeout()
+        yield response.status_code
+        yield response.headers
+        yield response.body
+        return
+    file_size = pathinfo["size"]
+
+    response_headers = {}
+    # Create content-length
+    start_pos, end_pos = parse_range_params(
+        request_headers.get("range", f"bytes={0}-{file_size-1}"), file_size
+    )
+    response_headers["content-length"] = str(end_pos - start_pos + 1)
+    # Commit info
+    if commit is not None:
+        response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
+    # Create fake headers when offline mode
+    sha256_hash = hashlib.sha256()
+    sha256_hash.update(hf_url.encode("utf-8"))
+    content_hash = sha256_hash.hexdigest()
+    if app.app_settings.config.offline:
+        response_headers["etag"] = f'"{content_hash[:32]}-10"'
+    else:
+        if method.lower() == "head":
+            async with httpx.AsyncClient() as client:
+                response = await client.request(
+                    method="head",
+                    url=hf_url,
+                    headers={
+                        "authorization": request.headers.get("authorization", None)
+                    },
+                    timeout=WORKER_API_TIMEOUT,
+                )
+            if "etag" in response.headers:
+                response_headers["etag"] = response.headers["etag"]
+            else:
+                response_headers["etag"] = f'"{content_hash[:32]}-10"'
+    yield 200
+    yield response_headers
 
     async with httpx.AsyncClient() as client:
-        file_size = int(head_info["content-length"])
-        response_headers = {k: v for k, v in head_info.items()}
-        if "range" in request_headers:
-            start_pos, end_pos = parse_range_params(
-                request_headers.get("range", f"bytes={0}-{file_size-1}"), file_size
-            )
-            response_headers["content-length"] = str(end_pos - start_pos + 1)
-        if commit is not None:
-            response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
-
-        if app.app_settings.config.offline and "etag" not in response_headers:
-            # Create fake headers when offline mode
-            sha256_hash = hashlib.sha256()
-            sha256_hash.update(hf_url.encode("utf-8"))
-            content_hash = sha256_hash.hexdigest()
-            response_headers["etag"] = f'"{content_hash[:32]}-10"'
-        yield 200
-        yield response_headers
         if method.lower() == "get":
             async for each_chunk in _file_chunk_get(
                 app=app,
@@ -502,7 +597,7 @@ async def file_get_generator(
 ):
     org_repo = get_org_repo(org, repo)
     # save
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     head_path = os.path.join(
         repos_path, f"heads/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path}"
     )
@@ -528,6 +623,10 @@ async def file_get_generator(
         )
     return _file_realtime_stream(
         app=app,
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        file_path=file_path,
         save_path=save_path,
         head_path=head_path,
         url=url,
@@ -552,7 +651,7 @@ async def cdn_file_get_generator(
 
     org_repo = get_org_repo(org, repo)
     # save
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     head_path = os.path.join(
         repos_path, f"heads/{repo_type}/{org}/{repo}/cdn/{file_hash}"
     )

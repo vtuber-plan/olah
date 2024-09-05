@@ -11,6 +11,7 @@ import re
 from typing import Any, Dict, List, Union
 import gitdb
 from git import Commit, Optional, Repo, Tree
+from git.objects.base import IndexObjUnion
 from gitdb.base import OStream
 import yaml
 
@@ -65,66 +66,95 @@ class LocalMirrorRepo(object):
         readme = self._get_readme(commit)
         return self._remove_card(readme)
 
-    def _get_tree_files_recursive(self, tree, include_dir=False) -> List[str]:
+    def _get_tree_filepaths_recursive(self, tree, include_dir=False) -> List[str]:
         out_paths = []
         for entry in tree:
             if entry.type == "tree":
-                out_paths.extend(self._get_tree_files_recursive(entry))
+                out_paths.extend(self._get_tree_filepaths_recursive(entry))
                 if include_dir:
                     out_paths.append(entry.path)
             else:
                 out_paths.append(entry.path)
         return out_paths
 
-    def _get_commit_files_recursive(self, commit: Commit) -> List[str]:
-        return self._get_tree_files_recursive(commit.tree)
+    def _get_commit_filepaths_recursive(self, commit: Commit) -> List[str]:
+        return self._get_tree_filepaths_recursive(commit.tree)
 
-    def _get_tree_files(self, tree: Tree) -> List[Dict[str, Union[int, str]]]:
+    def _get_path_info(self, entry: IndexObjUnion, expand: bool=False) -> Dict[str, Union[int, str]]:
+        lfs = False
+        if entry.type != "tree":
+            t = "file"
+            repr_size = entry.size
+            if repr_size > 120 and repr_size < 150:
+                # check lfs
+                lfs_data = entry.data_stream.read().decode("utf-8")
+                match_groups = re.match(
+                    r"version https://git-lfs\.github\.com/spec/v[0-9]\noid sha256:([0-9a-z]{64})\nsize ([0-9]+?)\n",
+                    lfs_data,
+                )
+                if match_groups is not None:
+                    lfs = True
+                    sha256 = match_groups.group(1)
+                    repr_size = int(match_groups.group(2))
+                    lfs_data = {
+                        "oid": sha256,
+                        "size": repr_size,
+                        "pointerSize": entry.size,
+                    }
+        else:
+            t = "directory"
+            repr_size = entry.size
+
+        if not lfs:
+            item = {
+                "type": t,
+                "oid": entry.hexsha,
+                "size": repr_size,
+                "path": entry.path,
+                "name": entry.name,
+            }
+        else:
+            item = {
+                "type": t,
+                "oid": entry.hexsha,
+                "size": repr_size,
+                "path": entry.path,
+                "name": entry.name,
+                "lfs": lfs_data,
+            }
+        if expand:
+            last_commit = next(self._git_repo.iter_commits(paths=entry.path, max_count=1))
+            item["lastCommit"] = {
+                "id": last_commit.hexsha,
+                "title": last_commit.message,
+                "date": last_commit.committed_datetime.strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                )
+            }
+            item["security"] = {
+                "blobId": entry.hexsha,
+                "name": entry.name,
+                "safe": True,
+                "indexed": False,
+                "avScan": {
+                    "virusFound": False,
+                    "virusNames": None
+                },
+                "pickleImportScan": None
+            }
+        return item
+
+    def _get_tree_files(
+        self, tree: Tree, recursive: bool = False, expand: bool = False
+    ) -> List[Dict[str, Union[int, str]]]:
         entries = []
         for entry in tree:
-            lfs = False
-            if entry.type != "tree":
-                t = "file"
-                repr_size = entry.size
-                if repr_size > 120 and repr_size < 150:
-                    # check lfs
-                    lfs_data = entry.data_stream.read().decode("utf-8")
-                    match_groups = re.match(
-                        r"version https://git-lfs\.github\.com/spec/v[0-9]\noid sha256:([0-9a-z]{64})\nsize ([0-9]+?)\n",
-                        lfs_data,
-                    )
-                    if match_groups is not None:
-                        lfs = True
-                        sha256 = match_groups.group(1)
-                        repr_size = int(match_groups.group(2))
-                        lfs_data = {
-                            "oid": sha256,
-                            "size": repr_size,
-                            "pointerSize": entry.size,
-                        }
-            else:
-                t = "directory"
-                repr_size = 0
+            entries.append(self._get_path_info(entry=entry, expand=expand))
 
-            if not lfs:
-                entries.append(
-                    {
-                        "type": t,
-                        "oid": entry.hexsha,
-                        "size": repr_size,
-                        "path": entry.name,
-                    }
-                )
-            else:
-                entries.append(
-                    {
-                        "type": t,
-                        "oid": entry.hexsha,
-                        "size": repr_size,
-                        "path": entry.name,
-                        "lfs": lfs_data,
-                    }
-                )
+        if recursive:
+            for entry in tree:
+                if entry.type == "tree":
+                    entries.extend(self._get_tree_files(entry, recursive=recursive, expand=expand))
         return entries
 
     def _get_commit_files(self, commit: Commit) -> List[Dict[str, Union[int, str]]]:
@@ -143,24 +173,91 @@ class LocalMirrorRepo(object):
 
         return earliest_commit
 
-    def get_tree(self, commit_hash: str, path: str) -> Optional[Dict[str, Any]]:
+    def get_index_object_by_path(
+        self, commit_hash: str, path: str
+    ) -> Optional[IndexObjUnion]:
+        try:
+            commit = self._git_repo.commit(commit_hash)
+        except gitdb.exc.BadName:
+            return None
+        path_part = path.split("/")
+        path_part = [part for part in path_part if len(part.strip()) != 0]
+        tree = commit.tree
+        items = self._get_tree_files(tree=tree)
+        if len(path_part) == 0:
+            return None
+        for i, part in enumerate(path_part):
+            if i != len(path_part) - 1:
+                if part not in [
+                    item["name"] for item in items if item["type"] == "directory"
+                ]:
+                    return None
+            else:
+                if part not in [
+                    item["name"] for item in items
+                ]:
+                    return None
+            tree = tree[part]
+            if tree.type == "tree":
+                items = self._get_tree_files(tree=tree, recursive=False)
+        return tree
+
+    def get_pathinfos(
+        self, commit_hash: str, paths: List[str]
+    ) -> Optional[List[Dict[str, Any]]]:
         try:
             commit = self._git_repo.commit(commit_hash)
         except gitdb.exc.BadName:
             return None
 
-        path_part = path.split("/")
-        tree = commit.tree
-        items = self._get_tree_files(tree=tree)
-        for part in path_part:
-            if len(part.strip()) == 0:
-                continue
-            if part not in [
-                item["path"] for item in items if item["type"] == "directory"
-            ]:
-                return None
-            tree = tree[part]
-            items = self._get_tree_files(tree=tree)
+        results = []
+        for path in paths:
+            index_obj = self.get_index_object_by_path(
+                commit_hash=commit_hash, path=path
+            )
+            if index_obj is not None:
+                results.append(self._get_path_info(index_obj))
+        
+        for r in results:
+            if "name" in r:
+                r.pop("name")
+        return results
+
+    def get_tree(
+        self, commit_hash: str, path: str, recursive: bool = False, expand: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            commit = self._git_repo.commit(commit_hash)
+        except gitdb.exc.BadName:
+            return None
+
+        index_obj = self.get_index_object_by_path(commit_hash=commit_hash, path=path)
+        items = self._get_tree_files(tree=index_obj, recursive=recursive, expand=expand)
+        for r in items:
+            r.pop("name")
+        return items
+    
+    def get_commits(self, commit_hash: str) -> Optional[Dict[str, Any]]:
+        try:
+            commit = self._git_repo.commit(commit_hash)
+        except gitdb.exc.BadName:
+            return None
+
+        parent_commits = [commit] + [each_commit for each_commit in commit.iter_parents()]
+        items = []
+        for each_commit in parent_commits:
+            item = {
+                "id": each_commit.hexsha,
+                "title": each_commit.message,
+                "message": "",
+                "authors": [],
+                "date": each_commit.committed_datetime.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            }
+            item["authors"].append({
+                "name": each_commit.author.name,
+                "avatar": None
+            })
+            items.append(item)
         return items
 
     def get_meta(self, commit_hash: str) -> Optional[Dict[str, Any]]:
@@ -189,7 +286,7 @@ class LocalMirrorRepo(object):
             self._match_card(self._get_readme(commit)), Loader=yaml.CLoader
         )
         meta.siblings = [
-            {"rfilename": p} for p in self._get_commit_files_recursive(commit)
+            {"rfilename": p} for p in self._get_commit_filepaths_recursive(commit)
         ]
         meta.createdAt = self._get_earliest_commit().committed_datetime.strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"

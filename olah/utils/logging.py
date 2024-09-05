@@ -15,10 +15,6 @@ import re
 import sys
 from typing import AsyncGenerator, Generator
 import warnings
-
-import requests
-import torch
-
 from olah.constants import DEFAULT_LOGGER_DIR
 
 handler = None

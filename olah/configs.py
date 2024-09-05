@@ -5,10 +5,12 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
-from typing import List, Optional
+from typing import List, Literal, Optional, Union
 import toml
 import re
 import fnmatch
+
+from olah.utils.disk_utils import convert_to_bytes
 
 DEFAULT_PROXY_RULES = [
     {"repo": "*", "allow": True, "use_re": False},
@@ -78,11 +80,13 @@ class OlahConfig(object):
     def __init__(self, path: Optional[str] = None) -> None:
 
         # basic
-        self.host = "localhost"
+        self.host: Union[List[str], str] = "localhost"
         self.port = 8090
         self.ssl_key = None
         self.ssl_cert = None
         self.repos_path = "./repos"
+        self.cache_size_limit: Optional[int] = None
+        self.cache_clean_strategy: Literal["LRU", "FIFO", "LARGE_FIRST"] = "LRU"
 
         self.hf_scheme: str = "https"
         self.hf_netloc: str = "huggingface.co"
@@ -90,10 +94,10 @@ class OlahConfig(object):
 
         self.mirror_scheme: str = "http" if self.ssl_key is None else "https"
         self.mirror_netloc: str = (
-            f"{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}"
+            f"{self.host if self._is_specific_addr(self.host) else 'localhost'}:{self.port}"
         )
         self.mirror_lfs_netloc: str = (
-            f"{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}"
+            f"{self.host if self._is_specific_addr(self.host) else 'localhost'}:{self.port}"
         )
 
         self.mirrors_path: List[str] = []
@@ -105,6 +109,12 @@ class OlahConfig(object):
 
         if path is not None:
             self.read_toml(path)
+    
+    def _is_specific_addr(self, host: Union[List[str], str]) -> bool:
+        if isinstance(host, str):
+            return host not in ['0.0.0.0', '::']
+        else:
+            return False
 
     def hf_url_base(self) -> str:
         return f"{self.hf_scheme}://{self.hf_netloc}"
@@ -134,6 +144,8 @@ class OlahConfig(object):
             self.ssl_key = self.empty_str(basic.get("ssl-key", self.ssl_key))
             self.ssl_cert = self.empty_str(basic.get("ssl-cert", self.ssl_cert))
             self.repos_path = basic.get("repos-path", self.repos_path)
+            self.cache_size_limit = convert_to_bytes(basic.get("cache-size-limit", self.cache_size_limit))
+            self.cache_clean_strategy = basic.get("cache-clean-strategy", self.cache_clean_strategy)
 
             self.hf_scheme = basic.get("hf-scheme", self.hf_scheme)
             self.hf_netloc = basic.get("hf-netloc", self.hf_netloc)

@@ -144,7 +144,7 @@ async def get_newest_commit_hf_offline(
         The newest commit hash as a string.
 
     """
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     save_dir = get_meta_save_dir(repos_path, repo_type, org, repo)
     files = glob.glob(os.path.join(save_dir, "*", "meta_head.json"))
 
@@ -167,6 +167,7 @@ async def get_newest_commit_hf(
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
     org: Optional[str],
     repo: str,
+    authorization: Optional[str] = None,
 ) -> Optional[str]:
     """
     Retrieves the newest commit hash for a repository.
@@ -188,7 +189,7 @@ async def get_newest_commit_hf(
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=WORKER_API_TIMEOUT)
+            response = await client.get(url, headers={"authorization": authorization}, timeout=WORKER_API_TIMEOUT)
             if response.status_code != 200:
                 return await get_newest_commit_hf_offline(app, repo_type, org, repo)
             obj = json.loads(response.text)
@@ -219,7 +220,7 @@ async def get_commit_hf_offline(
     Returns:
         The commit SHA as a string if available in the offline cache, or None if the information is not cached.
     """
-    repos_path = app.app_settings.repos_path
+    repos_path = app.app_settings.config.repos_path
     save_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
     if os.path.exists(save_path):
         with open(save_path, "r", encoding="utf-8") as f:
@@ -275,6 +276,7 @@ async def get_commit_hf(
         return obj.get("sha", None)
     except:
         return await get_commit_hf_offline(app, repo_type, org, repo, commit)
+
 
 @tenacity.retry(stop=tenacity.stop_after_attempt(3))
 async def check_commit_hf(
