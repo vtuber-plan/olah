@@ -132,6 +132,8 @@ port = 8090
 ssl-key = ""
 ssl-cert = ""
 repos-path = "./repos"
+cache-size-limit = ""
+cache-clean-strategy = "LRU"
 hf-scheme = "https"
 hf-netloc = "huggingface.co"
 hf-lfs-netloc = "cdn-lfs.huggingface.co"
@@ -144,6 +146,8 @@ mirrors-path = ["./mirrors_dir"]
 - `port`: Sets the port that Olah listens to.
 - `ssl-key` and `ssl-cert`: When enabling HTTPS, specify the file paths for the key and certificate.
 - `repos-path`: Specifies the directory for storing cached data.
+- `cache-size-limit`: Specifies cache size limit (For example, 100G, 500GB, 2TB). Olah will scan the size of the cache folder every hour. If it exceeds the limit, olah will delete some cache files.
+- `cache-clean-strategy`: Specifies cache cleaning strategy (Available strategies: LRU, FIFO, LARGE_FIRST).
 - `hf-scheme`: Network protocol for the Hugging Face official site (usually no need to modify).
 - `hf-netloc`: Network location of the Hugging Face official site (usually no need to modify).
 - `hf-lfs-netloc`: Network location for Hugging Face official site's LFS files (usually no need to modify).
