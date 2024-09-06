@@ -7,7 +7,6 @@
 
 from contextlib import asynccontextmanager
 import os
-import shutil
 import glob
 import argparse
 import time
@@ -162,8 +161,10 @@ async def lifespan(app: FastAPI):
 # ======================
 # Application
 # ======================
+code_file_path = os.path.abspath(__file__)
 app = FastAPI(lifespan=lifespan, debug=False)
-templates = Jinja2Templates(directory="static")
+templates = Jinja2Templates(directory=os.path.join(os.path.dirname(code_file_path), "..", "static"))
+
 
 class AppSettings(BaseSettings):
     # The address of the model controller.

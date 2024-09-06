@@ -95,22 +95,22 @@ huggingface-cli download --repo-type dataset --resume-download Salesforce/wikite
 ## 启动服务器
 在控制台运行以下命令：
 ```bash
-python -m olah.server
+olah-cli
 ```
 
 或者您可以指定主机地址和监听端口：
 ```bash
-python -m olah.server --host localhost --port 8090
+olah-cli --host localhost --port 8090
 ```
 **注意：请记得在修改主机和端口时将`--mirror-netloc`和`--mirror-lfs-netloc`更改为镜像站点的实际URL。**
 
 ```bash
-python -m olah.server --host 192.168.1.100 --port 8090 --mirror-netloc 192.168.1.100:8090
+olah-cli --host 192.168.1.100 --port 8090 --mirror-netloc 192.168.1.100:8090
 ```
 
 默认的镜像缓存路径是`./repos`，您可以通过`--repos-path`参数进行更改：
 ```bash
-python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
+olah-cli --host localhost --port 8090 --repos-path ./hf_mirrors
 ```
 
 **注意，不同版本之间的缓存数据不能迁移，请删除缓存文件夹后再进行olah的升级**
@@ -119,7 +119,7 @@ python -m olah.server --host localhost --port 8090 --repos-path ./hf_mirrors
 
 更多配置可以通过配置文件进行控制，通过命令参数传入`configs.toml`以设置配置文件路径：
 ```bash
-python -m olah.server -c configs.toml
+olah-cli -c configs.toml
 ```
 
 完整的配置文件内容见[assets/full_configs.toml](https://github.com/vtuber-plan/olah/blob/main/assets/full_configs.toml)
@@ -133,6 +133,8 @@ port = 8090
 ssl-key = ""
 ssl-cert = ""
 repos-path = "./repos"
+cache-size-limit = ""
+cache-clean-strategy = "LRU"
 hf-scheme = "https"
 hf-netloc = "huggingface.co"
 hf-lfs-netloc = "cdn-lfs.huggingface.co"
@@ -146,6 +148,8 @@ mirrors-path = ["./mirrors_dir"]
 - port: 设置olah监听的端口
 - ssl-key和ssl-cert: 当需要开启HTTPS时传入key和cert的文件路径
 - repos-path: 用于保存缓存数据的目录
+- cache-size-limit: 指定缓存大小限制（例如，100G，500GB，2TB）。Olah会每小时扫描缓存文件夹的大小。如果超出限制，Olah会删除一些缓存文件
+- cache-clean-strategy: 指定缓存清理策略（可用策略：LRU，FIFO，LARGE_FIRST）
 - hf-scheme: huggingface官方站点的网络协议（一般不需要改动）
 - hf-netloc: huggingface官方站点的网络位置（一般不需要改动）
 - hf-lfs-netloc: huggingface官方站点LFS文件的网络位置（一般不需要改动）

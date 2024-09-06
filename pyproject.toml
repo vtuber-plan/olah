@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "olah"
-version = "0.3.0"
+version = "0.3.1"
 description = "Self-hosted lightweight huggingface mirror."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -30,6 +30,9 @@ olah-cli = "olah.server:cli"
 
 [tool.setuptools.packages.find]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
+
+[tool.setuptools.package-data]
+static = ["*.html"]
 
 [tool.wheel]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
