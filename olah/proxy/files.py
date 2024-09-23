@@ -43,6 +43,7 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
+from olah.utils.zip_utils import decompress_data
 
 
 def get_block_info(pos: int, block_size: int, file_size: int) -> Tuple[int, int, int]:
@@ -141,38 +142,7 @@ async def _get_file_range_from_remote(
                 yield raw_chunk
             chunk_bytes += len(raw_chunk)
 
-    # If result is compressed
-    if "content-encoding" in response.headers:
-        final_data = raw_data
-        algorithms = response.headers["content-encoding"].split(',')
-        for algo in algorithms:
-            algo = algo.strip().lower()
-            if algo == "gzip":
-                try:
-                    final_data = zlib.decompress(raw_data, zlib.MAX_WBITS | 16)  # 解压缩
-                except Exception as e:
-                    print(f"Error decompressing gzip data: {e}")
-            elif algo == "compress":
-                print(f"Unsupported decompression algorithm: {algo}")
-            elif algo == "deflate":
-                try: 
-                    final_data = zlib.decompress(raw_data)
-                except Exception as e:
-                    print(f"Error decompressing deflate data: {e}")
-            elif algo == "br":
-                try:
-                    import brotli
-                    final_data = brotli.decompress(raw_data)
-                except Exception as e:
-                    print(f"Error decompressing Brotli data: {e}")
-            elif algo == "zstd":
-                try:
-                    import zstandard
-                    final_data = zstandard.ZstdDecompressor().decompress(raw_data)
-                except Exception as e:
-                    print(f"Error decompressing Zstandard data: {e}")
-            else:
-                print(f"Unsupported compression algorithm: {algo}")
+        final_data = decompress_data(response.headers.get("content-encoding", None))
         chunk_bytes = len(final_data)
         yield final_data
     if "content-length" in response.headers:

@@ -32,6 +32,7 @@ from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.proxy.tree import tree_generator
 from olah.utils.disk_utils import convert_bytes_to_human_readable, convert_to_bytes, get_folder_size, sort_files_by_access_time, sort_files_by_modify_time, sort_files_by_size
 from olah.utils.url_utils import clean_path
+from olah.utils.zip_utils import decompress_data
 
 BASE_SETTINGS = False
 if not BASE_SETTINGS:
@@ -709,10 +710,16 @@ async def whoami_v2(request: Request):
             headers=new_headers,
             timeout=10,
         )
+    # final_content = decompress_data(response.headers.get("content-encoding", None))
+    response_headers = {k.lower(): v for k, v in response.headers.items()}
+    if "content-encoding" in response_headers:
+        response_headers.pop("content-encoding")
+    if "content-length" in response_headers:
+        response_headers.pop("content-length")
     return Response(
         content=response.content,
         status_code=response.status_code,
-        headers=response.headers,
+        headers=response_headers,
     )
 
 
