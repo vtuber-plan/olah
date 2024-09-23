@@ -10,11 +10,7 @@ import json
 import os
 from typing import Dict, List, Literal, Optional, Tuple
 from fastapi import Request
-
-from requests.structures import CaseInsensitiveDict
 import httpx
-import zlib
-from starlette.datastructures import URL
 from urllib.parse import urlparse, urljoin
 
 from olah.constants import (
