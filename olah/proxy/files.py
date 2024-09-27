@@ -138,9 +138,10 @@ async def _get_file_range_from_remote(
                 yield raw_chunk
             chunk_bytes += len(raw_chunk)
 
-        final_data = decompress_data(raw_data, response.headers.get("content-encoding", None))
-        chunk_bytes = len(final_data)
-        yield final_data
+        if "content-encoding" in response.headers:
+            final_data = decompress_data(raw_data, response.headers.get("content-encoding", None))
+            chunk_bytes = len(final_data)
+            yield final_data
     if "content-length" in response.headers:
         if "content-encoding" in response.headers:
             response_content_length = len(final_data)
