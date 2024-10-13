@@ -8,7 +8,7 @@
 import os
 import shutil
 import tempfile
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, AsyncGenerator, Union
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 
@@ -20,7 +20,7 @@ from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
-async def _meta_cache_generator(save_path: str):
+async def _meta_cache_generator(save_path: str) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
     cache_rq = await read_cache_request(save_path)
     yield cache_rq["headers"]
     yield cache_rq["content"]
@@ -33,7 +33,7 @@ async def _meta_proxy_generator(
     method: str,
     allow_cache: bool,
     save_path: str,
-):
+) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
     async with httpx.AsyncClient(follow_redirects=True) as client:
         content_chunks = []
         async with client.stream(
@@ -61,7 +61,7 @@ async def _meta_proxy_generator(
                 save_path, response_status_code, response_headers, bytes(content)
             )
 
-# TODO: remove param `request`
+
 async def meta_generator(
     app: FastAPI,
     repo_type: Literal["models", "datasets", "spaces"],
@@ -71,7 +71,7 @@ async def meta_generator(
     override_cache: bool,
     method: str,
     authorization: Optional[str],
-):
+) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
     headers = {}
     if authorization is not None:
         headers["authorization"] = authorization

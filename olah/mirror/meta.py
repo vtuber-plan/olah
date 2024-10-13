@@ -25,7 +25,7 @@ class RepoMeta(object):
         self.siblings = None
         self.createdAt = None
 
-    def to_dict(self):
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "_id": self._id,
             "id": self.id,
