@@ -7,7 +7,7 @@
 
 import json
 import os
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import AsyncGenerator, Dict, List, Literal, Optional, Tuple, Union
 from urllib.parse import quote, urljoin
 from fastapi import FastAPI, Request
 
