@@ -5,7 +5,7 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
-from typing import List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 import toml
 import re
 import fnmatch
@@ -24,14 +24,14 @@ DEFAULT_CACHE_RULES = [
 
 
 class OlahRule(object):
-    def __init__(self) -> None:
-        self.repo = ""
-        self.type = "*"
-        self.allow = False
-        self.use_re = False
+    def __init__(self, repo: str = "", type: str = "*", allow: bool = False, use_re: bool = False) -> None:
+        self.repo = repo
+        self.type = type
+        self.allow = allow
+        self.use_re = use_re
 
     @staticmethod
-    def from_dict(data) -> "OlahRule":
+    def from_dict(data: Dict[str, Any]) -> "OlahRule":
         out = OlahRule()
         if "repo" in data:
             out.repo = data["repo"]
@@ -59,7 +59,7 @@ class OlahRuleList(object):
         self.rules: List[OlahRule] = []
 
     @staticmethod
-    def from_list(data) -> "OlahRuleList":
+    def from_list(data: List[Dict[str, Any]]) -> "OlahRuleList":
         out = OlahRuleList()
         for item in data:
             out.rules.append(OlahRule.from_dict(item))

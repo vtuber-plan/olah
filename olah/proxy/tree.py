@@ -6,7 +6,7 @@
 # https://opensource.org/licenses/MIT.
 
 import os
-from typing import Dict, Literal, Mapping, Optional
+from typing import Dict, Literal, Mapping, Optional, AsyncGenerator, Union
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 
@@ -19,7 +19,7 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
 
-async def _tree_cache_generator(save_path: str):
+async def _tree_cache_generator(save_path: str) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
     cache_rq = await read_cache_request(save_path)
     yield cache_rq["status_code"]
     yield cache_rq["headers"]
@@ -33,7 +33,7 @@ async def _tree_proxy_generator(
     params: Mapping[str, str],
     allow_cache: bool,
     save_path: str,
-):
+) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
     async with httpx.AsyncClient(follow_redirects=True) as client:
         content_chunks = []
         async with client.stream(
@@ -77,7 +77,7 @@ async def tree_generator(
     override_cache: bool,
     method: str,
     authorization: Optional[str],
-):
+) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
     headers = {}
     if authorization is not None:
         headers["authorization"] = authorization

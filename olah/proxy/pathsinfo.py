@@ -7,7 +7,7 @@
 
 import json
 import os
-from typing import Dict, List, Literal, Optional
+from typing import AsyncGenerator, Dict, List, Literal, Optional, Tuple, Union
 from urllib.parse import quote, urljoin
 from fastapi import FastAPI, Request
 
@@ -20,7 +20,7 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
 
-async def _pathsinfo_cache(save_path: str):
+async def _pathsinfo_cache(save_path: str) -> Tuple[int, Dict[str, str], bytes]:
     cache_rq = await read_cache_request(save_path)
     return cache_rq["status_code"], cache_rq["headers"], cache_rq["content"]
 
@@ -33,7 +33,7 @@ async def _pathsinfo_proxy(
     path: str,
     allow_cache: bool,
     save_path: str,
-):
+) -> Tuple[int, Dict[str, str], bytes]:
     headers = {k: v for k, v in headers.items()}
     if "content-length" in headers:
         headers.pop("content-length")
@@ -67,7 +67,7 @@ async def pathsinfo_generator(
     override_cache: bool,
     method: str,
     authorization: Optional[str],
-):
+) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
     headers = {}
     if authorization is not None:
         headers["authorization"] = authorization

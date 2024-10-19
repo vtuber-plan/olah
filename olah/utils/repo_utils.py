@@ -189,12 +189,15 @@ async def get_newest_commit_hf(
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers={"authorization": authorization}, timeout=WORKER_API_TIMEOUT)
+            headers = {}
+            if authorization is not None:
+                headers["authorization"] = authorization
+            response = await client.get(url, headers=headers, timeout=WORKER_API_TIMEOUT)
             if response.status_code != 200:
                 return await get_newest_commit_hf_offline(app, repo_type, org, repo)
             obj = json.loads(response.text)
         return obj.get("sha", None)
-    except:
+    except httpx.TimeoutException as e:
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
 
 

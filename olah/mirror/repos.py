@@ -66,7 +66,7 @@ class LocalMirrorRepo(object):
         readme = self._get_readme(commit)
         return self._remove_card(readme)
 
-    def _get_tree_filepaths_recursive(self, tree, include_dir=False) -> List[str]:
+    def _get_tree_filepaths_recursive(self, tree: Tree, include_dir: bool = False) -> List[str]:
         out_paths = []
         for entry in tree:
             if entry.type == "tree":
@@ -80,7 +80,7 @@ class LocalMirrorRepo(object):
     def _get_commit_filepaths_recursive(self, commit: Commit) -> List[str]:
         return self._get_tree_filepaths_recursive(commit.tree)
 
-    def _get_path_info(self, entry: IndexObjUnion, expand: bool=False) -> Dict[str, Union[int, str]]:
+    def _get_path_info(self, entry: IndexObjUnion, expand: bool = False) -> Dict[str, Union[int, str]]:
         lfs = False
         if entry.type != "tree":
             t = "file"

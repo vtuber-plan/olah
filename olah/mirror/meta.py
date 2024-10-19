@@ -6,6 +6,9 @@
 # https://opensource.org/licenses/MIT.
 
 
+from typing import Any, Dict
+
+
 class RepoMeta(object):
     def __init__(self) -> None:
         self._id = None
@@ -25,7 +28,7 @@ class RepoMeta(object):
         self.siblings = None
         self.createdAt = None
 
-    def to_dict(self):
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "_id": self._id,
             "id": self.id,
