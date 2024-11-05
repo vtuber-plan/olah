@@ -14,6 +14,7 @@ import json
 from urllib.parse import urljoin
 import httpx
 from olah.constants import WORKER_API_TIMEOUT
+from olah.utils.cache_utils import read_cache_request
 
 
 def get_org_repo(org: Optional[str], repo: str) -> str:
@@ -74,7 +75,7 @@ def get_meta_save_path(
 
     """
     return os.path.join(
-        repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}/meta.json"
+        repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}/meta_get.json"
     )
 
 
@@ -226,9 +227,9 @@ async def get_commit_hf_offline(
     repos_path = app.app_settings.config.repos_path
     save_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
     if os.path.exists(save_path):
-        with open(save_path, "r", encoding="utf-8") as f:
-            obj = json.loads(f.read())
-        return obj["sha"]
+        request_cache = await read_cache_request(save_path)
+        request_cache_json = json.loads(request_cache["content"])
+        return request_cache_json["sha"]
     else:
         return None
 

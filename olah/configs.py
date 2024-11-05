@@ -162,5 +162,5 @@ class OlahConfig(object):
         if "accessibility" in config:
             accessibility = config["accessibility"]
             self.offline = accessibility.get("offline", self.offline)
-            self.proxy = OlahRuleList.from_list(accessibility.get("proxy", self.proxy))
-            self.cache = OlahRuleList.from_list(accessibility.get("cache", self.cache))
+            self.proxy = OlahRuleList.from_list(accessibility.get("proxy", DEFAULT_PROXY_RULES))
+            self.cache = OlahRuleList.from_list(accessibility.get("cache", DEFAULT_CACHE_RULES))

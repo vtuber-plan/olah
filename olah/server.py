@@ -227,6 +227,18 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, me
                 repo_type=repo_type,
                 org=org,
                 repo=repo,
+                commit=commit,
+                override_cache=True,
+                method=method,
+                authorization=authorization,
+            )
+            async for _ in generator:
+                pass
+            generator = meta_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
                 commit=commit_sha,
                 override_cache=True,
                 method=method,
@@ -392,6 +404,21 @@ async def tree_proxy_common(
                 repo_type=repo_type,
                 org=org,
                 repo=repo,
+                commit=commit,
+                path=path,
+                recursive=recursive,
+                expand=expand,
+                override_cache=True,
+                method=method,
+                authorization=authorization,
+            )
+            async for _ in generator:
+                pass
+            generator = tree_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
                 commit=commit_sha,
                 path=path,
                 recursive=recursive,
@@ -516,12 +543,25 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
             return error_repo_not_found()
         if not app.app_settings.config.offline and commit_sha != commit:
             generator = pathsinfo_generator(
-                app,
-                repo_type,
-                org,
-                repo,
-                commit_sha,
-                paths,
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit=commit,
+                paths=paths,
+                override_cache=True,
+                method=method,
+                authorization=authorization,
+            )
+            async for _ in generator:
+                pass
+            generator = pathsinfo_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit=commit_sha,
+                paths=paths,
                 override_cache=True,
                 method=method,
                 authorization=authorization,
@@ -630,6 +670,18 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
             return error_repo_not_found()
         # if branch name and online mode, refresh branch info
         if not app.app_settings.config.offline and commit_sha != commit:
+            generator = commits_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit=commit,
+                override_cache=True,
+                method=method,
+                authorization=authorization,
+            )
+            async for _ in generator:
+                pass
             generator = commits_generator(
                 app=app,
                 repo_type=repo_type,
