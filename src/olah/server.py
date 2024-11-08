@@ -65,7 +65,7 @@ from olah.utils.repo_utils import (
     get_newest_commit_hf,
     parse_org_repo,
 )
-from olah.constants import REPO_TYPES_MAPPING
+from olah.constants import OLAH_CODE_DIR, REPO_TYPES_MAPPING
 from olah.utils.logging import build_logger
 
 logger = None
@@ -164,7 +164,7 @@ async def lifespan(app: FastAPI):
 # ======================
 code_file_path = os.path.abspath(__file__)
 app = FastAPI(lifespan=lifespan, debug=False)
-templates = Jinja2Templates(directory=os.path.join(os.path.dirname(code_file_path), "..", "static"))
+templates = Jinja2Templates(directory=os.path.join(OLAH_CODE_DIR, "static"))
 
 
 class AppSettings(BaseSettings):

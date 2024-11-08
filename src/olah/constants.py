@@ -5,11 +5,15 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
+import os
+
+
 WORKER_API_TIMEOUT = 15
 CHUNK_SIZE = 4096
 LFS_FILE_BLOCK = 64 * 1024 * 1024
 
 DEFAULT_LOGGER_DIR = "./logs"
+OLAH_CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ORIGINAL_LOC = "oriloc"
 
