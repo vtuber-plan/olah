@@ -1,0 +1,77 @@
+[basic]
+host = "0.0.0.0"
+port = 8090
+ssl-key = ""
+ssl-cert = ""
+repos-path = "/data/repos"
+cache-size-limit = ""
+cache-clean-strategy = "LRU"
+hf-scheme = "https"
+hf-netloc = "huggingface.co"
+hf-lfs-netloc = "cdn-lfs.huggingface.co"
+mirror-scheme = "http"
+mirror-netloc = "localhost:8090"
+mirror-lfs-netloc = "localhost:8090"
+mirrors-path = ["/data/mirrors"]
+
+
+[accessibility]
+offline = false
+
+
+[[accessibility.proxy]]
+repo = "*"
+allow = true
+
+[[accessibility.proxy]]
+repo = "*/*"
+allow = true
+
+[[accessibility.proxy]]
+repo = "vikp/surya_det3"
+allow = false
+
+# [[accessibility.proxy]]
+# repo = "vikp/surya_layout3"
+# allow = true
+
+# [[accessibility.proxy]]
+# repo = "vikp/surya_order"
+# allow = true
+
+# [[accessibility.proxy]]
+# repo = "vikp/surya_rec2"
+# allow = true
+
+# [[accessibility.proxy]]
+# repo = "vikp/surya_tablerec"
+# allow = true
+
+
+[[accessibility.cache]]
+repo = "*"
+allow = true
+
+[[accessibility.cache]]
+repo = "*/*"
+allow = true
+
+[[accessibility.cache]]
+repo = "vikp/surya_det3"
+allow = false
+
+# [[accessibility.cache]]
+# repo = "vikp/surya_layout3"
+# allow = true
+
+# [[accessibility.cache]]
+# repo = "vikp/surya_order"
+# allow = true
+
+# [[accessibility.cache]]
+# repo = "vikp/surya_rec2"
+# allow = true
+
+# [[accessibility.cache]]
+# repo = "vikp/surya_tablerec"
+# allow = true
