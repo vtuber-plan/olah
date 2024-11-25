@@ -83,7 +83,7 @@ async def tree_generator(
         headers["authorization"] = authorization
 
     # save
-    repos_path = app.app_settings.config.repos_path
+    repos_path = app.state.app_settings.config.repos_path
     save_dir = os.path.join(
         repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}/{path}"
     )
@@ -94,7 +94,7 @@ async def tree_generator(
 
     org_repo = get_org_repo(org, repo)
     tree_url = urljoin(
-        app.app_settings.config.hf_url_base(),
+        app.state.app_settings.config.hf_url_base(),
         f"/api/{repo_type}/{org_repo}/tree/{commit}/{path}",
     )
     # proxy

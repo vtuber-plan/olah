@@ -145,7 +145,7 @@ async def get_newest_commit_hf_offline(
         The newest commit hash as a string.
 
     """
-    repos_path = app.app_settings.config.repos_path
+    repos_path = app.state.app_settings.config.repos_path
     save_dir = get_meta_save_dir(repos_path, repo_type, org, repo)
     files = glob.glob(os.path.join(save_dir, "*", "meta_head.json"))
 
@@ -184,9 +184,9 @@ async def get_newest_commit_hf(
 
     """
     url = urljoin(
-        app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org}/{repo}"
+        app.state.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org}/{repo}"
     )
-    if app.app_settings.config.offline:
+    if app.state.app_settings.config.offline:
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
     try:
         async with httpx.AsyncClient() as client:
@@ -224,7 +224,7 @@ async def get_commit_hf_offline(
     Returns:
         The commit SHA as a string if available in the offline cache, or None if the information is not cached.
     """
-    repos_path = app.app_settings.config.repos_path
+    repos_path = app.state.app_settings.config.repos_path
     save_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
     if os.path.exists(save_path):
         request_cache = await read_cache_request(save_path)
@@ -261,10 +261,10 @@ async def get_commit_hf(
     """
     org_repo = get_org_repo(org, repo)
     url = urljoin(
-        app.app_settings.config.hf_url_base(),
+        app.state.app_settings.config.hf_url_base(),
         f"/api/{repo_type}/{org_repo}/revision/{commit}",
     )
-    if app.app_settings.config.offline:
+    if app.state.app_settings.config.offline:
         return await get_commit_hf_offline(app, repo_type, org, repo, commit)
     try:
         headers = {}
@@ -309,11 +309,11 @@ async def check_commit_hf(
     org_repo = get_org_repo(org, repo)
     if commit is None:
         url = urljoin(
-            app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}"
+            app.state.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}"
         )
     else:
         url = urljoin(
-            app.app_settings.config.hf_url_base(),
+            app.state.app_settings.config.hf_url_base(),
             f"/api/{repo_type}/{org_repo}/revision/{commit}",
         )
 

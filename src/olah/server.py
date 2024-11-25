@@ -6,12 +6,14 @@
 # https://opensource.org/licenses/MIT.
 
 from contextlib import asynccontextmanager
+import datetime
 import os
 import glob
 import argparse
+import sys
 import time
 import traceback
-from typing import Annotated, List, Optional, Union
+from typing import Annotated, List, Literal, Optional, Sequence, Tuple, Union
 from urllib.parse import urljoin
 from fastapi import FastAPI, Header, Request, Form
 from fastapi.responses import (
@@ -32,7 +34,6 @@ from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.proxy.tree import tree_generator
 from olah.utils.disk_utils import convert_bytes_to_human_readable, convert_to_bytes, get_folder_size, sort_files_by_access_time, sort_files_by_modify_time, sort_files_by_size
 from olah.utils.url_utils import clean_path
-from olah.utils.zip_utils import decompress_data
 
 BASE_SETTINGS = False
 if not BASE_SETTINGS:
@@ -88,53 +89,61 @@ async def check_connection(url: str) -> bool:
     except httpx.TimeoutException:
         return False
 
+# from pympler import tracker, classtracker
+# tr = tracker.SummaryTracker()
+# cr = classtracker.ClassTracker()
+# from olah.cache.bitset import Bitset
+# from olah.cache.olah_cache import OlahCache, OlahCacheHeader
+# cr.track_class(Bitset)
+# cr.track_class(OlahCacheHeader)
+# cr.track_class(OlahCache)
 
-@repeat_every(seconds=60 * 5)
+@repeat_every(seconds=5)
 async def check_hf_connection() -> None:
-    if app.app_settings.config.offline:
+    if app.state.app_settings.config.offline:
         return
-    scheme = app.app_settings.config.hf_scheme
-    netloc = app.app_settings.config.hf_netloc
+    scheme = app.state.app_settings.config.hf_scheme
+    netloc = app.state.app_settings.config.hf_netloc
     hf_online_status = await check_connection(
         f"{scheme}://{netloc}/datasets/Salesforce/wikitext/resolve/main/.gitattributes"
     )
     if not hf_online_status:
-        logger.error("Failed to reach Huggingface Site.")
-
+        print("Failed to reach Huggingface Site.", file=sys.stderr)
 
 @repeat_every(seconds=60 * 60)
 async def check_disk_usage() -> None:
-    if app.app_settings.config.offline:
+    if app.state.app_settings.config.offline:
         return
-    if app.app_settings.config.cache_size_limit is None:
+    if app.state.app_settings.config.cache_size_limit is None:
         return
 
-    limit_size = app.app_settings.config.cache_size_limit
-    current_size = get_folder_size(app.app_settings.config.repos_path)
+    limit_size = app.state.app_settings.config.cache_size_limit
+    current_size = get_folder_size(app.state.app_settings.config.repos_path)
 
     limit_size_h = convert_bytes_to_human_readable(limit_size)
     current_size_h = convert_bytes_to_human_readable(current_size)
 
     if current_size < limit_size:
         return
-    logger.warning(
+    print(
         f"Cache size exceeded! Limit: {limit_size_h}, Current: {current_size_h}."
     )
-    logger.info("Cleaning...")
-    files_path = os.path.join(app.app_settings.config.repos_path, "files")
-    lfs_path = os.path.join(app.app_settings.config.repos_path, "lfs")
+    print("Cleaning...")
+    files_path = os.path.join(app.state.app_settings.config.repos_path, "files")
+    lfs_path = os.path.join(app.state.app_settings.config.repos_path, "lfs")
 
-    if app.app_settings.config.cache_clean_strategy == "LRU":
+    files: Sequence[Tuple[str, Union[int, datetime.datetime]]] = []
+    if app.state.app_settings.config.cache_clean_strategy == "LRU":
         files = sort_files_by_access_time(files_path) + sort_files_by_access_time(
             lfs_path
         )
         files = sorted(files, key=lambda x: x[1])
-    elif app.app_settings.config.cache_clean_strategy == "FIFO":
+    elif app.state.app_settings.config.cache_clean_strategy == "FIFO":
         files = sort_files_by_modify_time(files_path) + sort_files_by_modify_time(
             lfs_path
         )
         files = sorted(files, key=lambda x: x[1])
-    elif app.app_settings.config.cache_clean_strategy == "LARGE_FIRST":
+    elif app.state.app_settings.config.cache_clean_strategy == "LARGE_FIRST":
         files = sort_files_by_size(files_path) + sort_files_by_size(lfs_path)
         files = sorted(files, key=lambda x: x[1], reverse=True)
 
@@ -144,11 +153,11 @@ async def check_disk_usage() -> None:
         filesize = os.path.getsize(filepath)
         os.remove(filepath)
         current_size -= filesize
-        logger.info(f"Remove file: {filepath}. File Size: {convert_bytes_to_human_readable(filesize)}")
+        print(f"Remove file: {filepath}. File Size: {convert_bytes_to_human_readable(filesize)}")
 
-    current_size = get_folder_size(app.app_settings.config.repos_path)
+    current_size = get_folder_size(app.state.app_settings.config.repos_path)
     current_size_h = convert_bytes_to_human_readable(current_size)
-    logger.info(f"Cleaning finished. Limit: {limit_size_h}, Current: {current_size_h}.")
+    print(f"Cleaning finished. Limit: {limit_size_h}, Current: {current_size_h}.")
 
 
 @asynccontextmanager
@@ -184,16 +193,16 @@ async def custom_404_handler(_, __):
 # File Meta Info API Hooks
 # See also: https://huggingface.co/docs/hub/api#repo-listing-api
 # ======================
-async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
+async def meta_proxy_common(repo_type: Literal["models", "datasets", "spaces"], org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
     # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     if repo_type not in REPO_TYPES_MAPPING.keys():
         return error_page_not_found()
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return error_repo_not_found()
     # Check Mirror Path
-    for mirror_path in app.app_settings.config.mirrors_path:
+    for mirror_path in app.state.app_settings.config.mirrors_path:
+        git_path = os.path.join(mirror_path, repo_type, org, repo)
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 meta_data = local_repo.get_meta(commit)
@@ -206,7 +215,7 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, me
 
     # Proxy the HF File Meta
     try:
-        if not app.app_settings.config.offline:
+        if not app.state.app_settings.config.offline:
             if not await check_commit_hf(app, repo_type, org, repo, commit=None,
                 authorization=authorization,
             ):
@@ -221,7 +230,7 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, me
         if commit_sha is None:
             return error_repo_not_found()
         # if branch name and online mode, refresh branch info
-        if not app.app_settings.config.offline and commit_sha != commit:
+        if not app.state.app_settings.config.offline and commit_sha != commit:
             generator = meta_generator(
                 app=app,
                 repo_type=repo_type,
@@ -268,7 +277,7 @@ async def meta_proxy(repo_type: str, org_repo: str, request: Request):
     org, repo = parse_org_repo(org_repo)
     if org is None and repo is None:
         return error_repo_not_found()
-    if not app.app_settings.config.offline:
+    if not app.state.app_settings.config.offline:
         new_commit = await get_newest_commit_hf(
             app,
             repo_type,
@@ -293,7 +302,7 @@ async def meta_proxy(repo_type: str, org_repo: str, request: Request):
 @app.head("/api/{repo_type}/{org}/{repo}")
 @app.get("/api/{repo_type}/{org}/{repo}")
 async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
-    if not app.app_settings.config.offline:
+    if not app.state.app_settings.config.offline:
         new_commit = await get_newest_commit_hf(
             app,
             repo_type,
@@ -368,9 +377,9 @@ async def tree_proxy_common(
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return error_repo_not_found()
     # Check Mirror Path
-    for mirror_path in app.app_settings.config.mirrors_path:
+    for mirror_path in app.state.app_settings.config.mirrors_path:
+        git_path = os.path.join(mirror_path, repo_type, org, repo)
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 tree_data = local_repo.get_tree(commit, path, recursive=recursive, expand=expand)
@@ -383,7 +392,7 @@ async def tree_proxy_common(
 
     # Proxy the HF File Meta
     try:
-        if not app.app_settings.config.offline:
+        if not app.state.app_settings.config.offline:
             if not await check_commit_hf(app, repo_type, org, repo, commit=None,
                 authorization=authorization,
             ):
@@ -398,7 +407,7 @@ async def tree_proxy_common(
         if commit_sha is None:
             return error_repo_not_found()
         # if branch name and online mode, refresh branch info
-        if not app.app_settings.config.offline and commit_sha != commit:
+        if not app.state.app_settings.config.offline and commit_sha != commit:
             generator = tree_generator(
                 app=app,
                 repo_type=repo_type,
@@ -512,9 +521,9 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return error_repo_not_found()
     # Check Mirror Path
-    for mirror_path in app.app_settings.config.mirrors_path:
+    for mirror_path in app.state.app_settings.config.mirrors_path:
+        git_path = os.path.join(mirror_path, repo_type, org, repo)
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 pathsinfo_data = local_repo.get_pathinfos(commit, paths)
@@ -527,7 +536,7 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
 
     # Proxy the HF File pathsinfo
     try:
-        if not app.app_settings.config.offline:
+        if not app.state.app_settings.config.offline:
             if not await check_commit_hf(app, repo_type, org, repo, commit=None,
                 authorization=authorization,
             ):
@@ -541,7 +550,7 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
         )
         if commit_sha is None:
             return error_repo_not_found()
-        if not app.app_settings.config.offline and commit_sha != commit:
+        if not app.state.app_settings.config.offline and commit_sha != commit:
             generator = pathsinfo_generator(
                 app=app,
                 repo_type=repo_type,
@@ -639,7 +648,7 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return error_repo_not_found()
     # Check Mirror Path
-    for mirror_path in app.app_settings.config.mirrors_path:
+    for mirror_path in app.state.app_settings.config.mirrors_path:
         try:
             git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
@@ -654,7 +663,7 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
 
     # Proxy the HF File Commits
     try:
-        if not app.app_settings.config.offline:
+        if not app.state.app_settings.config.offline:
             if not await check_commit_hf(app, repo_type, org, repo, commit=None,
                 authorization=authorization,
             ):
@@ -669,7 +678,7 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
         if commit_sha is None:
             return error_repo_not_found()
         # if branch name and online mode, refresh branch info
-        if not app.app_settings.config.offline and commit_sha != commit:
+        if not app.state.app_settings.config.offline and commit_sha != commit:
             generator = commits_generator(
                 app=app,
                 repo_type=repo_type,
@@ -754,11 +763,11 @@ async def whoami_v2(request: Request):
     Sensitive Information!!! 
     """
     new_headers = {k.lower(): v for k, v in request.headers.items()}
-    new_headers["host"] = app.app_settings.config.hf_netloc
+    new_headers["host"] = app.state.app_settings.config.hf_netloc
     async with httpx.AsyncClient() as client:
         response = await client.request(
             method="GET",
-            url=urljoin(app.app_settings.config.hf_url_base(), "/api/whoami-v2"),
+            url=urljoin(app.state.app_settings.config.hf_url_base(), "/api/whoami-v2"),
             headers=new_headers,
             timeout=10,
         )
@@ -787,9 +796,9 @@ async def file_head_common(
         return error_repo_not_found()
 
     # Check Mirror Path
-    for mirror_path in app.app_settings.config.mirrors_path:
+    for mirror_path in app.state.app_settings.config.mirrors_path:
+        git_path = os.path.join(mirror_path, repo_type, org, repo)
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 head = local_repo.get_file_head(commit_hash=commit, path=file_path)
@@ -802,7 +811,7 @@ async def file_head_common(
 
     # Proxy the HF File Head
     try:
-        if not app.app_settings.config.offline and not await check_commit_hf(
+        if not app.state.app_settings.config.offline and not await check_commit_hf(
             app,
             repo_type,
             org,
@@ -922,7 +931,7 @@ async def file_get_common(
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
         return error_repo_not_found()
     # Check Mirror Path
-    for mirror_path in app.app_settings.config.mirrors_path:
+    for mirror_path in app.state.app_settings.config.mirrors_path:
         try:
             git_path = os.path.join(mirror_path, repo_type, org, repo)
             if os.path.exists(git_path):
@@ -935,7 +944,7 @@ async def file_get_common(
             logger.warning(f"Local repository {git_path} is not a valid git reposity.")
             continue
     try:
-        if not app.app_settings.config.offline and not await check_commit_hf(
+        if not app.state.app_settings.config.offline and not await check_commit_hf(
             app,
             repo_type,
             org,
@@ -1081,16 +1090,16 @@ async def index(request: Request):
         "index.html",
         {
             "request": request,
-            "scheme": app.app_settings.config.mirror_scheme,
-            "netloc": app.app_settings.config.mirror_netloc,
+            "scheme": app.state.app_settings.config.mirror_scheme,
+            "netloc": app.state.app_settings.config.mirror_netloc,
         },
     )
 
 @app.get("/repos", response_class=HTMLResponse)
 async def repos(request: Request):
-    datasets_repos = glob.glob(os.path.join(app.app_settings.config.repos_path, "api/datasets/*/*"))
-    models_repos = glob.glob(os.path.join(app.app_settings.config.repos_path, "api/models/*/*"))
-    spaces_repos = glob.glob(os.path.join(app.app_settings.config.repos_path, "api/spaces/*/*"))
+    datasets_repos = glob.glob(os.path.join(app.state.app_settings.config.repos_path, "api/datasets/*/*"))
+    models_repos = glob.glob(os.path.join(app.state.app_settings.config.repos_path, "api/models/*/*"))
+    spaces_repos = glob.glob(os.path.join(app.state.app_settings.config.repos_path, "api/spaces/*/*"))
     datasets_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in datasets_repos]
     models_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in models_repos]
     spaces_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in spaces_repos]
@@ -1222,7 +1231,7 @@ Incorrect settings may result in unintended file deletion and loss!!! !!!
             time.sleep(0.2)
     
     # Init app settings
-    app.app_settings = AppSettings(config=config)
+    app.state.app_settings = AppSettings(config=config)
     return args
 
 def main():
