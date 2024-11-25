@@ -1,0 +1,100 @@
+
+name: Docker Image Build/Publish tag with version
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - 'main'
+    paths:
+      - docker/build@pypi/dockerfile
+      - .github/workflows/docker-image-tag-version.yml
+  workflow_dispatch:
+    inputs:
+      olah_version:
+        description: olah version of pypi
+        required: true
+        default: 0.3.3
+
+jobs:
+  build-and-push-docker-image:
+    name: Build Docker image and push to repositories
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        platform:
+          - linux/amd64,linux/arm64
+
+    steps:
+      - name: Set OLAH_SOURCE/OLAH_TAG variable for push or workflow_dispatch
+        id: set_olah_source
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+              TAG_NAME=${GITHUB_REF##*/}
+              VERSION=${TAG_NAME#v}
+              OLAH_SOURCE="https://github.com/${{ github.repository_owner }}/${{ github.repository }}/releases/download/${TAG_NAME}/olah-${VERSION}-py3-none-any.whl"
+              OLAH_TAG="${VERSION}"
+            elif [[ "${{ github.ref }}" == refs/heads/main ]]; then
+              OLAH_SOURCE="olah"
+              OLAH_TAG="lastet"
+            fi
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            OLAH_SOURCE="olah==${{ github.event.inputs.olah_version }}"
+            OLAH_TAG="${{ github.event.inputs.olah_version }}"
+          fi
+          echo "OLAH_SOURCE=$OLAH_SOURCE" >> $GITHUB_ENV
+          echo "OLAH_TAG=$OLAH_TAG" >> $GITHUB_ENV
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Meta data image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/olah
+            ghcr.io/${{ github.repository_owner }}/olah
+          tags: |
+            type=raw,value=${{ env.OLAH_TAG }}
+            type=raw,value=lastet
+          flavor: |
+            latest=false
+
+      - name: Build push image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/build@pypi/dockerfile
+          build-args: |
+            OLAH_SOURCE=${{ env.OLAH_SOURCE }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Print image digest
+        run: echo ${{ steps.build.outputs.digest }}

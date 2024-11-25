@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "debugpy: server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/olah/server.py",
+            "console": "integratedTerminal",
+            "args": ["-c", "${workspaceFolder}/assets/full_configs.toml"],
+            "justMyCode": false
+        }
+    ]
+}
