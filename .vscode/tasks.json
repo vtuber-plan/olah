@@ -22,6 +22,19 @@
             "command": "docker build -t xiaoyao9184/olah:0.3.3 -f ./docker/build@pypi/dockerfile .",
         },
         {
+            "label": "huggingface-cli: download bert-base-uncased",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "HF_ENDPOINT": "http://localhost:18090",
+                    "HF_HUB_ETAG_TIMEOUT": "100",
+                    "HF_HUB_DOWNLOAD_TIMEOUT": "100"
+                }
+            },
+            "command": "huggingface-cli download bert-base-uncased --revision main --cache-dir ./cache/huggingface/hub"
+        },
+        {
             "label": "huggingface-cli: download cais/mmlu",
             "type": "shell",
             "options": {

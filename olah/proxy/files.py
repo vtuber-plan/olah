@@ -468,10 +468,10 @@ async def file_get_generator(
     # save
     repos_path = app.app_settings.config.repos_path
     head_path = os.path.join(
-        repos_path, f"heads/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path}"
+        repos_path, f"heads/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
     )
     save_path = os.path.join(
-        repos_path, f"files/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path}"
+        repos_path, f"files/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
     )
     make_dirs(head_path)
     make_dirs(save_path)
@@ -522,10 +522,10 @@ async def cdn_file_get_generator(
     # save
     repos_path = app.app_settings.config.repos_path
     head_path = os.path.join(
-        repos_path, f"heads/{repo_type}/{org}/{repo}/cdn/{file_hash}"
+        repos_path, f"heads/{repo_type}/{org_repo}/cdn/{file_hash}"
     )
     save_path = os.path.join(
-        repos_path, f"files/{repo_type}/{org}/{repo}/cdn/{file_hash}"
+        repos_path, f"files/{repo_type}/{org_repo}/cdn/{file_hash}"
     )
     make_dirs(head_path)
     make_dirs(save_path)
