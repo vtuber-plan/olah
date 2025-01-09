@@ -193,7 +193,7 @@ async def meta_proxy_common(repo_type: str, org: str, repo: str, commit: str, me
     # Check Mirror Path
     for mirror_path in app.app_settings.config.mirrors_path:
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 meta_data = local_repo.get_meta(commit)
@@ -370,7 +370,7 @@ async def tree_proxy_common(
     # Check Mirror Path
     for mirror_path in app.app_settings.config.mirrors_path:
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 tree_data = local_repo.get_tree(commit, path, recursive=recursive, expand=expand)
@@ -514,7 +514,7 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
     # Check Mirror Path
     for mirror_path in app.app_settings.config.mirrors_path:
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 pathsinfo_data = local_repo.get_pathinfos(commit, paths)
@@ -641,7 +641,7 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
     # Check Mirror Path
     for mirror_path in app.app_settings.config.mirrors_path:
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 commits_data = local_repo.get_commits(commit)
@@ -789,7 +789,7 @@ async def file_head_common(
     # Check Mirror Path
     for mirror_path in app.app_settings.config.mirrors_path:
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 head = local_repo.get_file_head(commit_hash=commit, path=file_path)
@@ -924,7 +924,7 @@ async def file_get_common(
     # Check Mirror Path
     for mirror_path in app.app_settings.config.mirrors_path:
         try:
-            git_path = os.path.join(mirror_path, repo_type, org, repo)
+            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
             if os.path.exists(git_path):
                 local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
                 content_stream = local_repo.get_file(commit_hash=commit, path=file_path)

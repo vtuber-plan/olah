@@ -74,8 +74,9 @@ def get_meta_save_path(
         The path to save the meta.json file as a string.
 
     """
+    org_repo = get_org_repo(org, repo)
     return os.path.join(
-        repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}/meta_get.json"
+        repos_path, f"api/{repo_type}/{org_repo}/revision/{commit}/meta_get.json"
     )
 
 
@@ -95,7 +96,8 @@ def get_meta_save_dir(
         The directory path to save the meta.json file as a string.
 
     """
-    return os.path.join(repos_path, f"api/{repo_type}/{org}/{repo}/revision")
+    org_repo = get_org_repo(org, repo)
+    return os.path.join(repos_path, f"api/{repo_type}/{org_repo}/revision")
 
 
 def get_file_save_path(
@@ -121,8 +123,9 @@ def get_file_save_path(
         The path to save the file as a string.
 
     """
+    org_repo = get_org_repo(org, repo)
     return os.path.join(
-        repos_path, f"heads/{repo_type}/{org}/{repo}/resolve_head/{commit}/{file_path}"
+        repos_path, f"heads/{repo_type}/{org_repo}/resolve_head/{commit}/{file_path}"
     )
 
 
@@ -183,8 +186,9 @@ async def get_newest_commit_hf(
         The newest commit hash as a string, or None if it cannot be obtained.
 
     """
+    org_repo = get_org_repo(org, repo)
     url = urljoin(
-        app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org}/{repo}"
+        app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}"
     )
     if app.app_settings.config.offline:
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
