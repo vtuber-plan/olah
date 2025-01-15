@@ -319,7 +319,7 @@ class LocalMirrorRepo(object):
             header = {}
             header["content-length"] = str(commit.tree[path].data_stream.size)
             header["x-repo-commit"] = commit.hexsha
-            header["etag"] = self._sha256(commit.tree[path].data_stream.read())
+            header["etag"] = commit.tree[path].binsha.hex()
             return header
 
     def get_file(self, commit_hash: str, path: str) -> Optional[OStream]:
