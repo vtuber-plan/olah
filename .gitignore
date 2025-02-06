@@ -164,8 +164,10 @@ cython_debug/
 /dataset_dir/
 /repos/
 /logs/
+/cache/
 
 *.key
 *.csr
 *.pem
 *.crt
+

@@ -17,6 +17,15 @@ mirrors-path = ["./mirrors_dir"]
 [accessibility]
 offline = false
 
+# allow other or will be in whitelist mode.
+[[accessibility.proxy]]
+repo = "*"
+allow = true
+
+[[accessibility.proxy]]
+repo = "*/*"
+allow = true
+
 [[accessibility.proxy]]
 repo = "cais/mmlu"
 allow = true
@@ -33,6 +42,15 @@ allow = true
 repo = "mistralai/Mistral.*"
 allow = false
 use_re = true
+
+# allow other or will be in whitelist mode.
+[[accessibility.cache]]
+repo = "*"
+allow = true
+
+[[accessibility.cache]]
+repo = "*/*"
+allow = true
 
 [[accessibility.cache]]
 repo = "cais/mmlu"

@@ -72,13 +72,14 @@ async def pathsinfo_generator(
     if authorization is not None:
         headers["authorization"] = authorization
 
+    org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.state.app_settings.config.repos_path
 
     final_content = []
     for path in paths:
         save_dir = os.path.join(
-            repos_path, f"api/{repo_type}/{org}/{repo}/paths-info/{commit}/{path}"
+            repos_path, f"api/{repo_type}/{org_repo}/paths-info/{commit}/{path}"
         )
 
         save_path = os.path.join(save_dir, f"paths-info_{method}.json")

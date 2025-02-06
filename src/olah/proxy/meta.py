@@ -76,10 +76,11 @@ async def meta_generator(
     if authorization is not None:
         headers["authorization"] = authorization
 
+    org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.state.app_settings.config.repos_path
     save_dir = os.path.join(
-        repos_path, f"api/{repo_type}/{org}/{repo}/revision/{commit}"
+        repos_path, f"api/{repo_type}/{org_repo}/revision/{commit}"
     )
     save_path = os.path.join(save_dir, f"meta_{method}.json")
     make_dirs(save_path)

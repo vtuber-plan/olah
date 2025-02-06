@@ -319,7 +319,21 @@ class LocalMirrorRepo(object):
             header = {}
             header["content-length"] = str(commit.tree[path].data_stream.size)
             header["x-repo-commit"] = commit.hexsha
-            header["etag"] = self._sha256(commit.tree[path].data_stream.read())
+            header["etag"] = commit.tree[path].binsha.hex()
+            if (commit.tree[path].data_stream.size > 120) and (commit.tree[path].data_stream.size < 150):
+                lfs_data = commit.tree[path].data_stream.read().decode("utf-8")
+                match_groups = re.match(
+                    r"version https://git-lfs\.github\.com/spec/v[0-9]\noid sha256:([0-9a-z]{64})\nsize ([0-9]+?)\n",
+                    lfs_data,
+                )
+                if match_groups is not None:
+                    oid_sha256 = match_groups.group(1)
+                    objects_dir = os.path.join(self._git_repo.working_dir, '.git', 'lfs', 'objects')
+                    oid_dir = os.path.join(objects_dir, oid_sha256[:2], oid_sha256[2:4], oid_sha256)
+                    header["content-length"] = str(os.path.getsize(oid_dir))
+                    with open(oid_dir, mode='rb') as lfs_file:
+                        header["etag"] = self._sha256(lfs_file.read())
+
             return header
 
     def get_file(self, commit_hash: str, path: str) -> Optional[OStream]:
@@ -327,6 +341,20 @@ class LocalMirrorRepo(object):
             commit = self._git_repo.commit(commit_hash)
         except gitdb.exc.BadName:
             return None
+
+        lfs = False
+        oid_dir = ""
+        if (commit.tree[path].size > 120) and (commit.tree[path].size < 150):
+            lfs_data = commit.tree[path].data_stream.read().decode("utf-8")
+            match_groups = re.match(
+                    r"version https://git-lfs\.github\.com/spec/v[0-9]\noid sha256:([0-9a-z]{64})\nsize ([0-9]+?)\n",
+                    lfs_data,
+            )
+            if match_groups is not None:
+                lfs = True
+                oid_sha256 = match_groups.group(1)
+                objects_dir = os.path.join(self._git_repo.working_dir, '.git', 'lfs', 'objects')
+                oid_dir = os.path.join(objects_dir, oid_sha256[:2], oid_sha256[2:4], oid_sha256)
 
         def stream_wrapper(file_bytes: bytes):
             file_stream = io.BytesIO(file_bytes)
@@ -340,4 +368,8 @@ class LocalMirrorRepo(object):
         if not self._contain_path(path, commit.tree):
             return None
         else:
-            return stream_wrapper(commit.tree[path].data_stream.read())
+            if lfs:
+                with open(oid_dir, mode='rb') as lfs_file:
+                    return stream_wrapper(lfs_file.read())
+            else:
+                return stream_wrapper(commit.tree[path].data_stream.read())

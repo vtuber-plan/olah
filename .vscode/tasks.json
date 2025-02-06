@@ -1,0 +1,66 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "docker: compose up",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}/docker/up/"
+            },
+            "command": "docker compose -p olah up",
+        },
+        {
+            "label": "docker: build main",
+            "type": "shell",
+            "command": "docker build -t xiaoyao9184/olah:main -f ./docker/build@source/dockerfile .",
+        },
+        {
+            "label": "docker: build 0.3.3",
+            "type": "shell",
+            "command": "docker build -t xiaoyao9184/olah:0.3.3 -f ./docker/build@pypi/dockerfile .",
+        },
+        {
+            "label": "huggingface-cli: download bert-base-uncased",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "HF_ENDPOINT": "http://localhost:18090",
+                    "HF_HUB_ETAG_TIMEOUT": "100",
+                    "HF_HUB_DOWNLOAD_TIMEOUT": "100"
+                }
+            },
+            "command": "huggingface-cli download bert-base-uncased --revision main --cache-dir ./cache/huggingface/hub"
+        },
+        {
+            "label": "huggingface-cli: download cais/mmlu",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "HF_ENDPOINT": "http://localhost:8090",
+                    "HF_HUB_ETAG_TIMEOUT": "100",
+                    "HF_HUB_DOWNLOAD_TIMEOUT": "100"
+                }
+            },
+            "command": "huggingface-cli download cais/mmlu --repo-type dataset --revision main --cache-dir ./cache/huggingface/hub"
+        },
+        {
+            "label": "conda: run olah-cli",
+            "type": "shell",
+            "command": [
+                "conda run --no-capture-output -n olah olah-cli -c ./assets/full_configs.toml"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "conda: create env",
+            "type": "shell",
+            "command": [
+                "conda env create -f ./environment.yml"
+            ]
+        }
+    ]
+}

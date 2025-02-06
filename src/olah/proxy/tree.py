@@ -82,10 +82,11 @@ async def tree_generator(
     if authorization is not None:
         headers["authorization"] = authorization
 
+    org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.state.app_settings.config.repos_path
     save_dir = os.path.join(
-        repos_path, f"api/{repo_type}/{org}/{repo}/tree/{commit}/{path}"
+        repos_path, f"api/{repo_type}/{org_repo}/tree/{commit}/{path}"
     )
     save_path = os.path.join(save_dir, f"tree_{method}_recursive_{recursive}_expand_{expand}.json")
 

@@ -1,0 +1,17 @@
+FROM python:3.12
+
+WORKDIR /app
+
+RUN pip3 install --upgrade pip
+
+COPY . /app
+RUN pip3 install --no-cache-dir -e .
+
+EXPOSE 8090
+
+VOLUME /data/repos
+VOLUME /data/mirrors
+
+ENTRYPOINT [ "olah-cli" ]
+
+CMD ["--repos-path", "/repos"]

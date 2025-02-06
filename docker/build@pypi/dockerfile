@@ -1,0 +1,20 @@
+ARG OLAH_SOURCE=olah==0.3.3
+
+FROM python:3.12
+
+ARG OLAH_SOURCE
+
+WORKDIR /app
+
+RUN pip3 install --upgrade pip
+
+RUN pip install --no-cache-dir ${OLAH_SOURCE}
+
+EXPOSE 8090
+
+VOLUME /data/repos
+VOLUME /data/mirrors
+
+ENTRYPOINT [ "olah-cli" ]
+
+CMD ["--repos-path", "/repos"]

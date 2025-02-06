@@ -1,0 +1,13 @@
+
+
+services:
+  olah:
+    image: xiaoyao9184/olah:lastet
+    container_name: olah
+    command: -c /app/configs.toml
+    ports:
+      - 8090:8090
+    volumes:
+      - ./configs.toml:/app/configs.toml
+      - ./mirrors:/data/mirrors
+      - ./repos:/data/repos
