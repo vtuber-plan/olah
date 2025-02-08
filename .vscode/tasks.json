@@ -14,12 +14,12 @@
         {
             "label": "docker: build main",
             "type": "shell",
-            "command": "docker build -t xiaoyao9184/olah:main -f ./docker/build@source/dockerfile .",
+            "command": "docker build -t xiahan2019/olah:main -f ./docker/build@source/dockerfile .",
         },
         {
             "label": "docker: build 0.3.3",
             "type": "shell",
-            "command": "docker build -t xiaoyao9184/olah:0.3.3 -f ./docker/build@pypi/dockerfile .",
+            "command": "docker build -t xiahan2019/olah:0.3.3 -f ./docker/build@pypi/dockerfile .",
         },
         {
             "label": "huggingface-cli: download bert-base-uncased",

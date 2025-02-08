@@ -2,7 +2,7 @@
 
 services:
   olah:
-    image: xiaoyao9184/olah:lastet
+    image: xiahan2019/olah:lastet
     container_name: olah
     command: -c /app/configs.toml
     ports:
