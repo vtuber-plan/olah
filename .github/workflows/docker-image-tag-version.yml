@@ -35,7 +35,7 @@ jobs:
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               TAG_NAME=${GITHUB_REF##*/}
               VERSION=${TAG_NAME#v}
-              OLAH_SOURCE="https://github.com/${{ github.repository_owner }}/${{ github.repository }}/releases/download/${TAG_NAME}/olah-${VERSION}-py3-none-any.whl"
+              OLAH_SOURCE="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/olah-${VERSION}-py3-none-any.whl"
               OLAH_TAG="${VERSION}"
             elif [[ "${{ github.ref }}" == refs/heads/main ]]; then
               OLAH_SOURCE="olah"
