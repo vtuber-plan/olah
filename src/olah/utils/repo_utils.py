@@ -188,7 +188,7 @@ async def get_newest_commit_hf(
     """
     org_repo = get_org_repo(org, repo)
     url = urljoin(
-        app.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}"
+        app.state.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}"
     )
     if app.state.app_settings.config.offline:
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)

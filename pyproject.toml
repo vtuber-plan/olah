@@ -32,8 +32,5 @@ olah-cli = "olah.server:cli"
 where = ["src"]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
 
-[tool.setuptools.package-data]
-olah = ["static/*.html"]
-
 [tool.wheel]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
