@@ -267,7 +267,7 @@ async def _file_chunk_head(
     allow_cache: bool,
     file_size: int,
 ):
-    if not app.app_settings.config.offline:
+    if not app.state.app_settings.config.offline:
         async with client.stream(
             method=method,
             url=url,
@@ -333,17 +333,17 @@ async def _file_realtime_stream(
             )
         else:
             hf_url = urljoin(
-                app.app_settings.config.hf_lfs_url_base(), get_url_tail(clean_url)
+                app.state.app_settings.config.hf_lfs_url_base(), get_url_tail(clean_url)
             )
     else:
         if urlparse(url).netloc in [
-            app.app_settings.config.hf_netloc,
-            app.app_settings.config.hf_lfs_netloc,
+            app.state.app_settings.config.hf_netloc,
+            app.state.app_settings.config.hf_lfs_netloc,
         ]:
             hf_url = url
         else:
             hf_url = urljoin(
-                app.app_settings.config.hf_lfs_url_base(), get_url_tail(url)
+                app.state.app_settings.config.hf_lfs_url_base(), get_url_tail(url)
             )
 
     request_headers = {k: v for k, v in request.headers.items()}
@@ -409,7 +409,7 @@ async def _file_realtime_stream(
     etag = await _resource_etag(
         hf_url=hf_url,
         authorization=request.headers.get("authorization", None),
-        offline=app.app_settings.config.offline,
+        offline=app.state.app_settings.config.offline,
     )
     response_headers["etag"] = etag
     
@@ -466,7 +466,7 @@ async def file_get_generator(
 ):
     org_repo = get_org_repo(org, repo)
     # save
-    repos_path = app.app_settings.config.repos_path
+    repos_path = app.state.app_settings.config.repos_path
     head_path = os.path.join(
         repos_path, f"heads/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
     )
@@ -482,12 +482,12 @@ async def file_get_generator(
     # proxy
     if repo_type == "models":
         url = urljoin(
-            app.app_settings.config.hf_url_base(),
+            app.state.app_settings.config.hf_url_base(),
             f"/{org_repo}/resolve/{commit}/{file_path}",
         )
     else:
         url = urljoin(
-            app.app_settings.config.hf_url_base(),
+            app.state.app_settings.config.hf_url_base(),
             f"/{repo_type}/{org_repo}/resolve/{commit}/{file_path}",
         )
     return _file_realtime_stream(
@@ -520,7 +520,7 @@ async def cdn_file_get_generator(
 
     org_repo = get_org_repo(org, repo)
     # save
-    repos_path = app.app_settings.config.repos_path
+    repos_path = app.state.app_settings.config.repos_path
     head_path = os.path.join(
         repos_path, f"heads/{repo_type}/{org_repo}/cdn/{file_hash}"
     )
@@ -535,10 +535,10 @@ async def cdn_file_get_generator(
 
     # proxy
     # request_url = urlparse(str(request.url))
-    # if request_url.netloc == app.app_settings.config.hf_lfs_netloc:
-    #     redirected_url = urljoin(app.app_settings.config.mirror_lfs_url_base(), get_url_tail(request_url))
+    # if request_url.netloc == app.state.app_settings.config.hf_lfs_netloc:
+    #     redirected_url = urljoin(app.state.app_settings.config.mirror_lfs_url_base(), get_url_tail(request_url))
     # else:
-    #     redirected_url = urljoin(app.app_settings.config.mirror_url_base(), get_url_tail(request_url))
+    #     redirected_url = urljoin(app.state.app_settings.config.mirror_url_base(), get_url_tail(request_url))
 
     return _file_realtime_stream(
         app=app,

@@ -6,9 +6,7 @@
 # https://opensource.org/licenses/MIT.
 
 import os
-import shutil
-import tempfile
-from typing import Dict, Literal, Optional, AsyncGenerator, Union
+from typing import Dict, Literal, Mapping, Optional
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 
@@ -20,30 +18,35 @@ from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 
-async def _meta_cache_generator(save_path: str) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
+
+async def _commits_cache_generator(save_path: str):
     cache_rq = await read_cache_request(save_path)
+    yield cache_rq["status_code"]
     yield cache_rq["headers"]
     yield cache_rq["content"]
 
 
-async def _meta_proxy_generator(
+async def _commits_proxy_generator(
     app: FastAPI,
     headers: Dict[str, str],
-    meta_url: str,
+    commits_url: str,
     method: str,
+    params: Mapping[str, str],
     allow_cache: bool,
     save_path: str,
-) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
+):
     async with httpx.AsyncClient(follow_redirects=True) as client:
         content_chunks = []
         async with client.stream(
             method=method,
-            url=meta_url,
+            url=commits_url,
+            params=params,
             headers=headers,
             timeout=WORKER_API_TIMEOUT,
         ) as response:
             response_status_code = response.status_code
             response_headers = response.headers
+            yield response_status_code
             yield response_headers
 
             async for raw_chunk in response.aiter_raw():
@@ -57,12 +60,13 @@ async def _meta_proxy_generator(
             content += chunk
 
         if allow_cache and response_status_code == 200:
+            make_dirs(save_path)
             await write_cache_request(
                 save_path, response_status_code, response_headers, bytes(content)
             )
 
 
-async def meta_generator(
+async def commits_generator(
     app: FastAPI,
     repo_type: Literal["models", "datasets", "spaces"],
     org: str,
@@ -71,34 +75,33 @@ async def meta_generator(
     override_cache: bool,
     method: str,
     authorization: Optional[str],
-) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
+):
     headers = {}
     if authorization is not None:
         headers["authorization"] = authorization
 
     org_repo = get_org_repo(org, repo)
     # save
-    repos_path = app.app_settings.config.repos_path
+    repos_path = app.state.app_settings.config.repos_path
     save_dir = os.path.join(
-        repos_path, f"api/{repo_type}/{org_repo}/revision/{commit}"
+        repos_path, f"api/{repo_type}/{org_repo}/commits/{commit}"
     )
-    save_path = os.path.join(save_dir, f"meta_{method}.json")
-    make_dirs(save_path)
+    save_path = os.path.join(save_dir, f"commits_{method}.json")
 
     use_cache = os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
 
     org_repo = get_org_repo(org, repo)
-    meta_url = urljoin(
-        app.app_settings.config.hf_url_base(),
-        f"/api/{repo_type}/{org_repo}/revision/{commit}",
+    commits_url = urljoin(
+        app.state.app_settings.config.hf_url_base(),
+        f"/api/{repo_type}/{org_repo}/commits/{commit}",
     )
     # proxy
     if use_cache and not override_cache:
-        async for item in _meta_cache_generator(save_path):
+        async for item in _commits_cache_generator(save_path):
             yield item
     else:
-        async for item in _meta_proxy_generator(
-            app, headers, meta_url, method, allow_cache, save_path
+        async for item in _commits_proxy_generator(
+            app, headers, commits_url, method, {}, allow_cache, save_path
         ):
             yield item

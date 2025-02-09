@@ -7,27 +7,29 @@
 
 
 from typing import Dict, Literal, Optional, Tuple, Union
+
+from fastapi import FastAPI
 from olah.configs import OlahConfig
 from .repo_utils import get_org_repo
 
 
 async def check_proxy_rules_hf(
-    app,
+    app: FastAPI,
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
     org: Optional[str],
     repo: str,
 ) -> bool:
-    config: OlahConfig = app.app_settings.config
+    config: OlahConfig = app.state.app_settings.config
     org_repo = get_org_repo(org, repo)
     return config.proxy.allow(org_repo)
 
 
 async def check_cache_rules_hf(
-    app,
+    app: FastAPI,
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
     org: Optional[str],
     repo: str,
 ) -> bool:
-    config: OlahConfig = app.app_settings.config
+    config: OlahConfig = app.state.app_settings.config
     org_repo = get_org_repo(org, repo)
     return config.cache.allow(org_repo)

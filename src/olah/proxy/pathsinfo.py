@@ -74,7 +74,7 @@ async def pathsinfo_generator(
 
     org_repo = get_org_repo(org, repo)
     # save
-    repos_path = app.app_settings.config.repos_path
+    repos_path = app.state.app_settings.config.repos_path
 
     final_content = []
     for path in paths:
@@ -89,7 +89,7 @@ async def pathsinfo_generator(
 
         org_repo = get_org_repo(org, repo)
         pathsinfo_url = urljoin(
-            app.app_settings.config.hf_url_base(),
+            app.state.app_settings.config.hf_url_base(),
             f"/api/{repo_type}/{org_repo}/paths-info/{commit}",
         )
         # proxy
