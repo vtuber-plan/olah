@@ -124,8 +124,8 @@ class OlahCache(object):
         # Cache
         self._blocks_read_cache: Dict[int, Optional[bytes]] = {}
         self._blocks_read_cache_fifo: List[int] = []
-        self._prefech_blocks: int = 16
-        self._max_read_cache: int = 32
+        self._prefech_blocks: int = 4
+        self._max_read_cache: int = 8
 
         self.open(path, block_size=block_size)
 
