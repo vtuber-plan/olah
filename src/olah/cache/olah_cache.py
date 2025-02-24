@@ -8,7 +8,7 @@
 import os
 import struct
 import threading
-from typing import BinaryIO, Dict, Optional
+from typing import BinaryIO, Dict, List, Optional
 from .bitset import Bitset
 
 CURRENT_OLAH_CACHE_VERSION = 8
@@ -122,8 +122,10 @@ class OlahCache(object):
         self._header_lock = threading.Lock()
 
         # Cache
-        self._blocks_read_cache: Dict[int, bytes] = {}
+        self._blocks_read_cache: Dict[int, Optional[bytes]] = {}
+        self._blocks_read_cache_fifo: List[int] = []
         self._prefech_blocks: int = 16
+        self._max_read_cache: int = 32
 
         self.open(path, block_size=block_size)
 
@@ -162,6 +164,7 @@ class OlahCache(object):
         self.header = None
 
         self._blocks_read_cache.clear()
+        self._blocks_read_cache_fifo.clear()
 
         self.is_open = False
 
@@ -212,6 +215,30 @@ class OlahCache(object):
         else:
             block = raw_block
         return block
+    
+    def _read_cache(self, block_index: int) -> Optional[bytes]:
+        if block_index in self._blocks_read_cache:
+            return self._blocks_read_cache[block_index]
+        else:
+            return None
+    
+    def _write_cache(self, block_index: int, bytes: Optional[bytes]):
+        if block_index in self._blocks_read_cache:
+            self._blocks_read_cache[block_index] = bytes
+            self._blocks_read_cache_fifo.remove(block_index)
+            self._blocks_read_cache_fifo.append(block_index)
+        else:
+            self._blocks_read_cache[block_index] = bytes
+            self._blocks_read_cache_fifo.append(block_index)
+            if len(self._blocks_read_cache_fifo) > self._max_read_cache:
+                pop_idx = self._blocks_read_cache_fifo.pop(0)
+                self._blocks_read_cache.pop(pop_idx)
+    
+    def _remove_cache(self, block_index: int):
+        if block_index not in self._blocks_read_cache:
+            return
+        del self._blocks_read_cache[block_index]
+        self._blocks_read_cache_fifo.remove(block_index)
 
     def flush(self):
         if not self.is_open:
@@ -230,26 +257,23 @@ class OlahCache(object):
 
         # Check Cache
         if block_index in self._blocks_read_cache:
-            return self._blocks_read_cache[block_index]
+            return self._read_cache(block_index)
 
         if not self.has_block(block_index=block_index):
             return None
 
-        offset = self._get_header_size() + (block_index * self._get_block_size())
         with open(self.path, "rb") as f:
-            f.seek(offset)
-            raw_block = f.read(self._get_block_size())
             # Prefetch blocks
             for block_offset in range(1, self._prefech_blocks + 1):
                 if block_index + block_offset >= self._get_block_number():
                     break
                 if not self.has_block(block_index=block_index):
-                    self._blocks_read_cache[block_index + block_offset] = None
+                    self._write_cache(block_index + block_offset, None)
                 else:
+                    byte_offset = self._get_header_size() + ((block_index + block_offset) * self._get_block_size())
+                    f.seek(byte_offset, 0)
                     prefetch_raw_block = f.read(self._get_block_size())
-                    self._blocks_read_cache[block_index + block_offset] = (
-                        self._pad_block(prefetch_raw_block)
-                    )
+                    self._write_cache(block_index + block_offset, self._pad_block(prefetch_raw_block))
 
         block = self._pad_block(raw_block)
         return block
@@ -280,7 +304,7 @@ class OlahCache(object):
 
         # Clear Cache
         if block_index in self._blocks_read_cache:
-            del self._blocks_read_cache[block_index]
+            self._remove_cache(block_index)
 
     def _resize_file_size(self, file_size: int):
         if not self.is_open:
