@@ -262,7 +262,10 @@ class OlahCache(object):
         if not self.has_block(block_index=block_index):
             return None
 
+        offset = self._get_header_size() + (block_index * self._get_block_size())
         with open(self.path, "rb") as f:
+            f.seek(offset, 0)
+            raw_block = f.read(self._get_block_size())
             # Prefetch blocks
             for block_offset in range(1, self._prefech_blocks + 1):
                 if block_index + block_offset >= self._get_block_number():
