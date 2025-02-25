@@ -5,6 +5,7 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
+import mmap
 import os
 import struct
 import threading
@@ -139,19 +140,21 @@ class OlahCache(object):
         if os.path.exists(path):
             with self._header_lock:
                 with open(path, "rb") as f:
-                    f.seek(0)
-                    self.header = OlahCacheHeader.read(f)
+                    with mmap.mmap(f.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
+                        mm.seek(0)
+                        self.header = OlahCacheHeader.read(mm)
         else:
             with self._header_lock:
                 # Create new file
                 with open(path, "wb") as f:
-                    f.seek(0)
-                    self.header = OlahCacheHeader(
-                        version=CURRENT_OLAH_CACHE_VERSION,
-                        block_size=block_size,
-                        file_size=0,
-                    )
-                    self.header.write(f)
+                    with mmap.mmap(f.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_WRITE) as mm:
+                        mm.seek(0)
+                        self.header = OlahCacheHeader(
+                            version=CURRENT_OLAH_CACHE_VERSION,
+                            block_size=block_size,
+                            file_size=0,
+                        )
+                        self.header.write(mm)
 
         self.is_open = True
 
@@ -169,10 +172,15 @@ class OlahCache(object):
         self.is_open = False
 
     def _flush_header(self):
+        if self.header is None:
+            raise Exception("The header of cache file is None")
+        if self.path is None:
+            raise Exception("The path of cache file is None")
         with self._header_lock:
             with open(self.path, "rb+") as f:
-                f.seek(0)
-                self.header.write(f)
+                with mmap.mmap(f.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_WRITE) as mm:
+                    mm.seek(0)
+                    self.header.write(mm)
 
     def _get_file_size(self) -> int:
         with self._header_lock:
@@ -252,6 +260,9 @@ class OlahCache(object):
         if not self.is_open:
             raise Exception("This file has been closed.")
 
+        if self.path is None:
+            raise Exception("The path of the cache file is None.")
+        
         if block_index >= self._get_block_number():
             raise Exception("Invalid block index.")
 
@@ -264,19 +275,20 @@ class OlahCache(object):
 
         offset = self._get_header_size() + (block_index * self._get_block_size())
         with open(self.path, "rb") as f:
-            f.seek(offset, 0)
-            raw_block = f.read(self._get_block_size())
-            # Prefetch blocks
-            for block_offset in range(1, self._prefech_blocks + 1):
-                if block_index + block_offset >= self._get_block_number():
-                    break
-                if not self.has_block(block_index=block_index):
-                    self._write_cache(block_index + block_offset, None)
-                else:
-                    byte_offset = self._get_header_size() + ((block_index + block_offset) * self._get_block_size())
-                    f.seek(byte_offset, 0)
-                    prefetch_raw_block = f.read(self._get_block_size())
-                    self._write_cache(block_index + block_offset, self._pad_block(prefetch_raw_block))
+            with mmap.mmap(f.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
+                mm.seek(offset, 0)
+                raw_block = mm.read(self._get_block_size())
+                # Prefetch blocks
+                for block_offset in range(1, self._prefech_blocks + 1):
+                    if block_index + block_offset >= self._get_block_number():
+                        break
+                    if not self.has_block(block_index=block_index):
+                        self._write_cache(block_index + block_offset, None)
+                    else:
+                        byte_offset = self._get_header_size() + ((block_index + block_offset) * self._get_block_size())
+                        mm.seek(byte_offset, 0)
+                        prefetch_raw_block = mm.read(self._get_block_size())
+                        self._write_cache(block_index + block_offset, self._pad_block(prefetch_raw_block))
 
         block = self._pad_block(raw_block)
         return block
@@ -284,6 +296,9 @@ class OlahCache(object):
     def write_block(self, block_index: int, block_bytes: bytes) -> None:
         if not self.is_open:
             raise Exception("This file has been closed.")
+        
+        if self.path is None:
+            raise Exception("The path of the cache file is None. ")
 
         if block_index >= self._get_block_number():
             raise Exception("Invalid block index.")
@@ -293,14 +308,15 @@ class OlahCache(object):
 
         offset = self._get_header_size() + (block_index * self._get_block_size())
         with open(self.path, "rb+") as f:
-            f.seek(offset)
-            if (block_index + 1) * self._get_block_size() > self._get_file_size():
-                real_block_bytes = block_bytes[
-                    : self._get_file_size() - block_index * self._get_block_size()
-                ]
-            else:
-                real_block_bytes = block_bytes
-            f.write(real_block_bytes)
+            with mmap.mmap(f.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_WRITE) as mm:
+                mm.seek(offset)
+                if (block_index + 1) * self._get_block_size() > self._get_file_size():
+                    real_block_bytes = block_bytes[
+                        : self._get_file_size() - block_index * self._get_block_size()
+                    ]
+                else:
+                    real_block_bytes = block_bytes
+                mm.write(real_block_bytes)
 
         self._set_header_block(block_index)
         self._flush_header()
@@ -312,6 +328,10 @@ class OlahCache(object):
     def _resize_file_size(self, file_size: int):
         if not self.is_open:
             raise Exception("This file has been closed.")
+        
+        if self.path is None:
+            raise Exception("The path of the cache file is None. ")
+
         if file_size == self._get_file_size():
             return
         if file_size < self._get_file_size():
@@ -320,19 +340,21 @@ class OlahCache(object):
             )
 
         with open(self.path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            bin_size = f.tell()
+            with mmap.mmap(f.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
+                mm.seek(0, os.SEEK_END)
+                bin_size = mm.tell()
 
         # FIXME: limit the resize method, because it may influence the _block_mask
         new_bin_size = self._get_header_size() + file_size
         with open(self.path, "rb+") as f:
-            f.seek(new_bin_size - 1)
-            f.write(b'\0')
-            f.truncate()
-            
-            # Extend file size (slow)
-            # f.seek(0, os.SEEK_END)
-            # f.write(b"\x00" * (new_bin_size - bin_size))
+            with mmap.mmap(f.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_WRITE) as mm:
+                mm.seek(new_bin_size - 1)
+                mm.write(b'\0')
+                mm.truncate()
+                
+                # Extend file size (slow)
+                # mm.seek(0, os.SEEK_END)
+                # mm.write(b"\x00" * (new_bin_size - bin_size))
 
     def resize(self, file_size: int):
         if not self.is_open:
