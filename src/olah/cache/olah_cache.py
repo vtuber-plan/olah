@@ -20,8 +20,8 @@ import portalocker
 from .bitset import Bitset
 
 CURRENT_OLAH_CACHE_VERSION = 9
-DEFAULT_BLOCK_SIZE = 128 * 1024 * 1024
-MAX_BLOCK_NUM = 4096
+DEFAULT_BLOCK_SIZE = 16 * 1024 * 1024
+MAX_BLOCK_NUM = 8192
 DEFAULT_COMPRESSION_ALGO = 1
 """
 0: no compression
