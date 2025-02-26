@@ -155,7 +155,7 @@ class OlahCache(object):
             if not os.path.isdir(path):
                 raise Exception("The cache path shall be a folder instead of a file.")
             with self._header_lock:
-                with portalocker.Lock(self._meta_path, "rb", flags=portalocker.LOCK_SH) as f:
+                with portalocker.Lock(self._meta_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as f:
                     f.seek(0)
                     self.header = OlahCacheHeader.read(f)
         else:
@@ -163,7 +163,7 @@ class OlahCache(object):
             os.makedirs(os.path.join(self.path, "blocks"), exist_ok=True)
             with self._header_lock:
                 # Create new file
-                with portalocker.Lock(self._meta_path, "wb", flags=portalocker.LOCK_EX) as f:
+                with portalocker.Lock(self._meta_path, "wb", timeout=60, flags=portalocker.LOCK_EX) as f:
                     f.seek(0)
                     self.header = OlahCacheHeader(
                         version=CURRENT_OLAH_CACHE_VERSION,
@@ -264,7 +264,7 @@ class OlahCache(object):
         
         block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
 
-        with portalocker.Lock(block_path, "rb", flags=portalocker.LOCK_SH) as fh:
+        with portalocker.Lock(block_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as fh:
             async with aiofiles.open(block_path, mode='rb') as f:
                 raw_block = await f.read(self._get_block_size())
         
@@ -279,7 +279,7 @@ class OlahCache(object):
                 block_data = lzma_dec.decompress(block_data)
             else:
                 raise Exception("Unsupported compression algorithm.")
-            return block_data     
+            return block_data
         
         loop = asyncio.get_running_loop()
         # Run in the default thread pool executor
@@ -340,7 +340,7 @@ class OlahCache(object):
             
         block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
 
-        with portalocker.Lock(block_path, 'wb+', flags=portalocker.LOCK_EX) as fh:
+        with portalocker.Lock(block_path, 'wb+', timeout=60, flags=portalocker.LOCK_EX) as fh:
             async with aiofiles.open(block_path, mode='wb+') as f:
                 await f.write(real_block_bytes)
 
