@@ -98,7 +98,7 @@ async def check_connection(url: str) -> bool:
 # cr.track_class(OlahCacheHeader)
 # cr.track_class(OlahCache)
 
-@repeat_every(seconds=5)
+@repeat_every(seconds=60*5)
 async def check_hf_connection() -> None:
     if app.state.app_settings.config.offline:
         return
@@ -1262,7 +1262,7 @@ def cli():
         log_level="info",
         reload=False,
         ssl_keyfile=args.ssl_key,
-        ssl_certfile=args.ssl_cert
+        ssl_certfile=args.ssl_cert,
     )
 
 if __name__ in ["olah.server", "__main__"]:

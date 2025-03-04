@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "olah"
-version = "0.3.4"
+version = "0.4.0"
 description = "Self-hosted lightweight huggingface mirror."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -15,7 +15,8 @@ classifiers = [
 dependencies = [
     "fastapi", "fastapi-utils", "httpx", "numpy", "pydantic<=2.8.2", "pydantic-settings<=2.4.0", "requests", "toml",
     "rich>=10.0.0", "shortuuid", "uvicorn", "tenacity>=8.2.2", "pytz", "cachetools", "GitPython",
-    "PyYAML", "typing_inspect>=0.9.0", "huggingface_hub", "jinja2", "python-multipart"
+    "PyYAML", "typing_inspect>=0.9.0", "huggingface_hub", "jinja2", "python-multipart", "portalocker",
+    "aiofiles"
 ]
 
 [project.optional-dependencies]

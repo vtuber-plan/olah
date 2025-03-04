@@ -95,7 +95,7 @@ async def _get_file_range_from_cache(
         )
         if not cache_file.has_block(cur_block):
             raise Exception("Unknown exception: read block which has not been cached.")
-        raw_block = cache_file.read_block(cur_block)
+        raw_block = await cache_file.read_block(cur_block)
         chunk = raw_block[
             max(start_pos, block_start_pos)
             - block_start_pos : min(end_pos, block_end_pos)
@@ -224,7 +224,7 @@ async def _file_chunk_get(
                 stream_cache = stream_cache[split_pos:]
                 if len(raw_block) == cache_file._get_block_size():
                     if not cache_file.has_block(last_block) and allow_cache:
-                        cache_file.write_block(last_block, raw_block)
+                        await cache_file.write_block(last_block, raw_block)
                 last_block, last_block_start_pos, last_block_end_pos = get_block_info(
                     cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
                 )
@@ -241,7 +241,7 @@ async def _file_chunk_get(
                 last_block = cur_block
             if len(raw_block) == cache_file._get_block_size():
                 if not cache_file.has_block(last_block) and allow_cache:
-                    cache_file.write_block(last_block, raw_block)
+                    await cache_file.write_block(last_block, raw_block)
 
             if cur_pos != range_end_pos:
                 if is_remote:

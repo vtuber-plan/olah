@@ -14,3 +14,5 @@ peewee==3.17.6
 typing_inspect==0.9.0
 jinja2==3.1.4
 python-multipart==0.0.9
+portalocker==3.1.1
+aiofiles==24.1.0
