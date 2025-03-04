@@ -114,6 +114,13 @@ olah-cli --host localhost --port 8090 --repos-path ./hf_mirrors
 
 **Note that the cached data between different versions cannot be migrated. Please delete the cache folder before upgrading to the latest version of Olah.**
 
+In deployment scenarios, there may be high concurrent downloads, leading to Timeout errors for new connections.
+You can set the `WEB_CONCURRENCY` variable for uvicorn to increase the number of workers, thereby enhancing concurrency in production environments.
+For example, on Linux:
+```bash
+export WEB_CONCURRENCY=4
+```
+
 ## More Configurations
 
 Additional configurations can be controlled through a configuration file by passing the `configs.toml` file as a command parameter:

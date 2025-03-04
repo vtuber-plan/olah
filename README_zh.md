@@ -115,6 +115,13 @@ olah-cli --host localhost --port 8090 --repos-path ./hf_mirrors
 
 **注意，不同版本之间的缓存数据不能迁移，请删除缓存文件夹后再进行olah的升级**
 
+在实际部署中可能出现下载并发量很大，导致新的连接出现Timeout错误。
+可以设置uvicorn的WEB_CONCURRENCY变量以增加worker数量以提升产品场景的并发量。
+例如Linux下:
+```bash
+export WEB_CONCURRENCY=4
+```
+
 ## 更多配置
 
 更多配置可以通过配置文件进行控制，通过命令参数传入`configs.toml`以设置配置文件路径：

@@ -16,11 +16,13 @@ import gzip
 from typing import BinaryIO, Dict, List, Optional
 
 import aiofiles
+import fastapi
+import fastapi.concurrency
 import portalocker
 from .bitset import Bitset
 
 CURRENT_OLAH_CACHE_VERSION = 9
-DEFAULT_BLOCK_SIZE = 16 * 1024 * 1024
+DEFAULT_BLOCK_SIZE = 64 * 1024 * 1024
 MAX_BLOCK_NUM = 8192
 DEFAULT_COMPRESSION_ALGO = 1
 """
@@ -280,11 +282,8 @@ class OlahCache(object):
             else:
                 raise Exception("Unsupported compression algorithm.")
             return block_data
-        
-        loop = asyncio.get_running_loop()
-        # Run in the default thread pool executor
-        raw_block = await loop.run_in_executor(
-            None,  # Uses the default executor
+
+        raw_block = await fastapi.concurrency.run_in_threadpool(
             decompression,
             raw_block,
             self.header.compression_algo
@@ -328,16 +327,14 @@ class OlahCache(object):
             else:
                 raise Exception("Unsupported compression algorithm.")
             return block_data
-        
-        loop = asyncio.get_running_loop()
+
         # Run in the default thread pool executor
-        real_block_bytes = await loop.run_in_executor(
-            None,  # Uses the default executor
+        real_block_bytes = await fastapi.concurrency.run_in_threadpool(
             compression,
             real_block_bytes,
             self.header.compression_algo
         )
-            
+   
         block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
 
         with portalocker.Lock(block_path, 'wb+', timeout=60, flags=portalocker.LOCK_EX) as fh:

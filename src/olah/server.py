@@ -1262,7 +1262,7 @@ def cli():
         log_level="info",
         reload=False,
         ssl_keyfile=args.ssl_key,
-        ssl_certfile=args.ssl_cert
+        ssl_certfile=args.ssl_cert,
     )
 
 if __name__ in ["olah.server", "__main__"]:

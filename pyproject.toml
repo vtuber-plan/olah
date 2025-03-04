@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "olah"
-version = "0.3.5"
+version = "0.4.0"
 description = "Self-hosted lightweight huggingface mirror."
 readme = "README.md"
 requires-python = ">=3.8"
