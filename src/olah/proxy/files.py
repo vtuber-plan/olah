@@ -30,6 +30,7 @@ from olah.utils.url_utils import (
     RemoteInfo,
     add_query_param,
     check_url_has_param_name,
+    get_all_ranges,
     get_url_param_name,
     get_url_tail,
     parse_range_params,
@@ -184,17 +185,8 @@ async def _file_chunk_get(
     
     try:
         unit, ranges, suffix = parse_range_params(headers.get("range", f"bytes={0}-{file_size-1}"))
-        
-        all_ranges: List[Tuple[int, int]] = []
-        if suffix is not None:
-            all_ranges.append((file_size - suffix, file_size))
-        else:
-            for r in ranges:
-                start_pos = max(0, r[0])
-                end_pos = min(file_size - 1, r[1])
-                if end_pos < start_pos:
-                    continue
-                all_ranges.append((start_pos, end_pos + 1))
+        all_ranges = get_all_ranges(file_size, unit, ranges, suffix)
+
         for start_pos, end_pos in all_ranges:
             ranges_and_cache_list = get_contiguous_ranges(cache_file, start_pos, end_pos)
             # Stream ranges
@@ -413,16 +405,8 @@ async def _file_realtime_stream(
     response_headers = {}
     # Create content-length
     unit, ranges, suffix = parse_range_params(request_headers.get("range", f"bytes={0}-{file_size-1}"))
-    all_ranges: List[Tuple[int, int]] = []
-    if suffix is not None:
-        all_ranges.append((file_size - suffix, file_size))
-    else:
-        for r in ranges:
-            start_pos = max(0, r[0])
-            end_pos = min(file_size - 1, r[1])
-            if end_pos < start_pos:
-                continue
-            all_ranges.append((start_pos, end_pos + 1))
+    all_ranges = get_all_ranges(file_size, unit, ranges, suffix)
+    
     response_headers["content-length"] = str(sum(r[1] - r[0] for r in all_ranges))
     if suffix is not None:
         response_headers["content-range"] = f"bytes -{suffix}/{file_size}"

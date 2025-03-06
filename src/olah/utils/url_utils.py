@@ -79,7 +79,7 @@ def parse_content_range(content_range: str) -> Tuple[str, Optional[int], Optiona
     return unit, start_pos, end_pos, resource_size
 
 
-def parse_range_params(range_header: str) -> Tuple[str, List[Tuple[int, int]], Optional[int]]:
+def parse_range_params(range_header: str) -> Tuple[str, List[Tuple[Optional[int], Optional[int]]], Optional[int]]:
     """
     Parses the HTTP Range request header and returns the unit and a list of ranges.
 
@@ -121,8 +121,7 @@ def parse_range_params(range_header: str) -> Tuple[str, List[Tuple[int, int]], O
 
         # Handle suffix-length ranges (e.g., "-500")
         if not start and end:
-            suffix_length = int(end)
-            range_list.append((-suffix_length, None))  # Negative start indicates suffix-length
+            range_list.append((None, int(end)))  # Negative start indicates suffix-length
             continue
 
         # Handle open-ended ranges (e.g., "500-")
@@ -140,6 +139,21 @@ def parse_range_params(range_header: str) -> Tuple[str, List[Tuple[int, int]], O
 
     return unit, range_list, None
 
+
+def get_all_ranges(file_size: int, unit: str, ranges: List[Tuple[Optional[int], Optional[int]]], suffix: Optional[int]) -> List[Tuple[int, int]]:
+    all_ranges: List[Tuple[int, int]] = []
+    if suffix is not None:
+        all_ranges.append((file_size - suffix, file_size))
+    else:
+        for r in ranges:
+            r_start = r[0] if r[0] is not None else 0
+            r_end = r[1] if r[1] is not None else file_size - 1
+            start_pos = max(0, r_start)
+            end_pos = min(file_size - 1, r_end)
+            if end_pos < start_pos:
+                continue
+            all_ranges.append((start_pos, end_pos + 1))
+    return all_ranges
 
 
 class RemoteInfo(object):
