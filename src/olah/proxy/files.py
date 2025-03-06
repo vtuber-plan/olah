@@ -39,7 +39,7 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
-from olah.utils.zip_utils import decompress_data
+from olah.utils.zip_utils import Decompressor, decompress_data
 
 
 def get_block_info(pos: int, block_size: int, file_size: int) -> Tuple[int, int, int]:
@@ -121,8 +121,7 @@ async def _get_file_range_from_remote(
     headers["range"] = f"bytes={start_pos}-{end_pos - 1}"
 
     chunk_bytes = 0
-    raw_data = bytearray()
-    final_data: Optional[bytes] = None
+    decompressor: Optional[Decompressor] = None
     async with client.stream(
         method=remote_info.method,
         url=remote_info.url,
@@ -130,36 +129,35 @@ async def _get_file_range_from_remote(
         timeout=WORKER_API_TIMEOUT,
         follow_redirects=True,
     ) as response:
+        status_code = response.status_code
+    
+        if status_code == 429:
+            raise Exception("Too many requests in a given amount of time.")
+        
+        is_compressed = "content-encoding" in response.headers
+        if is_compressed:
+            decompressor = Decompressor(response.headers["content-encoding"].split(","))
+        
         async for raw_chunk in response.aiter_raw():
             if not raw_chunk:
                 continue
-            raw_data += raw_chunk
-            chunk_bytes += len(raw_chunk)
+            if is_compressed and decompressor is not None:
+                real_chunk = decompressor.decompress(raw_chunk)
+                yield real_chunk
+                chunk_bytes += len(real_chunk)
+            else:
+                yield raw_chunk
+                chunk_bytes += len(raw_chunk)
 
-        if "content-encoding" in response.headers:
-            final_data = decompress_data(bytes(raw_data), response.headers.get("content-encoding", None))
-            chunk_bytes = len(final_data)
-            yield final_data
-        else:
-            final_data = bytes(raw_data)
-            yield final_data
-        
-        if "content-encoding" in response.headers:
-            response_content_length = len(final_data)
+        if is_compressed:
+            response_content_length = chunk_bytes
         else:
             response_content_length = int(response.headers["content-length"])
 
     # Post check
-    if final_data is None:
-        raise RuntimeError(f"Internal Error: can not get data from {remote_info.url}")
-    if "content-length" in response.headers:
-        if end_pos - start_pos != response_content_length:
-            raise Exception(
-                f"The content of the response is incomplete. Expected-{end_pos - start_pos}. Accepted-{response_content_length}"
-            )
-    if end_pos - start_pos != chunk_bytes:
+    if end_pos - start_pos != response_content_length:
         raise Exception(
-            f"The block is incomplete. Expected-{end_pos - start_pos}. Accepted-{chunk_bytes}"
+            f"The content of the response is incomplete. File size: {cache_file._get_file_size()}. Start-end: {start_pos}-{end_pos}. Expected-{end_pos - start_pos}. Accepted-{response_content_length}"
         )
 
 

@@ -37,7 +37,24 @@ def get_url_tail(parsed_url: Union[str, ParseResult]) -> str:
         url_tail += f"#{parsed_url.fragment}"
     return url_tail
 
+
 def parse_content_range(content_range: str) -> Tuple[str, Optional[int], Optional[int], Optional[int]]:
+    """
+    Parses a Content-Range header string and extracts the unit, start position, end position, and resource size.
+
+    Args:
+        content_range (str): The Content-Range header string, e.g., "bytes 0-999/1000".
+
+    Returns:
+        Tuple[str, Optional[int], Optional[int], Optional[int]]: A tuple containing:
+            - unit (str): The unit of the range, typically "bytes".
+            - start_pos (Optional[int]): The starting position of the range. None if the range is "*".
+            - end_pos (Optional[int]): The ending position of the range. None if the range is "*".
+            - resource_size (Optional[int]): The total size of the resource. None if the size is unknown.
+
+    Raises:
+        Exception: If the range unit is invalid or the range format is incorrect.
+    """
     if content_range.startswith("bytes "):
         unit = "bytes"
         content_range_part = content_range[len("bytes "):]
