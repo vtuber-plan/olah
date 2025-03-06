@@ -8,7 +8,7 @@
 import datetime
 import os
 import glob
-from typing import Dict, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 import json
 from urllib.parse import ParseResult, urlencode, urljoin, urlparse, parse_qs, urlunparse
 import httpx
@@ -37,34 +37,92 @@ def get_url_tail(parsed_url: Union[str, ParseResult]) -> str:
         url_tail += f"#{parsed_url.fragment}"
     return url_tail
 
+def parse_content_range(content_range: str) -> Tuple[str, Optional[int], Optional[int], Optional[int]]:
+    if content_range.startswith("bytes "):
+        unit = "bytes"
+        content_range_part = content_range[len("bytes "):]
+    else:
+        raise Exception("Invalid range unit")
 
-def parse_range_params(file_range: str, file_size: int) -> Tuple[int, int]:
+    
+    if "/" in content_range_part:
+        data_range, resource_size = content_range_part.split("/", maxsplit=1)
+        resource_size = int(resource_size)
+    else:
+        data_range = content_range_part
+        resource_size = None
+    
+    if "-" in data_range:
+        start_pos, end_pos = data_range.split("-")
+        start_pos, end_pos = int(start_pos), int(end_pos)
+    elif "*" == data_range.strip():
+        start_pos, end_pos = None, None
+    else:
+        raise Exception("Invalid range")
+    return unit, start_pos, end_pos, resource_size
+
+
+def parse_range_params(range_header: str) -> Tuple[str, List[Tuple[int, int]], Optional[int]]:
     """
-    Parses the range parameters for a file request.
+    Parses the HTTP Range request header and returns the unit and a list of ranges.
 
     Args:
-        file_range (str): The range parameter string, e.g., 'bytes=1887436800-'.
-        file_size (int): The size of the file.
+        range_header (str): The HTTP Range request header string, e.g., "bytes=0-499" or "bytes=200-999, 2000-2499, 9500-".
 
     Returns:
-        Tuple[int, int]: A tuple of start and end positions for the file range.
+        Tuple[str, List[Tuple[int, int]], Optional[int]]: A tuple containing the unit (e.g., "bytes") and a list of ranges.
+            Each range is represented as a tuple of start and end positions. If the end position is not specified,
+            it is set to None. For suffix-length ranges (e.g., "-500"), the start position is negative.
+
+    Raises:
+        ValueError: If the Range header is empty or has an invalid format.
     """
-    if "/" in file_range:
-        file_range, _file_size = file_range.split("/", maxsplit=1)
-    else:
-        file_range = file_range
-    if file_range.startswith("bytes="):
-        file_range = file_range[6:]
-    start_pos, end_pos = file_range.split("-")
-    if len(start_pos) != 0:
-        start_pos = int(start_pos)
-    else:
-        start_pos = 0
-    if len(end_pos) != 0:
-        end_pos = int(end_pos)
-    else:
-        end_pos = file_size - 1
-    return start_pos, end_pos
+    if not range_header:
+        raise ValueError("Range header cannot be empty")
+
+    # Split the unit and range specifiers
+    parts = range_header.split('=')
+    if len(parts) != 2:
+        raise ValueError("Invalid Range header format")
+
+    unit = parts[0].strip()  # Get the unit, typically "bytes"
+    range_specifiers = parts[1].strip()  # Get the range part
+    
+    if range_specifiers.startswith("-") and range_specifiers[1:].isdigit():
+        return unit, [], int(range_specifiers[1:])
+
+    # Parse multiple ranges
+    range_list = []
+    for range_spec in range_specifiers.split(','):
+        range_spec = range_spec.strip()
+        if '-' not in range_spec:
+            raise ValueError("Invalid range specifier")
+
+        start, end = range_spec.split('-')
+        start = start.strip()
+        end = end.strip()
+
+        # Handle suffix-length ranges (e.g., "-500")
+        if not start and end:
+            suffix_length = int(end)
+            range_list.append((-suffix_length, None))  # Negative start indicates suffix-length
+            continue
+
+        # Handle open-ended ranges (e.g., "500-")
+        if not end and start:
+            range_list.append((int(start), None))
+            continue
+
+        # Handle full ranges (e.g., "200-999")
+        if start and end:
+            range_list.append((int(start), int(end)))
+            continue
+
+        # If neither start nor end is provided, it's invalid
+        raise ValueError("Invalid range specifier")
+
+    return unit, range_list, None
+
 
 
 class RemoteInfo(object):

@@ -4,7 +4,7 @@ from typing import Optional
 import zlib
 
 
-def decompress_data(raw_data: bytes, content_encoding: Optional[str]):
+def decompress_data(raw_data: bytes, content_encoding: Optional[str]) -> bytes:
     # If result is compressed
     if content_encoding is not None:
         final_data = raw_data
