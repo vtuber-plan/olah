@@ -22,7 +22,8 @@ import portalocker
 from .bitset import Bitset
 
 CURRENT_OLAH_CACHE_VERSION = 9
-DEFAULT_BLOCK_SIZE = 64 * 1024 * 1024
+# Due to the download chunk settings: https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/constants.py#L37
+DEFAULT_BLOCK_SIZE = 50 * 1024 * 1024
 MAX_BLOCK_NUM = 8192
 DEFAULT_COMPRESSION_ALGO = 1
 """

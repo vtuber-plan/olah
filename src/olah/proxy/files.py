@@ -30,6 +30,7 @@ from olah.utils.url_utils import (
     RemoteInfo,
     add_query_param,
     check_url_has_param_name,
+    get_all_ranges,
     get_url_param_name,
     get_url_tail,
     parse_range_params,
@@ -39,7 +40,7 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
-from olah.utils.zip_utils import decompress_data
+from olah.utils.zip_utils import Decompressor, decompress_data
 
 
 def get_block_info(pos: int, block_size: int, file_size: int) -> Tuple[int, int, int]:
@@ -121,39 +122,43 @@ async def _get_file_range_from_remote(
     headers["range"] = f"bytes={start_pos}-{end_pos - 1}"
 
     chunk_bytes = 0
-    raw_data = b""
+    decompressor: Optional[Decompressor] = None
     async with client.stream(
         method=remote_info.method,
         url=remote_info.url,
         headers=headers,
         timeout=WORKER_API_TIMEOUT,
         follow_redirects=True,
-    ) as response:                
+    ) as response:
+        status_code = response.status_code
+    
+        if status_code == 429:
+            raise Exception("Too many requests in a given amount of time.")
+        
+        is_compressed = "content-encoding" in response.headers
+        if is_compressed:
+            decompressor = Decompressor(response.headers["content-encoding"].split(","))
+        
         async for raw_chunk in response.aiter_raw():
             if not raw_chunk:
                 continue
-            if "content-encoding" in response.headers:
-                raw_data += raw_chunk
+            if is_compressed and decompressor is not None:
+                real_chunk = decompressor.decompress(raw_chunk)
+                yield real_chunk
+                chunk_bytes += len(real_chunk)
             else:
                 yield raw_chunk
-            chunk_bytes += len(raw_chunk)
+                chunk_bytes += len(raw_chunk)
 
-        if "content-encoding" in response.headers:
-            final_data = decompress_data(raw_data, response.headers.get("content-encoding", None))
-            chunk_bytes = len(final_data)
-            yield final_data
-    if "content-length" in response.headers:
-        if "content-encoding" in response.headers:
-            response_content_length = len(final_data)
+        if is_compressed:
+            response_content_length = chunk_bytes
         else:
             response_content_length = int(response.headers["content-length"])
-        if end_pos - start_pos != response_content_length:
-            raise Exception(
-                f"The content of the response is incomplete. Expected-{end_pos - start_pos}. Accepted-{response_content_length}"
-            )
-    if end_pos - start_pos != chunk_bytes:
+
+    # Post check
+    if end_pos - start_pos != response_content_length:
         raise Exception(
-            f"The block is incomplete. Expected-{end_pos - start_pos}. Accepted-{chunk_bytes}"
+            f"The content of the response is incomplete. File size: {cache_file._get_file_size()}. Start-end: {start_pos}-{end_pos}. Expected-{end_pos - start_pos}. Accepted-{response_content_length}"
         )
 
 
@@ -179,79 +184,79 @@ async def _file_chunk_get(
     touch_file_access_time(save_path)
     
     try:
-        start_pos, end_pos = parse_range_params(
-            headers.get("range", f"bytes={0}-{file_size-1}"), file_size
-        )
-        end_pos += 1
+        unit, ranges, suffix = parse_range_params(headers.get("range", f"bytes={0}-{file_size-1}"))
+        all_ranges = get_all_ranges(file_size, unit, ranges, suffix)
 
-        ranges_and_cache_list = get_contiguous_ranges(cache_file, start_pos, end_pos)
-        # Stream ranges
-        for (range_start_pos, range_end_pos), is_remote in ranges_and_cache_list:
-            if is_remote:
-                generator = _get_file_range_from_remote(
-                    client,
-                    RemoteInfo(method, url, headers),
-                    cache_file,
-                    range_start_pos,
-                    range_end_pos,
-                )
-            else:
-                generator = _get_file_range_from_cache(
-                    cache_file,
-                    range_start_pos,
-                    range_end_pos,
-                )
+        for start_pos, end_pos in all_ranges:
+            ranges_and_cache_list = get_contiguous_ranges(cache_file, start_pos, end_pos)
+            # Stream ranges
+            for (range_start_pos, range_end_pos), is_remote in ranges_and_cache_list:
+                # range_start_pos is zero-index and range_end_pos is exclusive
+                if is_remote:
+                    generator = _get_file_range_from_remote(
+                        client,
+                        RemoteInfo(method, url, headers),
+                        cache_file,
+                        range_start_pos,
+                        range_end_pos,
+                    )
+                else:
+                    generator = _get_file_range_from_cache(
+                        cache_file,
+                        range_start_pos,
+                        range_end_pos,
+                    )
 
-            cur_pos = range_start_pos
-            stream_cache = bytearray()
-            last_block, last_block_start_pos, last_block_end_pos = get_block_info(
-                cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-            )
-            async for chunk in generator:
-                if len(chunk) != 0:
-                    yield bytes(chunk)
-                    stream_cache += chunk
-                    cur_pos += len(chunk)
-
-                cur_block = cur_pos // cache_file._get_block_size()
-
-                if cur_block == last_block:
-                    continue
-                split_pos = last_block_end_pos - max(
-                    last_block_start_pos, range_start_pos
-                )
-                raw_block = stream_cache[:split_pos]
-                stream_cache = stream_cache[split_pos:]
-                if len(raw_block) == cache_file._get_block_size():
-                    if not cache_file.has_block(last_block) and allow_cache:
-                        await cache_file.write_block(last_block, raw_block)
+                cur_pos = range_start_pos
+                stream_cache = bytearray()
                 last_block, last_block_start_pos, last_block_end_pos = get_block_info(
                     cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
                 )
+                async for chunk in generator:
+                    if len(chunk) != 0:
+                        yield bytes(chunk)
+                        stream_cache += chunk
+                        cur_pos += len(chunk)
 
-            raw_block = stream_cache
-            if cur_block == cache_file._get_block_number() - 1:
-                if (
-                    len(raw_block)
-                    == cache_file._get_file_size() % cache_file._get_block_size()
-                ):
-                    raw_block += b"\x00" * (
-                        cache_file._get_block_size() - len(raw_block)
-                    )
-                last_block = cur_block
-            if len(raw_block) == cache_file._get_block_size():
-                if not cache_file.has_block(last_block) and allow_cache:
-                    await cache_file.write_block(last_block, raw_block)
+                    cur_block = cur_pos // cache_file._get_block_size()
 
-            if cur_pos != range_end_pos:
-                if is_remote:
-                    raise Exception(
-                        f"The size of remote range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
+                    if cur_block == last_block:
+                        continue
+                    split_pos = last_block_end_pos - max(
+                        last_block_start_pos, range_start_pos
                     )
-                else:
-                    raise Exception(
-                        f"The size of cached range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
+                    raw_block = stream_cache[:split_pos]
+                    stream_cache = stream_cache[split_pos:]
+                    if len(raw_block) == cache_file._get_block_size():
+                        if not cache_file.has_block(last_block) and allow_cache:
+                            await cache_file.write_block(last_block, raw_block)
+                    last_block, last_block_start_pos, last_block_end_pos = get_block_info(
+                        cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
                     )
+
+                raw_block = stream_cache
+                if cur_block == cache_file._get_block_number() - 1:
+                    if (
+                        len(raw_block)
+                        == cache_file._get_file_size() % cache_file._get_block_size()
+                    ):
+                        raw_block += b"\x00" * (
+                            cache_file._get_block_size() - len(raw_block)
+                        )
+                    last_block = cur_block
+                if len(raw_block) == cache_file._get_block_size():
+                    if not cache_file.has_block(last_block) and allow_cache:
+                        await cache_file.write_block(last_block, raw_block)
+
+                if cur_pos != range_end_pos:
+                    if is_remote:
+                        raise Exception(
+                            f"The size of remote range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
+                        )
+                    else:
+                        raise Exception(
+                            f"The size of cached range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
+                        )
     finally:
         cache_file.close()
 
@@ -308,6 +313,7 @@ async def _resource_etag(hf_url: str, authorization: Optional[str]=None, offline
         except httpx.TimeoutException:
             ret_etag = None
     return ret_etag
+
 async def _file_realtime_stream(
     app,
     repo_type: Literal["models", "datasets", "spaces"],
@@ -398,10 +404,14 @@ async def _file_realtime_stream(
 
     response_headers = {}
     # Create content-length
-    start_pos, end_pos = parse_range_params(
-        request_headers.get("range", f"bytes={0}-{file_size-1}"), file_size
-    )
-    response_headers["content-length"] = str(end_pos - start_pos + 1)
+    unit, ranges, suffix = parse_range_params(request_headers.get("range", f"bytes={0}-{file_size-1}"))
+    all_ranges = get_all_ranges(file_size, unit, ranges, suffix)
+    
+    response_headers["content-length"] = str(sum(r[1] - r[0] for r in all_ranges))
+    if suffix is not None:
+        response_headers["content-range"] = f"bytes -{suffix}/{file_size}"
+    else:
+        response_headers["content-range"] = f"bytes {','.join(f'{r[0]}-{r[1]-1}' for r in all_ranges)}/{file_size}"
     # Commit info
     if commit is not None:
         response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
