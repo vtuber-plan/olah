@@ -172,7 +172,7 @@ async def lifespan(app: FastAPI):
 # Application
 # ======================
 code_file_path = os.path.abspath(__file__)
-app = FastAPI(lifespan=lifespan, debug=True)
+app = FastAPI(lifespan=lifespan, debug=False)
 templates = Jinja2Templates(directory=os.path.join(OLAH_CODE_DIR, "static"))
 
 
