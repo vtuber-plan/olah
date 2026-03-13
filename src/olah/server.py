@@ -231,7 +231,7 @@ async def meta_proxy_common(repo_type: Literal["models", "datasets", "spaces"], 
                 authorization=authorization,
             ),
         )
-        return await build_streaming_response(generator, include_status_code=False)
+        return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -362,7 +362,7 @@ async def tree_proxy_common(
                 authorization=authorization,
             ),
         )
-        return await build_streaming_response(generator, include_status_code=True)
+        return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -463,7 +463,7 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
                 authorization=authorization,
             ),
         )
-        return await build_streaming_response(generator, include_status_code=True)
+        return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -555,7 +555,7 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
                 authorization=authorization,
             ),
         )
-        return await build_streaming_response(generator, include_status_code=True)
+        return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -666,7 +666,7 @@ async def file_head_common(
             method="HEAD",
             request=request,
         )
-        return await build_streaming_response(generator, include_status_code=True)
+        return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -742,7 +742,7 @@ async def cdn_proxy_common(
             method=method,
             request=request,
         )
-        return await build_streaming_response(generator, include_status_code=True)
+        return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         return Response(status_code=504)
 
@@ -803,7 +803,7 @@ async def file_get_common(
             method="GET",
             request=request,
         )
-        return await build_streaming_response(generator, include_status_code=True)
+        return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -888,7 +888,7 @@ async def lfs_proxy_common(
             generator = await lfs_head_generator(app, dir1, dir2, hash_repo, hash_file, request)
         else:
             generator = await lfs_get_generator(app, dir1, dir2, hash_repo, hash_file, request)
-        return await build_streaming_response(generator, include_status_code=True)
+        return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         return Response(status_code=504)
 

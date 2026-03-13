@@ -4,6 +4,7 @@ from typing import Callable, Literal, Optional, Tuple
 from fastapi.responses import Response
 
 from olah.errors import error_repo_not_found, error_revision_not_found
+from olah.proxy.result import ProxyResult
 from olah.server_access import RepoRef
 from olah.utils.repo_utils import check_commit_hf, get_commit_hf, get_newest_commit_hf
 
@@ -72,10 +73,10 @@ async def resolve_requested_commit(
     return ResolvedCommit(requested=requested_commit, resolved=resolved_commit), None
 
 
-async def prepare_revision_generator(app, resolved_commit: ResolvedCommit, generator_factory: Callable[[str, bool], object]):
+async def prepare_revision_generator(app, resolved_commit: ResolvedCommit, generator_factory: Callable[[str, bool], object]) -> ProxyResult:
     if not app.state.app_settings.config.offline and resolved_commit.refresh_cache:
-        generator = generator_factory(resolved_commit.requested, True)
-        async for _ in generator:
+        refresh_result = await generator_factory(resolved_commit.requested, True)
+        async for _ in refresh_result.body:
             pass
-        return generator_factory(resolved_commit.resolved, True)
-    return generator_factory(resolved_commit.resolved, False)
+        return await generator_factory(resolved_commit.resolved, True)
+    return await generator_factory(resolved_commit.resolved, False)

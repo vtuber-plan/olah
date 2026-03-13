@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from olah.proxy import pathsinfo
+from olah.proxy.result import single_chunk_body
 
 
 def _make_app(tmp_path):
@@ -84,7 +85,7 @@ async def test_pathsinfo_generator_prefers_cache_and_aggregates_valid_list_paylo
     monkeypatch.setattr(pathsinfo, "_pathsinfo_cache", fake_pathsinfo_cache)
     monkeypatch.setattr(pathsinfo, "_pathsinfo_proxy", fake_pathsinfo_proxy)
 
-    gen = pathsinfo.pathsinfo_generator(
+    result = await pathsinfo.pathsinfo_generator(
         app=app,
         repo_type="models",
         org="team",
@@ -95,12 +96,11 @@ async def test_pathsinfo_generator_prefers_cache_and_aggregates_valid_list_paylo
         method="post",
         authorization="Bearer t",
     )
-    status = await gen.__anext__()
-    headers = await gen.__anext__()
-    content = json.loads(await gen.__anext__())
+    body = [chunk async for chunk in result.body]
+    content = json.loads(body[0])
 
-    assert status == 200
-    assert headers == {"content-type": "application/json"}
+    assert result.status_code == 200
+    assert result.headers == {"content-type": "application/json"}
     assert content == [{"path": "a.txt", "size": 1}, {"path": "b.txt", "size": 2}]
 
 
@@ -126,7 +126,7 @@ async def test_pathsinfo_generator_skips_invalid_json_and_non_200_responses(monk
     monkeypatch.setattr(pathsinfo, "check_cache_rules_hf", fake_check_cache_rules_hf)
     monkeypatch.setattr(pathsinfo, "_pathsinfo_proxy", fake_pathsinfo_proxy)
 
-    gen = pathsinfo.pathsinfo_generator(
+    result = await pathsinfo.pathsinfo_generator(
         app=app,
         repo_type="models",
         org="team",
@@ -137,6 +137,5 @@ async def test_pathsinfo_generator_skips_invalid_json_and_non_200_responses(monk
         method="post",
         authorization=None,
     )
-    await gen.__anext__()
-    await gen.__anext__()
-    assert json.loads(await gen.__anext__()) == [{"path": "ok.txt", "size": 3}]
+    body = [chunk async for chunk in result.body]
+    assert json.loads(body[0]) == [{"path": "ok.txt", "size": 3}]

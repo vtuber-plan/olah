@@ -6,7 +6,7 @@
 # https://opensource.org/licenses/MIT.
 
 import os
-from typing import Dict, Literal, Mapping, Optional
+from typing import AsyncIterator, Dict, Literal, Mapping, Optional
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 
@@ -17,13 +17,16 @@ from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
+from olah.proxy.result import ProxyResult, single_chunk_body
 
 
-async def _commits_cache_generator(save_path: str):
+async def _commits_cache_generator(save_path: str) -> ProxyResult:
     cache_rq = await read_cache_request(save_path)
-    yield cache_rq["status_code"]
-    yield cache_rq["headers"]
-    yield cache_rq["content"]
+    return ProxyResult(
+        status_code=cache_rq["status_code"],
+        headers=cache_rq["headers"],
+        body=single_chunk_body(cache_rq["content"]),
+    )
 
 
 async def _commits_proxy_generator(
@@ -34,26 +37,28 @@ async def _commits_proxy_generator(
     params: Mapping[str, str],
     allow_cache: bool,
     save_path: str,
-):
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        content_chunks = []
-        async with client.stream(
-            method=method,
-            url=commits_url,
-            params=params,
-            headers=headers,
-            timeout=WORKER_API_TIMEOUT,
-        ) as response:
-            response_status_code = response.status_code
-            response_headers = response.headers
-            yield response_status_code
-            yield response_headers
+) -> ProxyResult:
+    response_status_code = 500
+    response_headers: Dict[str, str] = {}
 
-            async for raw_chunk in response.aiter_raw():
-                if not raw_chunk:
-                    continue
-                content_chunks.append(raw_chunk)
-                yield raw_chunk
+    async def body_iter() -> AsyncIterator[bytes]:
+        nonlocal response_status_code, response_headers
+        content_chunks = []
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with client.stream(
+                method=method,
+                url=commits_url,
+                params=params,
+                headers=headers,
+                timeout=WORKER_API_TIMEOUT,
+            ) as response:
+                response_status_code = response.status_code
+                response_headers = dict(response.headers)
+                async for raw_chunk in response.aiter_raw():
+                    if not raw_chunk:
+                        continue
+                    content_chunks.append(raw_chunk)
+                    yield raw_chunk
 
         content = bytearray()
         for chunk in content_chunks:
@@ -64,6 +69,22 @@ async def _commits_proxy_generator(
             await write_cache_request(
                 save_path, response_status_code, response_headers, bytes(content)
             )
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with client.stream(
+            method=method,
+            url=commits_url,
+            params=params,
+            headers=headers,
+            timeout=WORKER_API_TIMEOUT,
+        ) as response:
+            response_status_code = response.status_code
+            response_headers = dict(response.headers)
+    return ProxyResult(
+        status_code=response_status_code,
+        headers=response_headers,
+        body=body_iter(),
+    )
 
 
 async def commits_generator(
@@ -98,10 +119,7 @@ async def commits_generator(
     )
     # proxy
     if use_cache and not override_cache:
-        async for item in _commits_cache_generator(save_path):
-            yield item
-    else:
-        async for item in _commits_proxy_generator(
-            app, headers, commits_url, method, {}, allow_cache, save_path
-        ):
-            yield item
+        return await _commits_cache_generator(save_path)
+    return await _commits_proxy_generator(
+        app, headers, commits_url, method, {}, allow_cache, save_path
+    )

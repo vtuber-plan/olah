@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import brotli
 import pytest
 from fastapi import Request
+from olah.proxy.result import ProxyResult, single_chunk_body
 
 
 def _load_proxy_files_module():
@@ -93,13 +94,15 @@ def test_get_contiguous_ranges_splits_cached_and_remote_segments():
 @pytest.mark.asyncio
 async def test_file_realtime_stream_returns_invalid_data_error_on_bad_pathsinfo(monkeypatch, tmp_path):
     async def fake_pathsinfo_generator(*args, **kwargs):
-        yield 200
-        yield {"content-type": "application/json"}
-        yield "not-json"
+        return ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body("not-json"),
+        )
 
     monkeypatch.setattr(proxy_files, "pathsinfo_generator", fake_pathsinfo_generator)
 
-    gen = proxy_files._file_realtime_stream(
+    result = await proxy_files._file_realtime_stream(
         app=_make_app(tmp_path),
         repo_type="models",
         org="team",
@@ -113,24 +116,26 @@ async def test_file_realtime_stream_returns_invalid_data_error_on_bad_pathsinfo(
         allow_cache=True,
         commit="main",
     )
-    status, headers, body = [await gen.__anext__(), await gen.__anext__(), await gen.__anext__()]
+    body = [chunk async for chunk in result.body]
 
-    assert status == 504
-    assert headers["x-error-code"] == "ProxyInvalidData"
-    assert body == b""
+    assert result.status_code == 504
+    assert result.headers["x-error-code"] == "ProxyInvalidData"
+    assert body == [b""]
 
 
 @pytest.mark.asyncio
 async def test_file_realtime_stream_handles_empty_and_ambiguous_pathsinfo(monkeypatch, tmp_path):
     async def empty_pathsinfo(*args, **kwargs):
-        yield 200
-        yield {"content-type": "application/json"}
-        yield "[]"
+        return ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body("[]"),
+        )
 
     monkeypatch.setattr(proxy_files, "pathsinfo_generator", empty_pathsinfo)
 
     async def collect_response():
-        gen = proxy_files._file_realtime_stream(
+        result = await proxy_files._file_realtime_stream(
             app=_make_app(tmp_path),
             repo_type="models",
             org="team",
@@ -144,16 +149,19 @@ async def test_file_realtime_stream_handles_empty_and_ambiguous_pathsinfo(monkey
             allow_cache=True,
             commit="main",
         )
-        return [await gen.__anext__(), await gen.__anext__(), await gen.__anext__()]
+        body = [chunk async for chunk in result.body]
+        return result.status_code, result.headers, body
 
     status, headers, _ = await collect_response()
     assert status == 404
     assert headers["x-error-code"] == "EntryNotFound"
 
     async def multiple_pathsinfo(*args, **kwargs):
-        yield 200
-        yield {"content-type": "application/json"}
-        yield json.dumps([{"size": 1}, {"size": 2}])
+        return ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body(json.dumps([{"size": 1}, {"size": 2}])),
+        )
 
     monkeypatch.setattr(proxy_files, "pathsinfo_generator", multiple_pathsinfo)
 
@@ -167,9 +175,11 @@ async def test_file_realtime_stream_builds_headers_and_streams_get_chunks(monkey
     captured = {}
 
     async def fake_pathsinfo_generator(*args, **kwargs):
-        yield 200
-        yield {"content-type": "application/json"}
-        yield json.dumps([{"size": 10}])
+        return ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body(json.dumps([{"size": 10}])),
+        )
 
     async def fake_resource_etag(hf_url, authorization=None, offline=False):
         captured["hf_url"] = hf_url
@@ -186,7 +196,7 @@ async def test_file_realtime_stream_builds_headers_and_streams_get_chunks(monkey
     monkeypatch.setattr(proxy_files, "_resource_etag", fake_resource_etag)
     monkeypatch.setattr(proxy_files, "_file_chunk_get", fake_file_chunk_get)
 
-    gen = proxy_files._file_realtime_stream(
+    result = await proxy_files._file_realtime_stream(
         app=_make_app(tmp_path),
         repo_type="models",
         org="team",
@@ -200,15 +210,13 @@ async def test_file_realtime_stream_builds_headers_and_streams_get_chunks(monkey
         allow_cache=False,
         commit="abc123",
     )
-    status = await gen.__anext__()
-    headers = await gen.__anext__()
-    body = [chunk async for chunk in gen]
+    body = [chunk async for chunk in result.body]
 
-    assert status == 200
-    assert headers["content-length"] == "4"
-    assert headers["content-range"] == "bytes 2-5/10"
-    assert headers["etag"] == '"etag-123"'
-    assert headers["x-repo-commit"] == "abc123"
+    assert result.status_code == 200
+    assert result.headers["content-length"] == "4"
+    assert result.headers["content-range"] == "bytes 2-5/10"
+    assert result.headers["etag"] == '"etag-123"'
+    assert result.headers["x-repo-commit"] == "abc123"
     assert body == [b"abc", b"def"]
     assert captured["hf_url"] == "https://cdn-lfs.huggingface.co/file.bin?download=1"
     assert captured["authorization"] == "Bearer t"
@@ -219,9 +227,11 @@ async def test_file_realtime_stream_builds_headers_and_streams_get_chunks(monkey
 @pytest.mark.asyncio
 async def test_file_realtime_stream_uses_head_stream_for_head_requests(monkeypatch, tmp_path):
     async def fake_pathsinfo_generator(*args, **kwargs):
-        yield 200
-        yield {"content-type": "application/json"}
-        yield json.dumps([{"size": 3}])
+        return ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body(json.dumps([{"size": 3}])),
+        )
 
     async def fake_resource_etag(*args, **kwargs):
         return '"etag-head"'
@@ -233,7 +243,7 @@ async def test_file_realtime_stream_uses_head_stream_for_head_requests(monkeypat
     monkeypatch.setattr(proxy_files, "_resource_etag", fake_resource_etag)
     monkeypatch.setattr(proxy_files, "_file_chunk_head", fake_file_chunk_head)
 
-    gen = proxy_files._file_realtime_stream(
+    result = await proxy_files._file_realtime_stream(
         app=_make_app(tmp_path),
         repo_type="models",
         org="team",
@@ -247,14 +257,12 @@ async def test_file_realtime_stream_uses_head_stream_for_head_requests(monkeypat
         allow_cache=True,
         commit="main",
     )
-    status = await gen.__anext__()
-    headers = await gen.__anext__()
-    body = [chunk async for chunk in gen]
+    body = [chunk async for chunk in result.body]
 
-    assert status == 200
-    assert headers["content-length"] == "3"
-    assert headers["content-range"] == "bytes 0-2/3"
-    assert headers["etag"] == '"etag-head"'
+    assert result.status_code == 200
+    assert result.headers["content-length"] == "3"
+    assert result.headers["content-range"] == "bytes 0-2/3"
+    assert result.headers["etag"] == '"etag-head"'
     assert body == [b"ignored-head-body"]
 
 
@@ -281,7 +289,7 @@ async def test_file_realtime_stream_without_repo_context_uses_remote_metadata(mo
     monkeypatch.setattr(proxy_files, "_remote_file_metadata", fake_remote_file_metadata)
     monkeypatch.setattr(proxy_files, "_file_chunk_get", fake_file_chunk_get)
 
-    gen = proxy_files._file_realtime_stream(
+    result = await proxy_files._file_realtime_stream(
         app=_make_app(tmp_path),
         save_path=str(tmp_path / "save"),
         head_path=str(tmp_path / "head"),
@@ -290,13 +298,11 @@ async def test_file_realtime_stream_without_repo_context_uses_remote_metadata(mo
         method="GET",
         allow_cache=False,
     )
-    status = await gen.__anext__()
-    headers = await gen.__anext__()
-    body = [chunk async for chunk in gen]
+    body = [chunk async for chunk in result.body]
 
-    assert status == 200
-    assert headers["content-length"] == "6"
-    assert headers["etag"] == '"cdn-etag"'
+    assert result.status_code == 200
+    assert result.headers["content-length"] == "6"
+    assert result.headers["etag"] == '"cdn-etag"'
     assert body == [b"hello!"]
     assert captured["metadata"]["hf_url"] == "https://cdn-lfs.huggingface.co/team/demo/hash.bin"
     assert captured["chunk_get"]["headers"]["host"] == "cdn-lfs.huggingface.co"
@@ -308,9 +314,11 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
 
     async def fake_file_realtime_stream(**kwargs):
         captured.append(kwargs)
-        yield 200
-        yield {"etag": '"ok"'}
-        yield b""
+        return ProxyResult(
+            status_code=200,
+            headers={"etag": '"ok"'},
+            body=single_chunk_body(b""),
+        )
 
     monkeypatch.setattr(proxy_files, "_file_realtime_stream", fake_file_realtime_stream)
 
@@ -322,7 +330,7 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
     request = _make_request("GET", headers={"host": "mirror.example"}, url_path="/team/demo/hash.bin")
     app = _make_app(tmp_path)
 
-    cdn_gen = await proxy_files.cdn_file_get_generator(
+    cdn_result = await proxy_files.cdn_file_get_generator(
         app=app,
         repo_type="models",
         org="team",
@@ -331,12 +339,12 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
         method="GET",
         request=request,
     )
-    assert await cdn_gen.__anext__() == 200
+    assert cdn_result.status_code == 200
 
     from olah.proxy import lfs as proxy_lfs
 
     monkeypatch.setattr(proxy_lfs, "_file_realtime_stream", fake_file_realtime_stream)
-    lfs_gen = await proxy_lfs.lfs_get_generator(
+    lfs_result = await proxy_lfs.lfs_get_generator(
         app=app,
         dir1="aa",
         dir2="bb",
@@ -344,7 +352,7 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
         hash_file="filehash",
         request=request,
     )
-    assert await lfs_gen.__anext__() == 200
+    assert lfs_result.status_code == 200
 
     assert captured[0]["url"] == "http://mirror.example/team/demo/hash.bin"
     assert captured[0].get("repo_type") is None

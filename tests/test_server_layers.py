@@ -50,6 +50,7 @@ if "fastapi_utils.tasks" not in sys.modules:
     sys.modules["fastapi_utils.tasks"] = fastapi_utils_tasks
 
 from olah import server_access, server_mirror, server_responses, server_upstream
+from olah.proxy.result import ProxyResult, single_chunk_body
 
 
 def _make_app(*, offline=False, mirrors_path=None):
@@ -148,9 +149,11 @@ async def test_prepare_revision_generator_refreshes_alias_before_resolved_commit
 
     async def generator_factory(commit, override_cache):
         calls.append((commit, override_cache))
-        yield 200
-        yield {"x-commit": commit}
-        yield commit.encode("utf-8")
+        return ProxyResult(
+            status_code=200,
+            headers={"x-commit": commit},
+            body=single_chunk_body(commit.encode("utf-8")),
+        )
 
     generator = await server_upstream.prepare_revision_generator(
         app,
@@ -158,27 +161,30 @@ async def test_prepare_revision_generator_refreshes_alias_before_resolved_commit
         generator_factory,
     )
 
-    assert await generator.__anext__() == 200
+    assert generator.status_code == 200
     assert calls == [("main", True), ("abc123", True)]
-    assert await generator.__anext__() == {"x-commit": "abc123"}
+    assert generator.headers == {"x-commit": "abc123"}
 
 
 @pytest.mark.asyncio
 async def test_build_streaming_response_supports_generators_with_and_without_status():
-    async def generator_with_status():
-        yield 206
-        yield {"content-range": "bytes 0-1/2"}
-        yield b"ab"
-
-    response = await server_responses.build_streaming_response(generator_with_status(), include_status_code=True)
+    response = await server_responses.build_streaming_response(
+        ProxyResult(
+            status_code=206,
+            headers={"content-range": "bytes 0-1/2"},
+            body=single_chunk_body(b"ab"),
+        )
+    )
     assert response.status_code == 206
     assert response.headers["content-range"] == "bytes 0-1/2"
 
-    async def generator_without_status():
-        yield {"content-type": "application/json"}
-        yield b"{}"
-
-    response = await server_responses.build_streaming_response(generator_without_status(), include_status_code=False)
+    response = await server_responses.build_streaming_response(
+        ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body(b"{}"),
+        )
+    )
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
 

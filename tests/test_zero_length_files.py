@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from fastapi import Request
 
 from olah.proxy import files as proxy_files
+from olah.proxy.result import ProxyResult, single_chunk_body
 
 
 def _make_request(method: str = "HEAD", headers=None) -> Request:
@@ -40,9 +41,11 @@ def _make_app(tmp_path):
 
 def test_file_realtime_stream_handles_zero_length_head(monkeypatch, tmp_path):
     async def fake_pathsinfo_generator(*args, **kwargs):
-        yield 200
-        yield {"content-type": "application/json"}
-        yield json.dumps([{"size": 0}])
+        return ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body(json.dumps([{"size": 0}])),
+        )
 
     async def fake_resource_etag(*args, **kwargs):
         return '"empty-etag"'
@@ -56,7 +59,7 @@ def test_file_realtime_stream_handles_zero_length_head(monkeypatch, tmp_path):
     monkeypatch.setattr(proxy_files, "_file_chunk_head", fake_file_chunk_head)
 
     async def run():
-        generator = proxy_files._file_realtime_stream(
+        result = await proxy_files._file_realtime_stream(
             app=_make_app(tmp_path),
             repo_type="models",
             org="nvidia",
@@ -70,10 +73,8 @@ def test_file_realtime_stream_handles_zero_length_head(monkeypatch, tmp_path):
             allow_cache=True,
             commit="main",
         )
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        body = [chunk async for chunk in generator]
-        return status_code, headers, body
+        body = [chunk async for chunk in result.body]
+        return result.status_code, result.headers, body
 
     status_code, headers, body = asyncio.run(run())
 

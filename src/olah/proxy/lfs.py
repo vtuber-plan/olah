@@ -31,7 +31,7 @@ async def lfs_head_generator(
     allow_cache = True
 
     # proxy
-    return _file_realtime_stream(
+    return await _file_realtime_stream(
         app=app,
         save_path=save_path,
         head_path=head_path,
@@ -61,7 +61,7 @@ async def lfs_get_generator(
     allow_cache = True
 
     # proxy
-    return _file_realtime_stream(
+    return await _file_realtime_stream(
         app=app,
         save_path=save_path,
         head_path=head_path,

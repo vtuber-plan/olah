@@ -7,9 +7,9 @@
 
 import json
 import os
-from typing import AsyncGenerator, Dict, List, Literal, Optional, Tuple, Union
-from urllib.parse import quote, urljoin
-from fastapi import FastAPI, Request
+from typing import Dict, List, Literal, Optional, Tuple
+from urllib.parse import urljoin
+from fastapi import FastAPI
 
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
@@ -18,6 +18,7 @@ from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
+from olah.proxy.result import ProxyResult, single_chunk_body
 
 
 async def _pathsinfo_cache(save_path: str) -> Tuple[int, Dict[str, str], bytes]:
@@ -67,7 +68,7 @@ async def pathsinfo_generator(
     override_cache: bool,
     method: str,
     authorization: Optional[str],
-) -> AsyncGenerator[Union[int, Dict[str, str], bytes], None]:
+) -> ProxyResult:
     headers = {}
     if authorization is not None:
         headers["authorization"] = authorization
@@ -107,6 +108,8 @@ async def pathsinfo_generator(
         if status == 200 and isinstance(content_json, list):
             final_content.extend(content_json)
 
-    yield 200
-    yield {'content-type': 'application/json'}
-    yield json.dumps(final_content, ensure_ascii=True)
+    return ProxyResult(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        body=single_chunk_body(json.dumps(final_content, ensure_ascii=True)),
+    )

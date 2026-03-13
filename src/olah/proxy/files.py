@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import AsyncIterator, Dict, List, Literal, Optional, Tuple
 from fastapi import Request
 import httpx
 from urllib.parse import urlparse, urljoin
@@ -42,6 +42,7 @@ from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 from olah.utils.zip_utils import Decompressor, decompress_data
+from olah.proxy.result import ProxyResult, single_chunk_body
 
 
 @dataclass(frozen=True)
@@ -379,7 +380,14 @@ async def _file_realtime_stream(
     method="GET",
     allow_cache=True,
     commit: Optional[str] = None,
-):
+) -> ProxyResult:
+    async def error_result(response) -> ProxyResult:
+        return ProxyResult(
+            status_code=response.status_code,
+            headers=response.headers,
+            body=single_chunk_body(response.body),
+        )
+
     if check_url_has_param_name(url, ORIGINAL_LOC):
         clean_url = remove_query_param(url, ORIGINAL_LOC)
         original_loc = get_url_param_name(url, ORIGINAL_LOC)
@@ -410,7 +418,7 @@ async def _file_realtime_stream(
 
     authorization = request.headers.get("authorization", None)
     if repo_type is not None and org is not None and repo is not None and file_path is not None and commit is not None:
-        generator = pathsinfo_generator(
+        generator = await pathsinfo_generator(
             app,
             repo_type,
             org,
@@ -421,39 +429,24 @@ async def _file_realtime_stream(
             method="post",
             authorization=authorization,
         )
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        content = await generator.__anext__()
+        content = ""
+        async for chunk in generator.body:
+            content = chunk
+            break
         try:
             pathsinfo = json.loads(content)
         except json.JSONDecodeError:
-            response = error_proxy_invalid_data()
-            yield response.status_code
-            yield response.headers
-            yield response.body
-            return
+            return await error_result(error_proxy_invalid_data())
 
         if len(pathsinfo) == 0:
-            response = error_entry_not_found()
-            yield response.status_code
-            yield response.headers
-            yield response.body
-            return
+            return await error_result(error_entry_not_found())
 
         if len(pathsinfo) != 1:
-            response = error_proxy_timeout()
-            yield response.status_code
-            yield response.headers
-            yield response.body
-            return
+            return await error_result(error_proxy_timeout())
 
         pathinfo = pathsinfo[0]
         if "size" not in pathinfo:
-            response = error_proxy_timeout()
-            yield response.status_code
-            yield response.headers
-            yield response.body
-            return
+            return await error_result(error_proxy_timeout())
         file_size = pathinfo["size"]
         etag = await _resource_etag(
             hf_url=hf_url,
@@ -468,11 +461,7 @@ async def _file_realtime_stream(
             offline=app.state.app_settings.config.offline,
         )
         if metadata is None:
-            error_response = error_proxy_timeout()
-            yield error_response.status_code
-            yield error_response.headers
-            yield error_response.body
-            return
+            return await error_result(error_proxy_timeout())
         file_size = metadata.file_size
         etag = metadata.etag
 
@@ -491,44 +480,40 @@ async def _file_realtime_stream(
     response_headers["etag"] = etag
     
     if etag is None:
-        error_response = error_proxy_timeout()
-        yield error_response.status_code
-        yield error_response.headers
-        yield error_response.body
-        return
-    else:
-        yield 200
-        yield response_headers
+        return await error_result(error_proxy_timeout())
 
-    async with httpx.AsyncClient() as client:
-        if method.lower() == "get":
-            async for each_chunk in _file_chunk_get(
-                app=app,
-                save_path=save_path,
-                head_path=head_path,
-                client=client,
-                method=method,
-                url=hf_url,
-                headers=request_headers,
-                allow_cache=allow_cache,
-                file_size=file_size,
-            ):
-                yield each_chunk
-        elif method.lower() == "head":
-            async for each_chunk in _file_chunk_head(
-                app=app,
-                save_path=save_path,
-                head_path=head_path,
-                client=client,
-                method=method,
-                url=hf_url,
-                headers=request_headers,
-                allow_cache=allow_cache,
-                file_size=0,
-            ):
-                yield each_chunk
-        else:
-            raise Exception(f"Unsupported method: {method}")
+    async def body_iter() -> AsyncIterator[bytes]:
+        async with httpx.AsyncClient() as client:
+            if method.lower() == "get":
+                async for each_chunk in _file_chunk_get(
+                    app=app,
+                    save_path=save_path,
+                    head_path=head_path,
+                    client=client,
+                    method=method,
+                    url=hf_url,
+                    headers=request_headers,
+                    allow_cache=allow_cache,
+                    file_size=file_size,
+                ):
+                    yield each_chunk
+            elif method.lower() == "head":
+                async for each_chunk in _file_chunk_head(
+                    app=app,
+                    save_path=save_path,
+                    head_path=head_path,
+                    client=client,
+                    method=method,
+                    url=hf_url,
+                    headers=request_headers,
+                    allow_cache=allow_cache,
+                    file_size=0,
+                ):
+                    yield each_chunk
+            else:
+                raise Exception(f"Unsupported method: {method}")
+
+    return ProxyResult(status_code=200, headers=response_headers, body=body_iter())
 
 
 async def file_get_generator(
@@ -567,7 +552,7 @@ async def file_get_generator(
             app.state.app_settings.config.hf_url_base(),
             f"/{repo_type}/{org_repo}/resolve/{commit}/{file_path}",
         )
-    return _file_realtime_stream(
+    return await _file_realtime_stream(
         app=app,
         repo_type=repo_type,
         org=org,
@@ -617,7 +602,7 @@ async def cdn_file_get_generator(
     # else:
     #     redirected_url = urljoin(app.state.app_settings.config.mirror_url_base(), get_url_tail(request_url))
 
-    return _file_realtime_stream(
+    return await _file_realtime_stream(
         app=app,
         save_path=save_path,
         head_path=head_path,
