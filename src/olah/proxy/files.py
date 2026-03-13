@@ -84,6 +84,19 @@ def get_contiguous_ranges(
     return ranges_and_cache_list
 
 
+def get_request_ranges(
+    file_size: int, range_header: Optional[str]
+) -> Tuple[str, List[Tuple[int, int]], Optional[int]]:
+    if range_header is None:
+        if file_size == 0:
+            return "bytes", [], None
+        range_header = f"bytes={0}-{file_size-1}"
+
+    unit, ranges, suffix = parse_range_params(range_header)
+    all_ranges = get_all_ranges(file_size, unit, ranges, suffix)
+    return unit, all_ranges, suffix
+
+
 async def _get_file_range_from_cache(
     cache_file: OlahCache, start_pos: int, end_pos: int
 ):
@@ -184,8 +197,7 @@ async def _file_chunk_get(
     touch_file_access_time(save_path)
     
     try:
-        unit, ranges, suffix = parse_range_params(headers.get("range", f"bytes={0}-{file_size-1}"))
-        all_ranges = get_all_ranges(file_size, unit, ranges, suffix)
+        _, all_ranges, _ = get_request_ranges(file_size, headers.get("range"))
 
         for start_pos, end_pos in all_ranges:
             ranges_and_cache_list = get_contiguous_ranges(cache_file, start_pos, end_pos)
@@ -404,13 +416,12 @@ async def _file_realtime_stream(
 
     response_headers = {}
     # Create content-length
-    unit, ranges, suffix = parse_range_params(request_headers.get("range", f"bytes={0}-{file_size-1}"))
-    all_ranges = get_all_ranges(file_size, unit, ranges, suffix)
+    _, all_ranges, suffix = get_request_ranges(file_size, request_headers.get("range"))
     
     response_headers["content-length"] = str(sum(r[1] - r[0] for r in all_ranges))
     if suffix is not None:
         response_headers["content-range"] = f"bytes -{suffix}/{file_size}"
-    else:
+    elif len(all_ranges) != 0:
         response_headers["content-range"] = f"bytes {','.join(f'{r[0]}-{r[1]-1}' for r in all_ranges)}/{file_size}"
     # Commit info
     if commit is not None:
