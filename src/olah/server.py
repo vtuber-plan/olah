@@ -55,17 +55,15 @@ if not BASE_SETTINGS:
 
 from olah.configs import OlahConfig
 from olah.errors import error_repo_not_found, error_page_not_found, error_revision_not_found
-from olah.mirror.repos import LocalMirrorRepo
 from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
 from olah.proxy.meta import meta_generator
+from olah.server_access import build_repo_ref, ensure_repo_access, parse_repo_ref, parse_resolve_repo_ref
+from olah.server_mirror import load_local_mirror_payload
+from olah.server_responses import build_streaming_response
+from olah.server_upstream import get_latest_commit, prepare_revision_generator, resolve_requested_commit
 from olah.utils.rule_utils import check_proxy_rules_hf, get_org_repo
-from olah.utils.repo_utils import (
-    check_commit_hf,
-    get_commit_hf,
-    get_newest_commit_hf,
-    parse_org_repo,
-)
+from olah.utils.repo_utils import parse_org_repo
 from olah.constants import OLAH_CODE_DIR, REPO_TYPES_MAPPING
 from olah.utils.logging import build_logger
 
@@ -194,79 +192,46 @@ async def custom_404_handler(_, __):
 # See also: https://huggingface.co/docs/hub/api#repo-listing-api
 # ======================
 async def meta_proxy_common(repo_type: Literal["models", "datasets", "spaces"], org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
-    # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
-    if repo_type not in REPO_TYPES_MAPPING.keys():
-        return error_page_not_found()
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return error_repo_not_found()
-    # Check Mirror Path
-    for mirror_path in app.state.app_settings.config.mirrors_path:
-        git_path = os.path.join(mirror_path, repo_type, org, repo)
-        try:
-            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
-            if os.path.exists(git_path):
-                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
-                meta_data = local_repo.get_meta(commit)
-                if meta_data is None:
-                    continue
-                return JSONResponse(content=meta_data)
-        except git.exc.InvalidGitRepositoryError:
-            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
-            continue
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    access_error = await ensure_repo_access(app, repo_ref)
+    if access_error is not None:
+        return access_error
 
-    # Proxy the HF File Meta
+    meta_data = load_local_mirror_payload(
+        app,
+        repo_ref,
+        lambda local_repo: local_repo.get_meta(commit),
+        logger,
+    )
+    if meta_data is not None:
+        return JSONResponse(content=meta_data)
+
     try:
-        if not app.state.app_settings.config.offline:
-            if not await check_commit_hf(app, repo_type, org, repo, commit=None,
-                authorization=authorization,
-            ):
-                return error_repo_not_found()
-            if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
-                authorization=authorization,
-            ):
-                return error_revision_not_found(revision=commit)
-        commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
-            authorization=authorization,
+        resolved_commit, commit_error = await resolve_requested_commit(
+            app,
+            repo_ref,
+            commit,
+            authorization,
+            missing_commit_response="revision_not_found",
         )
-        if commit_sha is None:
-            return error_repo_not_found()
-        # if branch name and online mode, refresh branch info
-        if not app.state.app_settings.config.offline and commit_sha != commit:
-            generator = meta_generator(
+        if commit_error is not None:
+            return commit_error
+
+        generator = await prepare_revision_generator(
+            app,
+            resolved_commit,
+            lambda target_commit, override_cache: meta_generator(
                 app=app,
                 repo_type=repo_type,
                 org=org,
                 repo=repo,
-                commit=commit,
-                override_cache=True,
+                commit=target_commit,
+                override_cache=override_cache,
                 method=method,
                 authorization=authorization,
-            )
-            async for _ in generator:
-                pass
-            generator = meta_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=commit_sha,
-                override_cache=True,
-                method=method,
-                authorization=authorization,
-            )
-        else:
-            generator = meta_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=commit_sha,
-                override_cache=False,
-                method=method,
-                authorization=authorization,
-            )
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, headers=headers)
+            ),
+        )
+        return await build_streaming_response(generator, include_status_code=False)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -275,25 +240,16 @@ async def meta_proxy_common(repo_type: Literal["models", "datasets", "spaces"], 
 @app.head("/api/{repo_type}/{org_repo}")
 @app.get("/api/{repo_type}/{org_repo}")
 async def meta_proxy(repo_type: str, org_repo: str, request: Request):
-    org, repo = parse_org_repo(org_repo)
-    if org is None and repo is None:
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
         return error_repo_not_found()
-    if not app.state.app_settings.config.offline:
-        new_commit = await get_newest_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            authorization=request.headers.get("authorization", None),
-        )
-        if new_commit is None:
-            return error_repo_not_found()
-    else:
-        new_commit = "main"
+    new_commit = await get_latest_commit(app, repo_ref, request.headers.get("authorization", None))
+    if new_commit is None:
+        return error_repo_not_found()
     return await meta_proxy_common(
         repo_type=repo_type,
-        org=org,
-        repo=repo,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         commit=new_commit,
         method=request.method.lower(),
         authorization=request.headers.get("authorization", None),
@@ -303,18 +259,10 @@ async def meta_proxy(repo_type: str, org_repo: str, request: Request):
 @app.head("/api/{repo_type}/{org}/{repo}")
 @app.get("/api/{repo_type}/{org}/{repo}")
 async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
-    if not app.state.app_settings.config.offline:
-        new_commit = await get_newest_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            authorization=request.headers.get("authorization", None),
-        )
-        if new_commit is None:
-            return error_repo_not_found()
-    else:
-        new_commit = "main"
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    new_commit = await get_latest_commit(app, repo_ref, request.headers.get("authorization", None))
+    if new_commit is None:
+        return error_repo_not_found()
     return await meta_proxy_common(
         repo_type=repo_type,
         org=org,
@@ -345,14 +293,14 @@ async def meta_proxy_commit2(
 async def meta_proxy_commit(
     repo_type: str, org_repo: str, commit: str, request: Request
 ):
-    org, repo = parse_org_repo(org_repo)
-    if org is None and repo is None:
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
         return error_repo_not_found()
 
     return await meta_proxy_common(
         repo_type=repo_type,
-        org=org,
-        repo=repo,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         commit=commit,
         method=request.method.lower(),
         authorization=request.headers.get("authorization", None),
@@ -371,91 +319,50 @@ async def tree_proxy_common(
     method: str,
     authorization: Optional[str]
 ) -> Response:
-    # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     path = clean_path(path)
-    if repo_type not in REPO_TYPES_MAPPING.keys():
-        return error_page_not_found()
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return error_repo_not_found()
-    # Check Mirror Path
-    for mirror_path in app.state.app_settings.config.mirrors_path:
-        git_path = os.path.join(mirror_path, repo_type, org, repo)
-        try:
-            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
-            if os.path.exists(git_path):
-                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
-                tree_data = local_repo.get_tree(commit, path, recursive=recursive, expand=expand)
-                if tree_data is None:
-                    continue
-                return JSONResponse(content=tree_data)
-        except git.exc.InvalidGitRepositoryError:
-            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
-            continue
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    access_error = await ensure_repo_access(app, repo_ref)
+    if access_error is not None:
+        return access_error
 
-    # Proxy the HF File Meta
+    tree_data = load_local_mirror_payload(
+        app,
+        repo_ref,
+        lambda local_repo: local_repo.get_tree(commit, path, recursive=recursive, expand=expand),
+        logger,
+    )
+    if tree_data is not None:
+        return JSONResponse(content=tree_data)
+
     try:
-        if not app.state.app_settings.config.offline:
-            if not await check_commit_hf(app, repo_type, org, repo, commit=None,
-                authorization=authorization,
-            ):
-                return error_repo_not_found()
-            if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
-                authorization=authorization,
-            ):
-                return error_revision_not_found(revision=commit)
-        commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
-            authorization=authorization,
+        resolved_commit, commit_error = await resolve_requested_commit(
+            app,
+            repo_ref,
+            commit,
+            authorization,
+            missing_commit_response="revision_not_found",
         )
-        if commit_sha is None:
-            return error_repo_not_found()
-        # if branch name and online mode, refresh branch info
-        if not app.state.app_settings.config.offline and commit_sha != commit:
-            generator = tree_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=commit,
-                path=path,
-                recursive=recursive,
-                expand=expand,
-                override_cache=True,
-                method=method,
-                authorization=authorization,
-            )
-            async for _ in generator:
-                pass
-            generator = tree_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=commit_sha,
-                path=path,
-                recursive=recursive,
-                expand=expand,
-                override_cache=True,
-                method=method,
-                authorization=authorization,
-            )
-        else:
-            generator = tree_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=commit_sha,
-                path=path,
-                recursive=recursive,
-                expand=expand,
-                override_cache=False,
-                method=method,
-                authorization=authorization,
-            )
+        if commit_error is not None:
+            return commit_error
 
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, status_code=status_code, headers=headers)
+        generator = await prepare_revision_generator(
+            app,
+            resolved_commit,
+            lambda target_commit, override_cache: tree_generator(
+                app=app,
+                repo_type=repo_type,
+                org=org,
+                repo=repo,
+                commit=target_commit,
+                path=path,
+                recursive=recursive,
+                expand=expand,
+                override_cache=override_cache,
+                method=method,
+                authorization=authorization,
+            ),
+        )
+        return await build_streaming_response(generator, include_status_code=True)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -497,14 +404,14 @@ async def tree_proxy_commit(
     recursive: bool = False,
     expand: bool=False,
 ):
-    org, repo = parse_org_repo(org_repo)
-    if org is None and repo is None:
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
         return error_repo_not_found()
 
     return await tree_proxy_common(
         repo_type=repo_type,
-        org=org,
-        repo=repo,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         commit=commit,
         path=file_path,
         recursive=recursive,
@@ -515,84 +422,48 @@ async def tree_proxy_commit(
 
 # Git Pathsinfo
 async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: str, paths: List[str], method: str, authorization: Optional[str]) -> Response:
-    # TODO: the head method of meta apis
-    # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
     paths = [clean_path(path) for path in paths]
-    if repo_type not in REPO_TYPES_MAPPING.keys():
-        return error_page_not_found()
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return error_repo_not_found()
-    # Check Mirror Path
-    for mirror_path in app.state.app_settings.config.mirrors_path:
-        git_path = os.path.join(mirror_path, repo_type, org, repo)
-        try:
-            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
-            if os.path.exists(git_path):
-                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
-                pathsinfo_data = local_repo.get_pathinfos(commit, paths)
-                if pathsinfo_data is None:
-                    continue
-                return JSONResponse(content=pathsinfo_data)
-        except git.exc.InvalidGitRepositoryError:
-            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
-            continue
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    access_error = await ensure_repo_access(app, repo_ref)
+    if access_error is not None:
+        return access_error
 
-    # Proxy the HF File pathsinfo
+    pathsinfo_data = load_local_mirror_payload(
+        app,
+        repo_ref,
+        lambda local_repo: local_repo.get_pathinfos(commit, paths),
+        logger,
+    )
+    if pathsinfo_data is not None:
+        return JSONResponse(content=pathsinfo_data)
+
     try:
-        if not app.state.app_settings.config.offline:
-            if not await check_commit_hf(app, repo_type, org, repo, commit=None,
-                authorization=authorization,
-            ):
-                return error_repo_not_found()
-            if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
-                authorization=authorization,
-            ):
-                return error_revision_not_found(revision=commit)
-        commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
-            authorization=authorization,
+        resolved_commit, commit_error = await resolve_requested_commit(
+            app,
+            repo_ref,
+            commit,
+            authorization,
+            missing_commit_response="revision_not_found",
         )
-        if commit_sha is None:
-            return error_repo_not_found()
-        if not app.state.app_settings.config.offline and commit_sha != commit:
-            generator = pathsinfo_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=commit,
-                paths=paths,
-                override_cache=True,
-                method=method,
-                authorization=authorization,
-            )
-            async for _ in generator:
-                pass
-            generator = pathsinfo_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=commit_sha,
-                paths=paths,
-                override_cache=True,
-                method=method,
-                authorization=authorization,
-            )
-        else:
-            generator = pathsinfo_generator(
+        if commit_error is not None:
+            return commit_error
+
+        generator = await prepare_revision_generator(
+            app,
+            resolved_commit,
+            lambda target_commit, override_cache: pathsinfo_generator(
                 app,
                 repo_type,
                 org,
                 repo,
-                commit_sha,
+                target_commit,
                 paths,
-                override_cache=False,
+                override_cache=override_cache,
                 method=method,
                 authorization=authorization,
-            )
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, status_code=status_code, headers=headers)
+            ),
+        )
+        return await build_streaming_response(generator, include_status_code=True)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -628,14 +499,14 @@ async def pathsinfo_proxy_commit(
     paths: Annotated[List[str], Form()],
     request: Request,
 ):
-    org, repo = parse_org_repo(org_repo)
-    if org is None and repo is None:
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
         return error_repo_not_found()
 
     return await pathsinfo_proxy_common(
         repo_type=repo_type,
-        org=org,
-        repo=repo,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         commit=commit,
         paths=paths,
         method=request.method.lower(),
@@ -645,79 +516,46 @@ async def pathsinfo_proxy_commit(
 
 # Git Commits
 async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
-    # FIXME: do not show the private repos to other user besides owner, even though the repo was cached
-    if repo_type not in REPO_TYPES_MAPPING.keys():
-        return error_page_not_found()
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return error_repo_not_found()
-    # Check Mirror Path
-    for mirror_path in app.state.app_settings.config.mirrors_path:
-        try:
-            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
-            if os.path.exists(git_path):
-                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
-                commits_data = local_repo.get_commits(commit)
-                if commits_data is None:
-                    continue
-                return JSONResponse(content=commits_data)
-        except git.exc.InvalidGitRepositoryError:
-            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
-            continue
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    access_error = await ensure_repo_access(app, repo_ref)
+    if access_error is not None:
+        return access_error
 
-    # Proxy the HF File Commits
+    commits_data = load_local_mirror_payload(
+        app,
+        repo_ref,
+        lambda local_repo: local_repo.get_commits(commit),
+        logger,
+    )
+    if commits_data is not None:
+        return JSONResponse(content=commits_data)
+
     try:
-        if not app.state.app_settings.config.offline:
-            if not await check_commit_hf(app, repo_type, org, repo, commit=None,
-                authorization=authorization,
-            ):
-                return error_repo_not_found()
-            if not await check_commit_hf(app, repo_type, org, repo, commit=commit,
-                authorization=authorization,
-            ):
-                return error_revision_not_found(revision=commit)
-        commit_sha = await get_commit_hf(app, repo_type, org, repo, commit=commit,
-            authorization=authorization,
+        resolved_commit, commit_error = await resolve_requested_commit(
+            app,
+            repo_ref,
+            commit,
+            authorization,
+            missing_commit_response="revision_not_found",
         )
-        if commit_sha is None:
-            return error_repo_not_found()
-        # if branch name and online mode, refresh branch info
-        if not app.state.app_settings.config.offline and commit_sha != commit:
-            generator = commits_generator(
+        if commit_error is not None:
+            return commit_error
+
+        generator = await prepare_revision_generator(
+            app,
+            resolved_commit,
+            lambda target_commit, override_cache: commits_generator(
                 app=app,
                 repo_type=repo_type,
                 org=org,
                 repo=repo,
-                commit=commit,
-                override_cache=True,
+                commit=target_commit,
+                override_cache=override_cache,
                 method=method,
                 authorization=authorization,
-            )
-            async for _ in generator:
-                pass
-            generator = commits_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=commit_sha,
-                override_cache=True,
-                method=method,
-                authorization=authorization,
-            )
-        else:
-            generator = commits_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=commit_sha,
-                override_cache=False,
-                method=method,
-                authorization=authorization,
-            )
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, status_code=status_code, headers=headers)
+            ),
+        )
+        return await build_streaming_response(generator, include_status_code=True)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -743,14 +581,14 @@ async def commits_proxy_commit2(
 async def commits_proxy_commit(
     repo_type: str, org_repo: str, commit: str, request: Request
 ):
-    org, repo = parse_org_repo(org_repo)
-    if org is None and repo is None:
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
         return error_repo_not_found()
 
     return await commits_proxy_common(
         repo_type=repo_type,
-        org=org,
-        repo=repo,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         commit=commit,
         method=request.method.lower(),
         authorization=request.headers.get("authorization", None),
@@ -793,60 +631,42 @@ async def whoami_v2(request: Request):
 async def file_head_common(
     repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
 ) -> Response:
-    if repo_type not in REPO_TYPES_MAPPING.keys():
-        return error_page_not_found()
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return error_repo_not_found()
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    access_error = await ensure_repo_access(app, repo_ref)
+    if access_error is not None:
+        return access_error
 
-    # Check Mirror Path
-    for mirror_path in app.state.app_settings.config.mirrors_path:
-        git_path = os.path.join(mirror_path, repo_type, org, repo)
-        try:
-            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
-            if os.path.exists(git_path):
-                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
-                head = local_repo.get_file_head(commit_hash=commit, path=file_path)
-                if head is None:
-                    continue
-                return Response(headers=head)
-        except git.exc.InvalidGitRepositoryError:
-            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
-            continue
+    head = load_local_mirror_payload(
+        app,
+        repo_ref,
+        lambda local_repo: local_repo.get_file_head(commit_hash=commit, path=file_path),
+        logger,
+    )
+    if head is not None:
+        return Response(headers=head)
 
     # Proxy the HF File Head
     try:
-        if not app.state.app_settings.config.offline and not await check_commit_hf(
+        resolved_commit, commit_error = await resolve_requested_commit(
             app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
-            authorization=request.headers.get("authorization", None),
-        ):
-            return error_repo_not_found()
-        commit_sha = await get_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
-            authorization=request.headers.get("authorization", None),
+            repo_ref,
+            commit,
+            request.headers.get("authorization", None),
+            missing_commit_response="repo_not_found",
         )
-        if commit_sha is None:
-            return error_repo_not_found()
+        if commit_error is not None:
+            return commit_error
         generator = await file_get_generator(
             app,
             repo_type,
             org,
             repo,
-            commit_sha,
+            resolved_commit.resolved,
             file_path=file_path,
             method="HEAD",
             request=request,
         )
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, headers=headers, status_code=status_code)
+        return await build_streaming_response(generator, include_status_code=True)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -870,19 +690,14 @@ async def file_head3(
 async def file_head2(
     org_or_repo_type: str, repo_name: str, commit: str, file_path: str, request: Request
 ):
-    if org_or_repo_type in REPO_TYPES_MAPPING.keys():
-        repo_type: str = org_or_repo_type
-        org, repo = parse_org_repo(repo_name)
-        if org is None and repo is None:
-            return error_repo_not_found()
-    else:
-        repo_type: str = "models"
-        org, repo = org_or_repo_type, repo_name
+    repo_ref = parse_resolve_repo_ref(org_or_repo_type, repo_name)
+    if repo_ref is None:
+        return error_repo_not_found()
 
     return await file_head_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
+        repo_type=repo_ref.repo_type,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         commit=commit,
         file_path=file_path,
         request=request,
@@ -891,37 +706,61 @@ async def file_head2(
 
 @app.head("/{org_repo}/resolve/{commit}/{file_path:path}")
 async def file_head(org_repo: str, commit: str, file_path: str, request: Request):
-    repo_type: str = "models"
-    org, repo = parse_org_repo(org_repo)
-    if org is None and repo is None:
+    repo_ref = parse_repo_ref("models", org_repo)
+    if repo_ref is None:
         return error_repo_not_found()
     return await file_head_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
+        repo_type=repo_ref.repo_type,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         commit=commit,
         file_path=file_path,
         request=request,
     )
 
 
+async def cdn_proxy_common(
+    repo_type: str,
+    org: str,
+    repo: str,
+    hash_file: str,
+    request: Request,
+    method: Literal["HEAD", "GET"],
+) -> Response:
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    access_error = await ensure_repo_access(app, repo_ref)
+    if access_error is not None:
+        return access_error
+
+    try:
+        generator = await cdn_file_get_generator(
+            app,
+            repo_type,
+            org,
+            repo,
+            hash_file,
+            method=method,
+            request=request,
+        )
+        return await build_streaming_response(generator, include_status_code=True)
+    except httpx.ConnectTimeout:
+        return Response(status_code=504)
+
+
 @app.head("/{org_repo}/{hash_file}")
 @app.head("/{repo_type}/{org_repo}/{hash_file}")
 async def cdn_file_head(org_repo: str, hash_file: str, request: Request, repo_type: str = "models"):
-    org, repo = parse_org_repo(org_repo)
-    if org is None and repo is None:
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
         return error_repo_not_found()
-
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return error_repo_not_found()
-
-    try:
-        generator = await cdn_file_get_generator(app, repo_type, org, repo, hash_file, method="HEAD", request=request)
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, headers=headers, status_code=status_code)
-    except httpx.ConnectTimeout:
-        return Response(status_code=504)
+    return await cdn_proxy_common(
+        repo_type=repo_ref.repo_type,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
+        hash_file=hash_file,
+        request=request,
+        method="HEAD",
+    )
 
 
 # ======================
@@ -930,56 +769,41 @@ async def cdn_file_head(org_repo: str, hash_file: str, request: Request, repo_ty
 async def file_get_common(
     repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
 ) -> Response:
-    if repo_type not in REPO_TYPES_MAPPING.keys():
-        return error_page_not_found()
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return error_repo_not_found()
-    # Check Mirror Path
-    for mirror_path in app.state.app_settings.config.mirrors_path:
-        try:
-            git_path = os.path.join(mirror_path, repo_type, org or '', repo)
-            if os.path.exists(git_path):
-                local_repo = LocalMirrorRepo(git_path, repo_type, org, repo)
-                content_stream = local_repo.get_file(commit_hash=commit, path=file_path)
-                if content_stream is None:
-                    continue
-                return StreamingResponse(content_stream)
-        except git.exc.InvalidGitRepositoryError:
-            logger.warning(f"Local repository {git_path} is not a valid git reposity.")
-            continue
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    access_error = await ensure_repo_access(app, repo_ref)
+    if access_error is not None:
+        return access_error
+
+    content_stream = load_local_mirror_payload(
+        app,
+        repo_ref,
+        lambda local_repo: local_repo.get_file(commit_hash=commit, path=file_path),
+        logger,
+    )
+    if content_stream is not None:
+        return StreamingResponse(content_stream)
+
     try:
-        if not app.state.app_settings.config.offline and not await check_commit_hf(
+        resolved_commit, commit_error = await resolve_requested_commit(
             app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
-            authorization=request.headers.get("authorization", None),
-        ):
-            return error_repo_not_found()
-        commit_sha = await get_commit_hf(
-            app,
-            repo_type,
-            org,
-            repo,
-            commit=commit,
-            authorization=request.headers.get("authorization", None),
+            repo_ref,
+            commit,
+            request.headers.get("authorization", None),
+            missing_commit_response="repo_not_found",
         )
-        if commit_sha is None:
-            return error_repo_not_found()
+        if commit_error is not None:
+            return commit_error
         generator = await file_get_generator(
             app,
             repo_type,
             org,
             repo,
-            commit_sha,
+            resolved_commit.resolved,
             file_path=file_path,
             method="GET",
             request=request,
         )
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, headers=headers, status_code=status_code)
+        return await build_streaming_response(generator, include_status_code=True)
     except httpx.ConnectTimeout:
         traceback.print_exc()
         return Response(status_code=504)
@@ -1003,19 +827,14 @@ async def file_get3(
 async def file_get2(
     org_or_repo_type: str, repo_name: str, commit: str, file_path: str, request: Request
 ):
-    if org_or_repo_type in REPO_TYPES_MAPPING.keys():
-        repo_type: str = org_or_repo_type
-        org, repo = parse_org_repo(repo_name)
-        if org is None and repo is None:
-            return error_repo_not_found()
-    else:
-        repo_type: str = "models"
-        org, repo = org_or_repo_type, repo_name
+    repo_ref = parse_resolve_repo_ref(org_or_repo_type, repo_name)
+    if repo_ref is None:
+        return error_repo_not_found()
 
     return await file_get_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
+        repo_type=repo_ref.repo_type,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         commit=commit,
         file_path=file_path,
         request=request,
@@ -1024,15 +843,14 @@ async def file_get2(
 
 @app.get("/{org_repo}/resolve/{commit}/{file_path:path}")
 async def file_get(org_repo: str, commit: str, file_path: str, request: Request):
-    repo_type: str = "models"
-    org, repo = parse_org_repo(org_repo)
-    if org is None and repo is None:
+    repo_ref = parse_repo_ref("models", org_repo)
+    if repo_ref is None:
         return error_repo_not_found()
 
     return await file_get_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
+        repo_type=repo_ref.repo_type,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         commit=commit,
         file_path=file_path,
         request=request,
@@ -1044,19 +862,33 @@ async def file_get(org_repo: str, commit: str, file_path: str, request: Request)
 async def cdn_file_get(
     org_repo: str, hash_file: str, request: Request, repo_type: str = "models"
 ):
-    org, repo = parse_org_repo(org_repo)
-    if org is None and repo is None:
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
         return error_repo_not_found()
+    return await cdn_proxy_common(
+        repo_type=repo_ref.repo_type,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
+        hash_file=hash_file,
+        request=request,
+        method="GET",
+    )
 
-    if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return error_repo_not_found()
+
+async def lfs_proxy_common(
+    dir1: str,
+    dir2: str,
+    hash_repo: str,
+    hash_file: str,
+    request: Request,
+    method: Literal["HEAD", "GET"],
+) -> Response:
     try:
-        generator = await cdn_file_get_generator(
-            app, repo_type, org, repo, hash_file, method="GET", request=request
-        )
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, headers=headers, status_code=status_code)
+        if method == "HEAD":
+            generator = await lfs_head_generator(app, dir1, dir2, hash_repo, hash_file, request)
+        else:
+            generator = await lfs_get_generator(app, dir1, dir2, hash_repo, hash_file, request)
+        return await build_streaming_response(generator, include_status_code=True)
     except httpx.ConnectTimeout:
         return Response(status_code=504)
 
@@ -1066,23 +898,11 @@ async def cdn_file_get(
 # ======================
 @app.head("/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}")
 async def lfs_head(dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request):
-    try:
-        generator = await lfs_head_generator(app, dir1, dir2, hash_repo, hash_file, request)
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, headers=headers, status_code=status_code)
-    except httpx.ConnectTimeout:
-        return Response(status_code=504)
+    return await lfs_proxy_common(dir1, dir2, hash_repo, hash_file, request, method="HEAD")
 
 @app.get("/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}")
 async def lfs_get(dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request):
-    try:
-        generator = await lfs_get_generator(app, dir1, dir2, hash_repo, hash_file, request)
-        status_code = await generator.__anext__()
-        headers = await generator.__anext__()
-        return StreamingResponse(generator, headers=headers, status_code=status_code)
-    except httpx.ConnectTimeout:
-        return Response(status_code=504)
+    return await lfs_proxy_common(dir1, dir2, hash_repo, hash_file, request, method="GET")
 
 
 # ======================
@@ -1120,6 +940,7 @@ async def repos(request: Request):
 
 
 def init():
+    global logger
     parser = argparse.ArgumentParser(
         description="Olah Huggingface Mirror Server."
     )
@@ -1238,22 +1059,7 @@ Incorrect settings may result in unintended file deletion and loss!!! !!!
     app.state.app_settings = AppSettings(config=config)
     return args
 
-def main():
-    args = init()
-    if __name__ == "__main__":
-        import uvicorn
-        uvicorn.run(
-            "olah.server:app",
-            host=args.host,
-            port=args.port,
-            log_level="info",
-            reload=False,
-            ssl_keyfile=args.ssl_key,
-            ssl_certfile=args.ssl_cert
-        )
-
-def cli():
-    args = init()
+def run_server(args):
     import uvicorn
     uvicorn.run(
         "olah.server:app",
@@ -1262,8 +1068,17 @@ def cli():
         log_level="info",
         reload=False,
         ssl_keyfile=args.ssl_key,
-        ssl_certfile=args.ssl_cert,
+        ssl_certfile=args.ssl_cert
     )
 
-if __name__ in ["olah.server", "__main__"]:
+
+def main():
+    args = init()
+    run_server(args)
+
+def cli():
+    args = init()
+    run_server(args)
+
+if __name__ == "__main__":
     main()

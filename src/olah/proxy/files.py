@@ -8,6 +8,7 @@
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
 from fastapi import Request
 import httpx
@@ -41,6 +42,12 @@ from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 from olah.utils.zip_utils import Decompressor, decompress_data
+
+
+@dataclass(frozen=True)
+class RemoteFileMetadata:
+    file_size: int
+    etag: Optional[str]
 
 
 def get_block_info(pos: int, block_size: int, file_size: int) -> Tuple[int, int, int]:
@@ -326,16 +333,49 @@ async def _resource_etag(hf_url: str, authorization: Optional[str]=None, offline
             ret_etag = None
     return ret_etag
 
+
+async def _remote_file_metadata(
+    app,
+    hf_url: str,
+    authorization: Optional[str],
+    offline: bool,
+) -> Optional[RemoteFileMetadata]:
+    if offline:
+        etag = await _resource_etag(hf_url=hf_url, authorization=authorization, offline=True)
+        return RemoteFileMetadata(file_size=0, etag=etag)
+
+    headers = {}
+    if authorization is not None:
+        headers["authorization"] = authorization
+    async with httpx.AsyncClient() as client:
+        response = await client.request(
+            method="HEAD",
+            url=hf_url,
+            headers=headers,
+            timeout=WORKER_API_TIMEOUT,
+            follow_redirects=True,
+        )
+    if response.status_code >= 400:
+        return None
+
+    content_length = response.headers.get("content-length")
+    if content_length is None:
+        return None
+    return RemoteFileMetadata(
+        file_size=int(content_length),
+        etag=response.headers.get("etag"),
+    )
+
 async def _file_realtime_stream(
     app,
-    repo_type: Literal["models", "datasets", "spaces"],
-    org: str,
-    repo: str,
-    file_path: str,
     save_path: str,
     head_path: str,
     url: str,
     request: Request,
+    repo_type: Optional[Literal["models", "datasets", "spaces"]] = None,
+    org: Optional[str] = None,
+    repo: Optional[str] = None,
+    file_path: Optional[str] = None,
     method="GET",
     allow_cache=True,
     commit: Optional[str] = None,
@@ -368,51 +408,73 @@ async def _file_realtime_stream(
     if "host" in request_headers:
         request_headers["host"] = urlparse(hf_url).netloc
 
-    generator = pathsinfo_generator(
-        app,
-        repo_type,
-        org,
-        repo,
-        commit,
-        [file_path],
-        override_cache=False,
-        method="post",
-        authorization=request.headers.get("authorization", None),
-    )
-    status_code = await generator.__anext__()
-    headers = await generator.__anext__()
-    content = await generator.__anext__()
-    try:
-        pathsinfo = json.loads(content)
-    except json.JSONDecodeError:
-        response = error_proxy_invalid_data()
-        yield response.status_code
-        yield response.headers
-        yield response.body
-        return
+    authorization = request.headers.get("authorization", None)
+    if repo_type is not None and org is not None and repo is not None and file_path is not None and commit is not None:
+        generator = pathsinfo_generator(
+            app,
+            repo_type,
+            org,
+            repo,
+            commit,
+            [file_path],
+            override_cache=False,
+            method="post",
+            authorization=authorization,
+        )
+        status_code = await generator.__anext__()
+        headers = await generator.__anext__()
+        content = await generator.__anext__()
+        try:
+            pathsinfo = json.loads(content)
+        except json.JSONDecodeError:
+            response = error_proxy_invalid_data()
+            yield response.status_code
+            yield response.headers
+            yield response.body
+            return
 
-    if len(pathsinfo) == 0:
-        response = error_entry_not_found()
-        yield response.status_code
-        yield response.headers
-        yield response.body
-        return
+        if len(pathsinfo) == 0:
+            response = error_entry_not_found()
+            yield response.status_code
+            yield response.headers
+            yield response.body
+            return
 
-    if len(pathsinfo) != 1:
-        response = error_proxy_timeout()
-        yield response.status_code
-        yield response.headers
-        yield response.body
-        return
+        if len(pathsinfo) != 1:
+            response = error_proxy_timeout()
+            yield response.status_code
+            yield response.headers
+            yield response.body
+            return
 
-    pathinfo = pathsinfo[0]
-    if "size" not in pathinfo:
-        response = error_proxy_timeout()
-        yield response.status_code
-        yield response.headers
-        yield response.body
-        return
-    file_size = pathinfo["size"]
+        pathinfo = pathsinfo[0]
+        if "size" not in pathinfo:
+            response = error_proxy_timeout()
+            yield response.status_code
+            yield response.headers
+            yield response.body
+            return
+        file_size = pathinfo["size"]
+        etag = await _resource_etag(
+            hf_url=hf_url,
+            authorization=authorization,
+            offline=app.state.app_settings.config.offline,
+        )
+    else:
+        metadata = await _remote_file_metadata(
+            app=app,
+            hf_url=hf_url,
+            authorization=authorization,
+            offline=app.state.app_settings.config.offline,
+        )
+        if metadata is None:
+            error_response = error_proxy_timeout()
+            yield error_response.status_code
+            yield error_response.headers
+            yield error_response.body
+            return
+        file_size = metadata.file_size
+        etag = metadata.etag
 
     response_headers = {}
     # Create content-length
@@ -426,12 +488,6 @@ async def _file_realtime_stream(
     # Commit info
     if commit is not None:
         response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
-    # Create fake headers when offline mode
-    etag = await _resource_etag(
-        hf_url=hf_url,
-        authorization=request.headers.get("authorization", None),
-        offline=app.state.app_settings.config.offline,
-    )
     response_headers["etag"] = etag
     
     if etag is None:

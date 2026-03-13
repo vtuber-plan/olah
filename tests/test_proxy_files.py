@@ -259,6 +259,100 @@ async def test_file_realtime_stream_uses_head_stream_for_head_requests(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_file_realtime_stream_without_repo_context_uses_remote_metadata(monkeypatch, tmp_path):
+    captured = {}
+
+    async def fail_pathsinfo(*args, **kwargs):
+        raise AssertionError("pathsinfo should not be used without repo context")
+
+    async def fake_remote_file_metadata(app, hf_url, authorization, offline):
+        captured["metadata"] = {
+            "hf_url": hf_url,
+            "authorization": authorization,
+            "offline": offline,
+        }
+        return proxy_files.RemoteFileMetadata(file_size=6, etag='"cdn-etag"')
+
+    async def fake_file_chunk_get(**kwargs):
+        captured["chunk_get"] = kwargs
+        yield b"hello!"
+
+    monkeypatch.setattr(proxy_files, "pathsinfo_generator", fail_pathsinfo)
+    monkeypatch.setattr(proxy_files, "_remote_file_metadata", fake_remote_file_metadata)
+    monkeypatch.setattr(proxy_files, "_file_chunk_get", fake_file_chunk_get)
+
+    gen = proxy_files._file_realtime_stream(
+        app=_make_app(tmp_path),
+        save_path=str(tmp_path / "save"),
+        head_path=str(tmp_path / "head"),
+        url="https://mirror.example/team/demo/hash.bin",
+        request=_make_request("GET", headers={"authorization": "Bearer t", "host": "mirror.example"}),
+        method="GET",
+        allow_cache=False,
+    )
+    status = await gen.__anext__()
+    headers = await gen.__anext__()
+    body = [chunk async for chunk in gen]
+
+    assert status == 200
+    assert headers["content-length"] == "6"
+    assert headers["etag"] == '"cdn-etag"'
+    assert body == [b"hello!"]
+    assert captured["metadata"]["hf_url"] == "https://cdn-lfs.huggingface.co/team/demo/hash.bin"
+    assert captured["chunk_get"]["headers"]["host"] == "cdn-lfs.huggingface.co"
+
+
+@pytest.mark.asyncio
+async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp_path):
+    captured = []
+
+    async def fake_file_realtime_stream(**kwargs):
+        captured.append(kwargs)
+        yield 200
+        yield {"etag": '"ok"'}
+        yield b""
+
+    monkeypatch.setattr(proxy_files, "_file_realtime_stream", fake_file_realtime_stream)
+
+    async def fake_check_cache_rules_hf(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(proxy_files, "check_cache_rules_hf", fake_check_cache_rules_hf)
+
+    request = _make_request("GET", headers={"host": "mirror.example"}, url_path="/team/demo/hash.bin")
+    app = _make_app(tmp_path)
+
+    cdn_gen = await proxy_files.cdn_file_get_generator(
+        app=app,
+        repo_type="models",
+        org="team",
+        repo="demo",
+        file_hash="hash.bin",
+        method="GET",
+        request=request,
+    )
+    assert await cdn_gen.__anext__() == 200
+
+    from olah.proxy import lfs as proxy_lfs
+
+    monkeypatch.setattr(proxy_lfs, "_file_realtime_stream", fake_file_realtime_stream)
+    lfs_gen = await proxy_lfs.lfs_get_generator(
+        app=app,
+        dir1="aa",
+        dir2="bb",
+        hash_repo="repohash",
+        hash_file="filehash",
+        request=request,
+    )
+    assert await lfs_gen.__anext__() == 200
+
+    assert captured[0]["url"] == "http://mirror.example/team/demo/hash.bin"
+    assert captured[0].get("repo_type") is None
+    assert captured[1]["url"] == "http://mirror.example/team/demo/hash.bin"
+    assert captured[1].get("repo_type") is None
+
+
+@pytest.mark.asyncio
 async def test_get_file_range_from_cache_reads_sliced_bytes_across_blocks():
     class FakeCache:
         def _get_block_size(self):

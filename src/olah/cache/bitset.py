@@ -45,7 +45,6 @@ class Bitset:
         """
         if index < 0 or index >= self.size:
             raise IndexError("Index out of range")
-        self._resize_if_needed(index)
         byte_index = index // 8
         bit_index = index % 8
         self.bits[byte_index] &= ~(1 << bit_index)
