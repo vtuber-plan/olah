@@ -197,8 +197,8 @@ async def get_newest_commit_hf(
             headers = {}
             if authorization is not None:
                 headers["authorization"] = authorization
-            response = await client.get(url, headers=headers, timeout=WORKER_API_TIMEOUT)
-            if response.status_code != 200:
+            response = await client.get(url, headers=headers, timeout=WORKER_API_TIMEOUT, follow_redirects=True)
+            if response.status_code not in [200, 307]:
                 return await get_newest_commit_hf_offline(app, repo_type, org, repo)
             obj = json.loads(response.text)
         return obj.get("sha", None)
