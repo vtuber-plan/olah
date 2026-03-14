@@ -1,4 +1,5 @@
 import asyncio
+import gzip
 import json
 from types import SimpleNamespace
 
@@ -65,6 +66,24 @@ def test_get_commit_hf_offline_reads_cached_request(tmp_path):
             status_code=200,
             headers={"content-type": "application/json"},
             content=json.dumps({"sha": "cached-sha"}).encode("utf-8"),
+        )
+    )
+
+    commit = asyncio.run(repo_utils.get_commit_hf_offline(app, "models", "team", "demo", "main"))
+
+    assert commit == "cached-sha"
+
+
+def test_get_commit_hf_offline_reads_gzip_cached_request(tmp_path):
+    app = _make_app(tmp_path, offline=True)
+    save_path = tmp_path / "api" / "models" / "team" / "demo" / "revision" / "main" / "meta_get.json"
+    save_path.parent.mkdir(parents=True)
+    asyncio.run(
+        cache_utils.write_cache_request(
+            str(save_path),
+            status_code=200,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+            content=gzip.compress(json.dumps({"sha": "cached-sha"}).encode("utf-8")),
         )
     )
 

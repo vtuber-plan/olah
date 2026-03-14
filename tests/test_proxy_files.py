@@ -1,4 +1,5 @@
 import importlib
+import gzip
 import json
 import sys
 import types
@@ -580,3 +581,49 @@ async def test_get_file_range_from_remote_raises_on_incomplete_content_length():
             )
         ]
         assert chunks == [b"abc"]
+
+
+@pytest.mark.asyncio
+async def test_file_chunk_get_persists_single_block_files(tmp_path):
+    save_path = tmp_path / "repos" / "files" / "models" / "team" / "demo" / "resolve" / "main" / "tiny.json"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = b'{"hello":"world"}'
+    encoded = gzip.compress(payload, compresslevel=4)
+
+    class FakeResponse:
+        status_code = 206
+        headers = {"content-encoding": "gzip"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_raw(self):
+            yield encoded[:5]
+            yield encoded[5:]
+
+    class FakeClient:
+        def stream(self, **kwargs):
+            return FakeResponse()
+
+    chunks = [
+        chunk
+        async for chunk in proxy_files._file_chunk_get(
+            app=_make_app(tmp_path),
+            save_path=str(save_path),
+            head_path=str(tmp_path / "head"),
+            client=FakeClient(),
+            method="GET",
+            url="https://huggingface.co/team/demo/resolve/main/tiny.json",
+            headers={},
+            allow_cache=True,
+            file_size=len(payload),
+        )
+    ]
+
+    assert b"".join(chunks) == payload
+    block_path = save_path / "blocks" / "block_00000000.bin"
+    assert block_path.exists()
+    assert block_path.stat().st_size > 0

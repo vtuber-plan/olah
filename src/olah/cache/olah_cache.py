@@ -9,6 +9,7 @@ import asyncio
 import lzma
 import mmap
 import os
+import tempfile
 import string
 import struct
 import threading
@@ -247,7 +248,7 @@ class OlahCache(object):
 
     def has_block(self, block_index: int) -> bool:
         block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
-        return os.path.exists(block_path)
+        return os.path.exists(block_path) and os.path.getsize(block_path) > 0
 
     async def read_block(self, block_index: int) -> Optional[bytes]:
         if not self.is_open:
@@ -337,10 +338,24 @@ class OlahCache(object):
         )
    
         block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
+        block_dir = os.path.dirname(block_path)
 
-        with portalocker.Lock(block_path, 'wb+', timeout=60, flags=portalocker.LOCK_EX) as fh:
-            async with aiofiles.open(block_path, mode='wb+') as f:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=block_dir,
+            prefix=f".block_{block_index:0>8}_",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            async with aiofiles.open(tmp_path, mode="wb") as f:
                 await f.write(real_block_bytes)
+            os.replace(tmp_path, block_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
         self._flush_header()
 

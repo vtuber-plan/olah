@@ -82,7 +82,11 @@ def touch_file_access_time(filename: str):
     os.utime(filename, times=(now, mtime))
 
 def convert_to_bytes(size_str) -> Optional[int]:
-    size_str = size_str.strip().upper()
+    if size_str is None:
+        return None
+    if isinstance(size_str, int):
+        return size_str
+    size_str = str(size_str).strip().upper()
     multipliers = {
         "K": 1024,
         "M": 1024**2,

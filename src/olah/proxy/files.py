@@ -5,6 +5,7 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
+import asyncio
 import hashlib
 import json
 import os
@@ -133,6 +134,24 @@ def _multipart_content_length(boundary: str, all_ranges: List[Tuple[int, int]], 
     return total
 
 
+async def _write_block_safely(
+    cache_file: OlahCache,
+    block_index: int,
+    raw_block: bytes,
+    allow_cache: bool,
+) -> None:
+    if not allow_cache:
+        return
+    if cache_file.has_block(block_index):
+        return
+    write_task = asyncio.create_task(cache_file.write_block(block_index, raw_block))
+    try:
+        await asyncio.shield(write_task)
+    except asyncio.CancelledError:
+        await write_task
+        raise
+
+
 async def _get_file_range_from_cache(
     cache_file: OlahCache, start_pos: int, end_pos: int
 ):
@@ -231,7 +250,6 @@ async def _file_chunk_get(
     
     # Refresh access time
     touch_file_access_time(save_path)
-    
     try:
         _, all_ranges, _ = get_request_ranges(file_size, headers.get("range"))
 
@@ -260,41 +278,52 @@ async def _file_chunk_get(
                 last_block, last_block_start_pos, last_block_end_pos = get_block_info(
                     cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
                 )
-                async for chunk in generator:
-                    if len(chunk) != 0:
-                        yield bytes(chunk)
-                        stream_cache += chunk
-                        cur_pos += len(chunk)
+                cur_block = last_block
+                try:
+                    async for chunk in generator:
+                        if len(chunk) != 0:
+                            yield bytes(chunk)
+                            stream_cache += chunk
+                            cur_pos += len(chunk)
 
-                    cur_block = cur_pos // cache_file._get_block_size()
+                        cur_block = cur_pos // cache_file._get_block_size()
 
-                    if cur_block == last_block:
-                        continue
-                    split_pos = last_block_end_pos - max(
-                        last_block_start_pos, range_start_pos
-                    )
-                    raw_block = stream_cache[:split_pos]
-                    stream_cache = stream_cache[split_pos:]
-                    if len(raw_block) == cache_file._get_block_size():
-                        if not cache_file.has_block(last_block) and allow_cache:
-                            await cache_file.write_block(last_block, raw_block)
-                    last_block, last_block_start_pos, last_block_end_pos = get_block_info(
-                        cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-                    )
-
-                raw_block = stream_cache
-                if cur_block == cache_file._get_block_number() - 1:
-                    if (
-                        len(raw_block)
-                        == cache_file._get_file_size() % cache_file._get_block_size()
-                    ):
-                        raw_block += b"\x00" * (
-                            cache_file._get_block_size() - len(raw_block)
+                        if cur_block == last_block:
+                            continue
+                        split_pos = last_block_end_pos - max(
+                            last_block_start_pos, range_start_pos
                         )
-                    last_block = cur_block
-                if len(raw_block) == cache_file._get_block_size():
-                    if not cache_file.has_block(last_block) and allow_cache:
-                        await cache_file.write_block(last_block, raw_block)
+                        raw_block = stream_cache[:split_pos]
+                        stream_cache = stream_cache[split_pos:]
+                        if len(raw_block) == cache_file._get_block_size():
+                            await _write_block_safely(
+                                cache_file,
+                                last_block,
+                                raw_block,
+                                allow_cache,
+                            )
+                        last_block, last_block_start_pos, last_block_end_pos = get_block_info(
+                            cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
+                        )
+                finally:
+                    raw_block = bytes(stream_cache)
+                    if cur_pos == range_end_pos:
+                        final_block = last_block
+                        final_start = last_block_start_pos
+                        final_end = last_block_end_pos
+                        if final_start >= range_start_pos:
+                            expected_len = final_end - final_start
+                            if len(raw_block) == expected_len:
+                                if expected_len < cache_file._get_block_size():
+                                    raw_block += b"\x00" * (
+                                        cache_file._get_block_size() - expected_len
+                                    )
+                                await _write_block_safely(
+                                    cache_file,
+                                    final_block,
+                                    raw_block,
+                                    allow_cache,
+                                )
 
                 if cur_pos != range_end_pos:
                     if is_remote:

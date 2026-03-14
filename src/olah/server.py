@@ -280,7 +280,7 @@ def run_server(args):
     import uvicorn
 
     uvicorn.run(
-        "olah.server:app",
+        app,
         host=args.host,
         port=args.port,
         log_level="info",

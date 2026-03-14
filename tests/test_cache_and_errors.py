@@ -9,7 +9,7 @@ from olah.mirror.meta import RepoMeta
 
 pytest.importorskip("portalocker")
 
-from olah.cache.olah_cache import CURRENT_OLAH_CACHE_VERSION, MAX_BLOCK_NUM, OlahCacheHeader
+from olah.cache.olah_cache import CURRENT_OLAH_CACHE_VERSION, MAX_BLOCK_NUM, OlahCache, OlahCacheHeader
 
 
 def test_bitset_can_set_clear_and_validate_bounds():
@@ -58,6 +58,24 @@ def test_olah_cache_header_rejects_invalid_magic_and_oversized_files():
     )
     with pytest.raises(Exception, match="out of the max capability"):
         oversized._valid_header()
+
+
+@pytest.mark.asyncio
+async def test_olah_cache_ignores_zero_length_block_placeholders(tmp_path):
+    cache = OlahCache.create(str(tmp_path / "cache"))
+    cache.resize(16)
+
+    empty_block = tmp_path / "cache" / "blocks" / "block_00000000.bin"
+    empty_block.write_bytes(b"")
+
+    assert cache.has_block(0) is False
+
+    payload = b"abcd" + b"\x00" * (cache._get_block_size() - 4)
+    await cache.write_block(0, payload)
+
+    assert cache.has_block(0) is True
+    assert empty_block.stat().st_size > 0
+    cache.close()
 
 
 def test_error_responses_return_expected_status_and_headers():

@@ -71,6 +71,8 @@ def test_convert_size_helpers_handle_supported_units_and_invalid_values():
     assert convert_to_bytes("2KB") == 2 * 1024
     assert convert_to_bytes("3 mb") == 3 * 1024**2
     assert convert_to_bytes("4T") == 4 * 1024**4
+    assert convert_to_bytes(None) is None
+    assert convert_to_bytes(4096) == 4096
     assert convert_to_bytes("invalid") is None
 
     assert convert_bytes_to_human_readable(512) == "512.00 B"

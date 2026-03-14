@@ -266,6 +266,28 @@ def test_main_and_cli_share_run_server(monkeypatch):
     assert calls == ["init", ("run_server", args), "init", ("run_server", args)]
 
 
+def test_run_server_uses_initialized_app_instance(monkeypatch):
+    import importlib
+
+    server_module = importlib.import_module("olah.server")
+    calls = {}
+    args = SimpleNamespace(host="127.0.0.1", port=8090, ssl_key=None, ssl_cert=None)
+    server_module.app.state.app_settings = server_module.AppSettings()
+
+    def fake_run(app, **kwargs):
+        calls["app"] = app
+        calls["kwargs"] = kwargs
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+
+    server_module.run_server(args)
+
+    assert calls["app"] is server_module.app
+    assert hasattr(calls["app"].state, "app_settings")
+    assert calls["kwargs"]["host"] == "127.0.0.1"
+    assert calls["kwargs"]["port"] == 8090
+
+
 def test_build_logger_redirects_stdout_and_stderr_only_once(tmp_path):
     original_stdout = sys.stdout
     original_stderr = sys.stderr

@@ -6,6 +6,7 @@
 # https://opensource.org/licenses/MIT.
 
 import datetime
+import gzip
 import os
 import glob
 import tenacity
@@ -15,6 +16,16 @@ from urllib.parse import urljoin
 import httpx
 from olah.constants import WORKER_API_TIMEOUT
 from olah.utils.cache_utils import read_cache_request
+
+
+def _load_cached_json_payload(request_cache: Dict[str, Union[bytes, Dict[str, str], int]]) -> Dict:
+    content = request_cache["content"]
+    headers = request_cache.get("headers", {})
+    if isinstance(headers, dict) and headers.get("content-encoding") == "gzip":
+        content = gzip.decompress(content)
+    if isinstance(content, bytes):
+        content = content.decode("utf-8")
+    return json.loads(content)
 
 
 def get_org_repo(org: Optional[str], repo: str) -> str:
@@ -232,7 +243,7 @@ async def get_commit_hf_offline(
     save_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
     if os.path.exists(save_path):
         request_cache = await read_cache_request(save_path)
-        request_cache_json = json.loads(request_cache["content"])
+        request_cache_json = _load_cached_json_payload(request_cache)
         return request_cache_json["sha"]
     else:
         return None
