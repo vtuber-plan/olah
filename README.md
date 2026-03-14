@@ -82,12 +82,12 @@ Or you can download models and datasets by using huggingface cli.
 
 Download GPT2:
 ```bash
-huggingface-cli download --resume-download openai-community/gpt2 --local-dir gpt2
+hf download openai-community/gpt2 --local-dir gpt2 --no-force-download
 ```
 
 Download WikiText:
 ```bash
-huggingface-cli download --repo-type dataset --resume-download Salesforce/wikitext --local-dir wikitext
+hf download --repo-type dataset Salesforce/wikitext --local-dir wikitext --no-force-download
 ```
 
 You can check the path `./repos`, in which olah stores all cached datasets and models.
@@ -217,4 +217,3 @@ olah is released under the MIT License.
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=vtuber-plan/olah&type=Date)](https://star-history.com/#vtuber-plan/olah&Date)
-

@@ -34,12 +34,12 @@ snapshot_download(repo_id='Qwen/Qwen-7B', repo_type='model',
 
 下载GPT2:
 ```bash
-huggingface-cli download --resume-download openai-community/gpt2 --local-dir gpt2
+hf download openai-community/gpt2 --local-dir gpt2 --no-force-download
 ```
 
 下载WikiText:
 ```bash
-huggingface-cli download --repo-type dataset --resume-download Salesforce/wikitext --local-dir wikitext
+hf download --repo-type dataset Salesforce/wikitext --local-dir wikitext --no-force-download
 ```
 
 您可以查看路径`./repos`，其中存储了所有数据集和模型的缓存。

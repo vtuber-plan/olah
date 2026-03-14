@@ -1,4 +1,5 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
 
 <head>
     <title>Olah HuggingFace Mirror</title>
@@ -44,18 +45,487 @@
         });
     </script>
     <style>
+        :root {
+            --bg: #f4f1ea;
+            --panel: rgba(255, 252, 246, 0.92);
+            --panel-strong: #fffdf8;
+            --ink: #1f2a24;
+            --muted: #5d695f;
+            --line: rgba(31, 42, 36, 0.12);
+            --accent: #b85c38;
+            --accent-deep: #7f3b21;
+            --accent-soft: #f0d9cb;
+            --shadow: 0 24px 60px rgba(76, 53, 34, 0.12);
+            --radius-xl: 28px;
+            --radius-lg: 20px;
+            --radius-md: 14px;
+        }
+
+        html[data-theme="dark"] {
+            --bg: #111714;
+            --panel: rgba(25, 33, 29, 0.92);
+            --panel-strong: #1a221e;
+            --ink: #edf2ee;
+            --muted: #a8b5ac;
+            --line: rgba(237, 242, 238, 0.12);
+            --accent: #df875f;
+            --accent-deep: #f3b08d;
+            --accent-soft: rgba(223, 135, 95, 0.18);
+            --shadow: 0 28px 70px rgba(0, 0, 0, 0.34);
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: var(--bg);
+            color: var(--ink);
+            font-family: "Avenir Next", "Segoe UI", sans-serif;
+            transition: background 0.25s ease, color 0.25s ease;
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: -1;
+            pointer-events: none;
+            background:
+                radial-gradient(circle at 0% 0%, rgba(184, 92, 56, 0.16), transparent 30%),
+                radial-gradient(circle at 88% 14%, rgba(127, 59, 33, 0.1), transparent 24%),
+                linear-gradient(180deg, #f7f2e9 0%, #f1ece3 58%, #ece6dd 100%);
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+        }
+
+        html[data-theme="dark"] body::before {
+            background:
+                radial-gradient(circle at 0% 0%, rgba(223, 135, 95, 0.14), transparent 28%),
+                radial-gradient(circle at 88% 14%, rgba(243, 176, 141, 0.08), transparent 22%),
+                linear-gradient(180deg, #121815 0%, #101612 58%, #0c110e 100%);
+        }
+
         .copy-button {
-            float: right;
-            margin: 10px;
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            margin: 0;
+            z-index: 2;
         }
 
         pre {
-            background: #f3f3f3;
-            color: #444;
+            position: relative;
+            margin: 0;
+            padding: 1.25rem 1.25rem 1.1rem;
+            background: #1f2522;
+            color: #f7f6f2;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: var(--radius-md);
+            overflow-x: auto;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        }
+
+        pre code {
+            font-size: 0.95rem;
+            line-height: 1.65;
+        }
+
+        .hljs,
+        .hljs-subst {
+            background: transparent !important;
+        }
+
+        .hljs {
+            color: #f7f6f2;
+        }
+
+        html[data-theme="dark"] .hljs {
+            color: #edf2ee;
         }
 
         .page-container {
-            margin: 20px;
+            max-width: 1180px;
+            margin: 0 auto;
+            padding: 32px 20px 48px;
+        }
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 18px;
+            margin-bottom: 18px;
+        }
+
+        .topbar-links,
+        .topbar-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .nav-link,
+        .toggle-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.45rem;
+            padding: 0.75rem 1rem;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.52);
+            color: var(--ink);
+            font-size: 0.92rem;
+            font-weight: 700;
+            text-decoration: none;
+            transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+        }
+
+        .nav-link:hover,
+        .toggle-button:hover {
+            transform: translateY(-1px);
+            background: rgba(255, 255, 255, 0.78);
+        }
+
+        html[data-theme="dark"] .nav-link,
+        html[data-theme="dark"] .toggle-button {
+            background: rgba(20, 27, 24, 0.78);
+        }
+
+        .control-group {
+            display: inline-flex;
+            padding: 4px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.48);
+            box-shadow: 0 10px 22px rgba(31, 42, 36, 0.05);
+        }
+
+        html[data-theme="dark"] .control-group {
+            background: rgba(20, 27, 24, 0.82);
+        }
+
+        .toggle-button {
+            border: 0;
+            background: transparent;
+            box-shadow: none;
+        }
+
+        .toggle-button.is-active {
+            background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+            color: #fff;
+        }
+
+        .hero {
+            position: relative;
+            overflow: hidden;
+            padding: 36px;
+            background: linear-gradient(135deg, rgba(255, 253, 248, 0.98), rgba(247, 239, 229, 0.88));
+            border: 1px solid var(--line);
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow);
+        }
+
+        html[data-theme="dark"] .hero {
+            background:
+                linear-gradient(145deg, rgba(24, 31, 27, 0.96), rgba(15, 21, 18, 0.9)),
+                radial-gradient(circle at top left, rgba(223, 135, 95, 0.12), transparent 30%);
+            border-color: rgba(237, 242, 238, 0.08);
+        }
+
+        .hero::before {
+            content: "";
+            position: absolute;
+            right: -70px;
+            bottom: -95px;
+            width: 340px;
+            height: 340px;
+            background:
+                radial-gradient(circle at center,
+                    rgba(184, 92, 56, 0.24) 0%,
+                    rgba(184, 92, 56, 0.14) 24%,
+                    rgba(184, 92, 56, 0.05) 46%,
+                    rgba(184, 92, 56, 0) 72%);
+            filter: blur(10px);
+            opacity: 0.95;
+            pointer-events: none;
+        }
+
+        .hero::after {
+            content: "";
+            position: absolute;
+            right: 72px;
+            bottom: 34px;
+            width: 120px;
+            height: 120px;
+            background: radial-gradient(circle, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0));
+            filter: blur(12px);
+            pointer-events: none;
+        }
+
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.45rem 0.8rem;
+            border: 1px solid rgba(184, 92, 56, 0.18);
+            border-radius: 999px;
+            background: rgba(240, 217, 203, 0.55);
+            color: var(--accent-deep);
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        html[data-theme="dark"] .eyebrow {
+            border-color: rgba(223, 135, 95, 0.24);
+            background: rgba(223, 135, 95, 0.14);
+            color: #ffd8c4;
+        }
+
+        .hero h1.ui.header {
+            margin-top: 1rem;
+            margin-bottom: 0.9rem;
+            font-size: 3rem;
+            line-height: 1.05;
+            color: var(--ink);
+        }
+
+        .hero .subheader {
+            max-width: 760px;
+            font-size: 1.1rem;
+            line-height: 1.8;
+            color: var(--muted);
+        }
+
+        .hero-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 1.5rem;
+        }
+
+        .endpoint-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.65rem;
+            padding: 0.9rem 1rem;
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            color: var(--ink);
+            font-weight: 700;
+            box-shadow: 0 10px 25px rgba(31, 42, 36, 0.06);
+        }
+
+        html[data-theme="dark"] .endpoint-pill {
+            border-color: rgba(237, 242, 238, 0.08);
+            background: rgba(255, 255, 255, 0.04);
+            color: #f2f6f3;
+            box-shadow: 0 16px 30px rgba(0, 0, 0, 0.18);
+        }
+
+        .endpoint-pill code {
+            font-size: 0.95rem;
+            color: var(--accent-deep);
+        }
+
+        html[data-theme="dark"] .endpoint-pill code {
+            color: #ffd1b8;
+        }
+
+        .content-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.9fr);
+            gap: 24px;
+            margin-top: 24px;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow);
+        }
+
+        .panel-body {
+            padding: 28px;
+        }
+
+        .section-title {
+            margin: 0 0 0.4rem;
+            font-size: 1.5rem;
+            font-weight: 800;
+            color: var(--ink);
+        }
+
+        .section-copy {
+            margin: 0 0 1.2rem;
+            color: var(--muted);
+            line-height: 1.75;
+        }
+
+        .steps {
+            display: grid;
+            gap: 14px;
+            margin-bottom: 1.5rem;
+        }
+
+        .step {
+            display: grid;
+            grid-template-columns: 44px minmax(0, 1fr);
+            gap: 14px;
+            align-items: start;
+            padding: 16px;
+            background: rgba(255, 255, 255, 0.68);
+            border: 1px solid rgba(31, 42, 36, 0.08);
+            border-radius: var(--radius-md);
+        }
+
+        html[data-theme="dark"] .step,
+        html[data-theme="dark"] .hint,
+        html[data-theme="dark"] .code-card,
+        html[data-theme="dark"] .endpoint-pill {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .step-index {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 44px;
+            height: 44px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+            color: #fff;
+            font-weight: 800;
+            font-size: 1rem;
+        }
+
+        .step h3 {
+            margin: 0 0 0.35rem;
+            font-size: 1.05rem;
+            color: var(--ink);
+        }
+
+        .step p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.7;
+        }
+
+        .card-stack {
+            display: grid;
+            gap: 18px;
+        }
+
+        .code-card {
+            border: 1px solid rgba(31, 42, 36, 0.08);
+            border-radius: var(--radius-md);
+            overflow: hidden;
+            background: #fcfaf5;
+        }
+
+        html[data-theme="dark"] .code-card {
+            background: #141a17;
+        }
+
+        .code-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.95rem 1.1rem;
+            background: linear-gradient(180deg, rgba(240, 217, 203, 0.65), rgba(248, 240, 230, 0.9));
+            border-bottom: 1px solid rgba(31, 42, 36, 0.08);
+        }
+
+        html[data-theme="dark"] .code-card-header {
+            background: linear-gradient(180deg, rgba(223, 135, 95, 0.16), rgba(24, 31, 27, 0.94));
+        }
+
+        .code-card-header strong {
+            font-size: 0.95rem;
+            color: var(--ink);
+        }
+
+        .code-card-header span {
+            font-size: 0.82rem;
+            color: var(--accent-deep);
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        .hint-list {
+            display: grid;
+            gap: 12px;
+        }
+
+        .hint {
+            padding: 16px;
+            border: 1px solid rgba(31, 42, 36, 0.08);
+            border-radius: var(--radius-md);
+            background: rgba(255, 255, 255, 0.7);
+        }
+
+        .hint strong {
+            display: block;
+            margin-bottom: 0.4rem;
+            color: var(--ink);
+        }
+
+        .hint p,
+        .hint code {
+            color: var(--muted);
+        }
+
+        .inline-code {
+            display: inline-block;
+            padding: 0.22rem 0.5rem;
+            background: rgba(184, 92, 56, 0.1);
+            border-radius: 8px;
+            color: var(--accent-deep);
+            font-weight: 700;
+        }
+
+        @media (max-width: 960px) {
+            .content-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .topbar {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .hero {
+                padding: 28px 22px;
+            }
+
+            .hero h1.ui.header {
+                font-size: 2.35rem;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .page-container {
+                padding: 18px 14px 28px;
+            }
+
+            .topbar-links,
+            .topbar-actions {
+                width: 100%;
+                justify-content: space-between;
+            }
+
+            .hero h1.ui.header {
+                font-size: 2rem;
+            }
+
+            .panel-body {
+                padding: 22px 18px;
+            }
         }
     </style>
 </head>
@@ -68,42 +538,288 @@
     <script type="module" src="https://md-block.verou.me/md-block.js"></script>
 
     <div class="page-container">
-        <div class="ui container">
-            <h1 class="ui header">Welcome to Olah!</h1>
-            <div class="ui segment">
-                <h2 class="ui header">Use Mirror URL with huggingface-cli</h2>
-                <p>Set the Environment Variable <code>HF_ENDPOINT</code> to the mirror site (Here is
-                    {{scheme}}://{{netloc}}).</p>
+        <div class="topbar">
+            <div class="topbar-links">
+                <a class="nav-link" href="/" data-i18n="navHome">Home</a>
+                <a class="nav-link" href="/repos" data-i18n="navRepos">Repositories</a>
+            </div>
+            <div class="topbar-actions">
+                <div class="control-group" aria-label="Language selector">
+                    <button type="button" class="toggle-button" data-lang-switch="en">EN</button>
+                    <button type="button" class="toggle-button" data-lang-switch="zh">中文</button>
+                </div>
+                <div class="control-group" aria-label="Theme selector">
+                    <button type="button" class="toggle-button" data-theme-switch="light" data-i18n="themeLight">Light</button>
+                    <button type="button" class="toggle-button" data-theme-switch="dark" data-i18n="themeDark">Dark</button>
+                </div>
+            </div>
+        </div>
 
-                <p><strong>Linux:</strong></p>
-                <pre><code>export HF_ENDPOINT={{scheme}}://{{netloc}}</code></pre>
+        <div class="hero">
+            <div class="eyebrow" data-i18n="heroEyebrow">Olah Mirror Ready</div>
+            <h1 class="ui header" data-i18n="heroTitle">Welcome to Olah!</h1>
+            <p class="subheader" data-i18n="heroSubtitle">
+                Point your Hugging Face client at this mirror and keep your model and dataset downloads inside your own
+                infrastructure. The endpoint below is the only thing you need to wire up first.
+            </p>
+            <div class="hero-actions">
+                <div class="endpoint-pill">
+                    <span data-i18n="endpointLabel">Mirror Endpoint</span>
+                    <code>{{scheme}}://{{netloc}}</code>
+                </div>
+            </div>
+        </div>
 
-                <p><strong>Windows Powershell:</strong></p>
-                <pre><code>$env:HF_ENDPOINT = "{{scheme}}://{{netloc}}"</code></pre>
+        <div class="content-grid">
+            <div class="panel">
+                <div class="panel-body">
+                    <h2 class="section-title" data-i18n="stepsTitle">Get Started in Three Steps</h2>
+                    <p class="section-copy">
+                        <span data-i18n="stepsIntroPrefix">Set</span> <span class="inline-code">HF_ENDPOINT</span>,
+                        <span data-i18n="stepsIntroSuffix">keep your existing download workflow, and let Olah proxy and cache resources as they are requested.</span>
+                    </p>
 
-                <p>Starting from now on, all download operations in the HuggingFace library will be proxied through this
-                    mirror site.</p>
+                    <div class="steps">
+                        <div class="step">
+                            <div class="step-index">1</div>
+                            <div>
+                                <h3 data-i18n="step1Title">Set the mirror endpoint</h3>
+                                <p data-i18n="step1Copy">Use the current Olah server as your Hugging Face endpoint before you download anything.</p>
+                            </div>
+                        </div>
+                        <div class="step">
+                            <div class="step-index">2</div>
+                            <div>
+                                <h3 data-i18n="step2Title">Download with your usual tools</h3>
+                                <p data-i18n="step2Copy">Python, CLI, models, or datasets all keep the same workflow. Only the endpoint changes.</p>
+                            </div>
+                        </div>
+                        <div class="step">
+                            <div class="step-index">3</div>
+                            <div>
+                                <h3 data-i18n="step3Title">Reuse the cached mirror</h3>
+                                <p><span data-i18n="step3Prefix">Olah stores fetched metadata and file blocks under your configured</span> <span class="inline-code">repos-path</span>.</p>
+                            </div>
+                        </div>
+                    </div>
 
-                <pre><code class="language-python">
+                    <div class="card-stack">
+                        <div class="code-card">
+                            <div class="code-card-header">
+                                <strong data-i18n="cardShellTitle">Linux / macOS</strong>
+                                <span data-i18n="cardShellBadge">Shell</span>
+                            </div>
+                            <pre><code class="language-bash">export HF_ENDPOINT={{scheme}}://{{netloc}}</code></pre>
+                        </div>
+
+                        <div class="code-card">
+                            <div class="code-card-header">
+                                <strong data-i18n="cardPowerShellTitle">Windows PowerShell</strong>
+                                <span data-i18n="cardPowerShellBadge">PowerShell</span>
+                            </div>
+                            <pre><code class="language-powershell">$env:HF_ENDPOINT = "{{scheme}}://{{netloc}}"</code></pre>
+                        </div>
+
+                        <div class="code-card">
+                            <div class="code-card-header">
+                                <strong data-i18n="cardPythonTitle">Python Example</strong>
+                                <span>huggingface_hub</span>
+                            </div>
+                            <pre><code class="language-python">
 from huggingface_hub import snapshot_download
 
 snapshot_download(repo_id='Qwen/Qwen-7B', repo_type='model',
     local_dir='./model_dir', resume_download=True,
     max_workers=8)
 </code></pre>
+                        </div>
 
-                <p>Or you can download models and datasets by using huggingface cli.</p>
+                        <div class="code-card">
+                            <div class="code-card-header">
+                                <strong data-i18n="cardCliTitle">CLI Examples</strong>
+                                <span data-i18n="cardCliBadge">Models & Datasets</span>
+                            </div>
+                            <pre><code class="language-bash">pip install -U huggingface_hub
 
-                <pre><code class="language-bash">pip install -U huggingface_hub</code></pre>
+hf download openai-community/gpt2 --local-dir gpt2 --no-force-download
+hf download --repo-type dataset Salesforce/wikitext --local-dir wikitext --no-force-download</code></pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
-                <p>Download GPT2:</p>
-                <pre><code class="language-bash">huggingface-cli download --resume-download openai-community/gpt2 --local-dir gpt2</code></pre>
+            <div class="panel">
+                <div class="panel-body">
+                    <h2 class="section-title" data-i18n="notesTitle">Notes</h2>
+                    <p class="section-copy" data-i18n="notesIntro">
+                        A few operational details matter when you turn a local Olah instance into a mirror that other
+                        tools can depend on.
+                    </p>
 
-                <p>Download WikiText:</p>
-                <pre><code class="language-bash">huggingface-cli download --repo-type dataset --resume-download Salesforce/wikitext --local-dir wikitext</code></pre>
+                    <div class="hint-list">
+                        <div class="hint">
+                            <strong data-i18n="note1Title">Current mirror URL</strong>
+                            <p><code>{{scheme}}://{{netloc}}</code></p>
+                        </div>
+
+                        <div class="hint">
+                            <strong data-i18n="note2Title">Where cached content lives</strong>
+                            <p><span data-i18n="note2Prefix">Downloaded metadata and file blocks are stored under your configured</span> <code>repos-path</code>.</p>
+                        </div>
+
+                        <div class="hint">
+                            <strong data-i18n="note3Title">When host or port changes</strong>
+                            <p><span data-i18n="note3Prefix">Update</span> <code>mirror-netloc</code> <span data-i18n="note3Middle">and</span> <code>mirror-lfs-netloc</code> <span data-i18n="note3Suffix">so clients receive correct mirror URLs.</span></p>
+                        </div>
+
+                        <div class="hint">
+                            <strong data-i18n="note4Title">Compatible workflow</strong>
+                            <p><span data-i18n="note4Prefix">You do not need to change repo IDs or download commands. In most cases, setting</span> <code>HF_ENDPOINT</code> <span data-i18n="note4Suffix">is enough.</span></p>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
+    <script>
+        (function () {
+            var translations = {
+                en: {
+                    title: "Olah HuggingFace Mirror",
+                    navHome: "Home",
+                    navRepos: "Repositories",
+                    themeLight: "Light",
+                    themeDark: "Dark",
+                    heroEyebrow: "Olah Mirror Ready",
+                    heroTitle: "Welcome to Olah!",
+                    heroSubtitle: "Point your Hugging Face client at this mirror and keep your model and dataset downloads inside your own infrastructure. The endpoint below is the only thing you need to wire up first.",
+                    endpointLabel: "Mirror Endpoint",
+                    stepsTitle: "Get Started in Three Steps",
+                    stepsIntroPrefix: "Set",
+                    stepsIntroSuffix: "keep your existing download workflow, and let Olah proxy and cache resources as they are requested.",
+                    step1Title: "Set the mirror endpoint",
+                    step1Copy: "Use the current Olah server as your Hugging Face endpoint before you download anything.",
+                    step2Title: "Download with your usual tools",
+                    step2Copy: "Python, CLI, models, or datasets all keep the same workflow. Only the endpoint changes.",
+                    step3Title: "Reuse the cached mirror",
+                    step3Prefix: "Olah stores fetched metadata and file blocks under your configured",
+                    cardShellTitle: "Linux / macOS",
+                    cardShellBadge: "Shell",
+                    cardPowerShellTitle: "Windows PowerShell",
+                    cardPowerShellBadge: "PowerShell",
+                    cardPythonTitle: "Python Example",
+                    cardCliTitle: "CLI Examples",
+                    cardCliBadge: "Models & Datasets",
+                    notesTitle: "Notes",
+                    notesIntro: "A few operational details matter when you turn a local Olah instance into a mirror that other tools can depend on.",
+                    note1Title: "Current mirror URL",
+                    note2Title: "Where cached content lives",
+                    note2Prefix: "Downloaded metadata and file blocks are stored under your configured",
+                    note3Title: "When host or port changes",
+                    note3Prefix: "Update",
+                    note3Middle: "and",
+                    note3Suffix: "so clients receive correct mirror URLs.",
+                    note4Title: "Compatible workflow",
+                    note4Prefix: "You do not need to change repo IDs or download commands. In most cases, setting",
+                    note4Suffix: "is enough."
+                },
+                zh: {
+                    title: "Olah HuggingFace 镜像站",
+                    navHome: "首页",
+                    navRepos: "缓存仓库",
+                    themeLight: "浅色",
+                    themeDark: "深色",
+                    heroEyebrow: "Olah 镜像已就绪",
+                    heroTitle: "欢迎使用 Olah",
+                    heroSubtitle: "把你的 Hugging Face 客户端指向这个镜像站，就可以把模型和数据集下载留在你自己的基础设施内。你首先只需要配置下面这个地址。",
+                    endpointLabel: "镜像地址",
+                    stepsTitle: "三步开始使用",
+                    stepsIntroPrefix: "先设置",
+                    stepsIntroSuffix: "，其余下载流程保持不变，Olah 会在请求过程中代理并缓存资源。",
+                    step1Title: "设置镜像端点",
+                    step1Copy: "在下载任何内容之前，先把当前 Olah 服务设为 Hugging Face 端点。",
+                    step2Title: "继续使用你原来的工具",
+                    step2Copy: "无论是 Python、CLI、模型还是数据集，工作流都不用改，变化的只有端点地址。",
+                    step3Title: "复用本地缓存镜像",
+                    step3Prefix: "Olah 会把拉取到的元数据和文件块存放到你配置的",
+                    cardShellTitle: "Linux / macOS",
+                    cardShellBadge: "Shell",
+                    cardPowerShellTitle: "Windows PowerShell",
+                    cardPowerShellBadge: "PowerShell",
+                    cardPythonTitle: "Python 示例",
+                    cardCliTitle: "CLI 示例",
+                    cardCliBadge: "模型与数据集",
+                    notesTitle: "说明",
+                    notesIntro: "当你把本地 Olah 实例作为镜像站提供给其他工具时，下面这些运行细节值得注意。",
+                    note1Title: "当前镜像地址",
+                    note2Title: "缓存内容存放位置",
+                    note2Prefix: "下载得到的元数据和文件块会存放在你配置的",
+                    note3Title: "当主机或端口变化时",
+                    note3Prefix: "请同步更新",
+                    note3Middle: "和",
+                    note3Suffix: "，这样客户端才能拿到正确的镜像 URL。",
+                    note4Title: "兼容现有工作流",
+                    note4Prefix: "你通常不需要修改 repo ID 或下载命令。大多数情况下，只要设置",
+                    note4Suffix: "就够了。"
+                }
+            };
+
+            function getPreferredLanguage() {
+                var stored = localStorage.getItem("olah-lang");
+                if (stored === "en" || stored === "zh") {
+                    return stored;
+                }
+                return navigator.language && navigator.language.toLowerCase().indexOf("zh") === 0 ? "zh" : "en";
+            }
+
+            function getPreferredTheme() {
+                var stored = localStorage.getItem("olah-theme");
+                if (stored === "light" || stored === "dark") {
+                    return stored;
+                }
+                return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+            }
+
+            function setLanguage(lang) {
+                var copy = translations[lang] || translations.en;
+                document.documentElement.lang = lang;
+                document.title = copy.title;
+                localStorage.setItem("olah-lang", lang);
+                document.querySelectorAll("[data-i18n]").forEach(function (node) {
+                    var key = node.getAttribute("data-i18n");
+                    if (copy[key]) {
+                        node.textContent = copy[key];
+                    }
+                });
+                document.querySelectorAll("[data-lang-switch]").forEach(function (button) {
+                    button.classList.toggle("is-active", button.getAttribute("data-lang-switch") === lang);
+                });
+            }
+
+            function setTheme(theme) {
+                document.documentElement.setAttribute("data-theme", theme);
+                localStorage.setItem("olah-theme", theme);
+                document.querySelectorAll("[data-theme-switch]").forEach(function (button) {
+                    button.classList.toggle("is-active", button.getAttribute("data-theme-switch") === theme);
+                });
+            }
+
+            document.querySelectorAll("[data-lang-switch]").forEach(function (button) {
+                button.addEventListener("click", function () {
+                    setLanguage(button.getAttribute("data-lang-switch"));
+                });
+            });
+
+            document.querySelectorAll("[data-theme-switch]").forEach(function (button) {
+                button.addEventListener("click", function () {
+                    setTheme(button.getAttribute("data-theme-switch"));
+                });
+            });
+
+            setTheme(getPreferredTheme());
+            setLanguage(getPreferredLanguage());
+        })();
+    </script>
 </body>
 
 </html>

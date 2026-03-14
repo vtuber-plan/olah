@@ -1,74 +1,586 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
+    <title>Olah Mirror Repositories</title>
     <link rel="stylesheet" type="text/css"
         href="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.5.0/semantic.min.css">
     <style>
-        .ui.container {
-            margin-top: 20px;
+        :root {
+            --bg: #f4f1ea;
+            --panel: rgba(255, 252, 246, 0.92);
+            --panel-strong: #fffdf8;
+            --ink: #1f2a24;
+            --muted: #5d695f;
+            --line: rgba(31, 42, 36, 0.12);
+            --accent: #b85c38;
+            --accent-deep: #7f3b21;
+            --accent-soft: #f0d9cb;
+            --shadow: 0 24px 60px rgba(76, 53, 34, 0.12);
+            --radius-xl: 28px;
+            --radius-lg: 20px;
+            --radius-md: 14px;
         }
 
-        .ui.card {
-            margin-bottom: 20px;
+        html[data-theme="dark"] {
+            --bg: #111714;
+            --panel: rgba(25, 33, 29, 0.92);
+            --panel-strong: #1a221e;
+            --ink: #edf2ee;
+            --muted: #a8b5ac;
+            --line: rgba(237, 242, 238, 0.12);
+            --accent: #df875f;
+            --accent-deep: #f3b08d;
+            --accent-soft: rgba(223, 135, 95, 0.18);
+            --shadow: 0 28px 70px rgba(0, 0, 0, 0.34);
         }
 
-        .ui.header {
-            margin-top: 10px;
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: var(--bg);
+            color: var(--ink);
+            font-family: "Avenir Next", "Segoe UI", sans-serif;
+            transition: background 0.25s ease, color 0.25s ease;
         }
 
-        .ui.segment {
-            margin-bottom: 30px;
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: -1;
+            pointer-events: none;
+            background:
+                radial-gradient(circle at 0% 0%, rgba(184, 92, 56, 0.16), transparent 30%),
+                radial-gradient(circle at 88% 14%, rgba(127, 59, 33, 0.1), transparent 24%),
+                linear-gradient(180deg, #f7f2e9 0%, #f1ece3 58%, #ece6dd 100%);
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+        }
+
+        html[data-theme="dark"] body::before {
+            background:
+                radial-gradient(circle at 0% 0%, rgba(223, 135, 95, 0.14), transparent 28%),
+                radial-gradient(circle at 88% 14%, rgba(243, 176, 141, 0.08), transparent 22%),
+                linear-gradient(180deg, #121815 0%, #101612 58%, #0c110e 100%);
+        }
+
+        .page-container {
+            max-width: 1180px;
+            margin: 0 auto;
+            padding: 32px 20px 48px;
+        }
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 18px;
+            margin-bottom: 18px;
+        }
+
+        .topbar-links,
+        .topbar-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .nav-link,
+        .toggle-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.45rem;
+            padding: 0.75rem 1rem;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.52);
+            color: var(--ink);
+            font-size: 0.92rem;
+            font-weight: 700;
+            text-decoration: none;
+            transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+        }
+
+        .nav-link:hover,
+        .toggle-button:hover {
+            transform: translateY(-1px);
+            background: rgba(255, 255, 255, 0.78);
+        }
+
+        html[data-theme="dark"] .nav-link,
+        html[data-theme="dark"] .toggle-button {
+            background: rgba(20, 27, 24, 0.78);
+        }
+
+        .control-group {
+            display: inline-flex;
+            padding: 4px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.48);
+            box-shadow: 0 10px 22px rgba(31, 42, 36, 0.05);
+        }
+
+        html[data-theme="dark"] .control-group {
+            background: rgba(20, 27, 24, 0.82);
+        }
+
+        .toggle-button {
+            border: 0;
+            background: transparent;
+            box-shadow: none;
+        }
+
+        .toggle-button.is-active {
+            background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+            color: #fff;
+        }
+
+        .hero {
+            position: relative;
+            overflow: hidden;
+            padding: 36px;
+            background: linear-gradient(135deg, rgba(255, 253, 248, 0.98), rgba(247, 239, 229, 0.88));
+            border: 1px solid var(--line);
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow);
+        }
+
+        html[data-theme="dark"] .hero {
+            background:
+                linear-gradient(145deg, rgba(24, 31, 27, 0.96), rgba(15, 21, 18, 0.9)),
+                radial-gradient(circle at top left, rgba(223, 135, 95, 0.12), transparent 30%);
+            border-color: rgba(237, 242, 238, 0.08);
+        }
+
+        .hero::before {
+            content: "";
+            position: absolute;
+            right: -70px;
+            bottom: -95px;
+            width: 340px;
+            height: 340px;
+            background:
+                radial-gradient(circle at center,
+                    rgba(184, 92, 56, 0.24) 0%,
+                    rgba(184, 92, 56, 0.14) 24%,
+                    rgba(184, 92, 56, 0.05) 46%,
+                    rgba(184, 92, 56, 0) 72%);
+            filter: blur(10px);
+            opacity: 0.95;
+            pointer-events: none;
+        }
+
+        .hero::after {
+            content: "";
+            position: absolute;
+            right: 72px;
+            bottom: 34px;
+            width: 120px;
+            height: 120px;
+            background: radial-gradient(circle, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0));
+            filter: blur(12px);
+            pointer-events: none;
+        }
+
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.45rem 0.8rem;
+            border: 1px solid rgba(184, 92, 56, 0.18);
+            border-radius: 999px;
+            background: rgba(240, 217, 203, 0.55);
+            color: var(--accent-deep);
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        html[data-theme="dark"] .eyebrow {
+            border-color: rgba(223, 135, 95, 0.24);
+            background: rgba(223, 135, 95, 0.14);
+            color: #ffd8c4;
+        }
+
+        .hero h1 {
+            margin: 1rem 0 0.75rem;
+            font-size: 2.8rem;
+            line-height: 1.05;
+            color: var(--ink);
+        }
+
+        .hero p {
+            max-width: 760px;
+            margin: 0;
+            color: var(--muted);
+            font-size: 1.08rem;
+            line-height: 1.8;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 16px;
+            margin-top: 24px;
+        }
+
+        .stat-card {
+            padding: 18px 20px;
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-md);
+            box-shadow: 0 10px 25px rgba(31, 42, 36, 0.06);
+        }
+
+        .stat-label {
+            display: block;
+            margin-bottom: 0.35rem;
+            color: var(--muted);
+            font-size: 0.85rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 800;
+            color: var(--accent-deep);
+        }
+
+        .sections {
+            display: grid;
+            gap: 24px;
+            margin-top: 24px;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow);
+        }
+
+        .panel-body {
+            padding: 28px;
+        }
+
+        .section-heading {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 18px;
+        }
+
+        .section-heading h2 {
+            margin: 0;
+            font-size: 1.45rem;
+            color: var(--ink);
+        }
+
+        .count-badge {
+            padding: 0.45rem 0.8rem;
+            border-radius: 999px;
+            background: rgba(184, 92, 56, 0.12);
+            color: var(--accent-deep);
+            font-weight: 700;
+            font-size: 0.88rem;
+        }
+
+        .repo-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 12px;
+        }
+
+        .repo-tile {
+            display: block;
+            padding: 16px 18px;
+            border: 1px solid rgba(31, 42, 36, 0.08);
+            border-radius: var(--radius-md);
+            background: rgba(255, 255, 255, 0.72);
+            color: var(--ink);
+            font-weight: 700;
+            letter-spacing: 0.01em;
+            word-break: break-word;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+        }
+
+        html[data-theme="dark"] .stat-card,
+        html[data-theme="dark"] .repo-tile,
+        html[data-theme="dark"] .empty-state {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .repo-tile::before {
+            content: "";
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            margin-right: 10px;
+            border-radius: 999px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+            vertical-align: middle;
+        }
+
+        .empty-state {
+            padding: 20px;
+            border: 1px dashed rgba(31, 42, 36, 0.16);
+            border-radius: var(--radius-md);
+            background: rgba(255, 255, 255, 0.5);
+            color: var(--muted);
+            line-height: 1.75;
+        }
+
+        @media (max-width: 780px) {
+            .topbar {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .stats {
+                grid-template-columns: 1fr;
+            }
+
+            .hero {
+                padding: 28px 22px;
+            }
+
+            .hero h1 {
+                font-size: 2.15rem;
+            }
+
+            .panel-body {
+                padding: 22px 18px;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .topbar-links,
+            .topbar-actions {
+                width: 100%;
+                justify-content: space-between;
+            }
         }
     </style>
 </head>
 
 <body>
-    <div class="ui container">
-        <h1 class="ui header">Huggingface Mirror Repositories</h1>
-
-        <div class="ui segment">
-            <h2 class="ui header">Data Sets</h2>
-            <div class="ui divided items">
-                {% for dataset_repo in datasets_repos %}
-                <div class="item">
-                    <div class="content">
-                        <div class="header">{{ dataset_repo }}</div>
-                    </div>
+    <div class="page-container">
+        <div class="topbar">
+            <div class="topbar-links">
+                <a class="nav-link" href="/" data-i18n="navHome">Home</a>
+                <a class="nav-link" href="/repos" data-i18n="navRepos">Repositories</a>
+            </div>
+            <div class="topbar-actions">
+                <div class="control-group" aria-label="Language selector">
+                    <button type="button" class="toggle-button" data-lang-switch="en">EN</button>
+                    <button type="button" class="toggle-button" data-lang-switch="zh">中文</button>
                 </div>
-                {% endfor %}
+                <div class="control-group" aria-label="Theme selector">
+                    <button type="button" class="toggle-button" data-theme-switch="light" data-i18n="themeLight">Light</button>
+                    <button type="button" class="toggle-button" data-theme-switch="dark" data-i18n="themeDark">Dark</button>
+                </div>
             </div>
         </div>
 
-        <div class="ui segment">
-            <h2 class="ui header">Models</h2>
-            <div class="ui divided items">
-                {% for model_repo in models_repos %}
-                <div class="item">
-                    <div class="content">
-                        <div class="header">{{ model_repo }}</div>
-                    </div>
+        <div class="hero">
+            <div class="eyebrow" data-i18n="heroEyebrow">Mirror Inventory</div>
+            <h1 data-i18n="heroTitle">Cached Repositories</h1>
+            <p data-i18n="heroCopy">
+                This page shows the repositories Olah has already mirrored into the local cache. Use it as a quick
+                inventory view for datasets, models, and spaces that have been requested through the mirror.
+            </p>
+
+            <div class="stats">
+                <div class="stat-card">
+                    <span class="stat-label" data-i18n="datasetsLabel">Datasets</span>
+                    <span class="stat-value">{{ datasets_repos|length }}</span>
                 </div>
-                {% endfor %}
+                <div class="stat-card">
+                    <span class="stat-label" data-i18n="modelsLabel">Models</span>
+                    <span class="stat-value">{{ models_repos|length }}</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label" data-i18n="spacesLabel">Spaces</span>
+                    <span class="stat-value">{{ spaces_repos|length }}</span>
+                </div>
             </div>
         </div>
 
-        <div class="ui segment">
-            <h2 class="ui header">Spaces</h2>
-            <div class="ui divided items">
-                {% for space_repo in spaces_repos %}
-                <div class="item">
-                    <div class="content">
-                        <div class="header">{{ space_repo }}</div>
+        <div class="sections">
+            <div class="panel">
+                <div class="panel-body">
+                    <div class="section-heading">
+                        <h2 data-i18n="datasetsTitle">Data Sets</h2>
+                        <span class="count-badge" data-i18n-template="cachedCount" data-count="{{ datasets_repos|length }}">{{ datasets_repos|length }} cached</span>
                     </div>
+                    {% if datasets_repos %}
+                    <div class="repo-grid">
+                        {% for dataset_repo in datasets_repos %}
+                        <div class="repo-tile">{{ dataset_repo }}</div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="empty-state" data-i18n="datasetsEmpty">No dataset repositories have been cached yet.</div>
+                    {% endif %}
                 </div>
-                {% endfor %}
+            </div>
+
+            <div class="panel">
+                <div class="panel-body">
+                    <div class="section-heading">
+                        <h2 data-i18n="modelsTitle">Models</h2>
+                        <span class="count-badge" data-i18n-template="cachedCount" data-count="{{ models_repos|length }}">{{ models_repos|length }} cached</span>
+                    </div>
+                    {% if models_repos %}
+                    <div class="repo-grid">
+                        {% for model_repo in models_repos %}
+                        <div class="repo-tile">{{ model_repo }}</div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="empty-state" data-i18n="modelsEmpty">No model repositories have been cached yet.</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-body">
+                    <div class="section-heading">
+                        <h2 data-i18n="spacesTitle">Spaces</h2>
+                        <span class="count-badge" data-i18n-template="cachedCount" data-count="{{ spaces_repos|length }}">{{ spaces_repos|length }} cached</span>
+                    </div>
+                    {% if spaces_repos %}
+                    <div class="repo-grid">
+                        {% for space_repo in spaces_repos %}
+                        <div class="repo-tile">{{ space_repo }}</div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="empty-state" data-i18n="spacesEmpty">No space repositories have been cached yet.</div>
+                    {% endif %}
+                </div>
             </div>
         </div>
     </div>
     <script src="https://code.jquery.com/jquery-3.1.1.min.js"
         integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8=" crossorigin="anonymous"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.5.0/semantic.min.js"></script>
+    <script>
+        (function () {
+            var translations = {
+                en: {
+                    title: "Olah Mirror Repositories",
+                    navHome: "Home",
+                    navRepos: "Repositories",
+                    themeLight: "Light",
+                    themeDark: "Dark",
+                    heroEyebrow: "Mirror Inventory",
+                    heroTitle: "Cached Repositories",
+                    heroCopy: "This page shows the repositories Olah has already mirrored into the local cache. Use it as a quick inventory view for datasets, models, and spaces that have been requested through the mirror.",
+                    datasetsLabel: "Datasets",
+                    modelsLabel: "Models",
+                    spacesLabel: "Spaces",
+                    datasetsTitle: "Data Sets",
+                    modelsTitle: "Models",
+                    spacesTitle: "Spaces",
+                    datasetsEmpty: "No dataset repositories have been cached yet.",
+                    modelsEmpty: "No model repositories have been cached yet.",
+                    spacesEmpty: "No space repositories have been cached yet.",
+                    cachedCount: "{count} cached"
+                },
+                zh: {
+                    title: "Olah 镜像缓存仓库",
+                    navHome: "首页",
+                    navRepos: "缓存仓库",
+                    themeLight: "浅色",
+                    themeDark: "深色",
+                    heroEyebrow: "镜像库存",
+                    heroTitle: "已缓存仓库",
+                    heroCopy: "这个页面展示了 Olah 已经镜像到本地缓存中的仓库，你可以快速查看已经通过镜像请求过的数据集、模型和 Spaces。",
+                    datasetsLabel: "数据集",
+                    modelsLabel: "模型",
+                    spacesLabel: "Spaces",
+                    datasetsTitle: "数据集",
+                    modelsTitle: "模型",
+                    spacesTitle: "Spaces",
+                    datasetsEmpty: "当前还没有缓存任何数据集仓库。",
+                    modelsEmpty: "当前还没有缓存任何模型仓库。",
+                    spacesEmpty: "当前还没有缓存任何 Space 仓库。",
+                    cachedCount: "已缓存 {count} 个"
+                }
+            };
+
+            function getPreferredLanguage() {
+                var stored = localStorage.getItem("olah-lang");
+                if (stored === "en" || stored === "zh") {
+                    return stored;
+                }
+                return navigator.language && navigator.language.toLowerCase().indexOf("zh") === 0 ? "zh" : "en";
+            }
+
+            function getPreferredTheme() {
+                var stored = localStorage.getItem("olah-theme");
+                if (stored === "light" || stored === "dark") {
+                    return stored;
+                }
+                return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+            }
+
+            function setLanguage(lang) {
+                var copy = translations[lang] || translations.en;
+                document.documentElement.lang = lang;
+                document.title = copy.title;
+                localStorage.setItem("olah-lang", lang);
+                document.querySelectorAll("[data-i18n]").forEach(function (node) {
+                    var key = node.getAttribute("data-i18n");
+                    if (copy[key]) {
+                        node.textContent = copy[key];
+                    }
+                });
+                document.querySelectorAll("[data-i18n-template]").forEach(function (node) {
+                    var key = node.getAttribute("data-i18n-template");
+                    var count = node.getAttribute("data-count");
+                    if (copy[key]) {
+                        node.textContent = copy[key].replace("{count}", count);
+                    }
+                });
+                document.querySelectorAll("[data-lang-switch]").forEach(function (button) {
+                    button.classList.toggle("is-active", button.getAttribute("data-lang-switch") === lang);
+                });
+            }
+
+            function setTheme(theme) {
+                document.documentElement.setAttribute("data-theme", theme);
+                localStorage.setItem("olah-theme", theme);
+                document.querySelectorAll("[data-theme-switch]").forEach(function (button) {
+                    button.classList.toggle("is-active", button.getAttribute("data-theme-switch") === theme);
+                });
+            }
+
+            document.querySelectorAll("[data-lang-switch]").forEach(function (button) {
+                button.addEventListener("click", function () {
+                    setLanguage(button.getAttribute("data-lang-switch"));
+                });
+            });
+
+            document.querySelectorAll("[data-theme-switch]").forEach(function (button) {
+                button.addEventListener("click", function () {
+                    setTheme(button.getAttribute("data-theme-switch"));
+                });
+            });
+
+            setTheme(getPreferredTheme());
+            setLanguage(getPreferredLanguage());
+        })();
+    </script>
 </body>
 
 </html>
