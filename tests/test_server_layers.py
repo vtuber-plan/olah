@@ -418,3 +418,39 @@ async def test_cdn_proxy_common_checks_visibility_before_generator(monkeypatch):
     )
 
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_check_connection_treats_redirects_as_reachable(monkeypatch):
+    import importlib
+
+    server_module = importlib.import_module("olah.server")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            captured["follow_redirects"] = kwargs.get("follow_redirects")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, timeout):
+            captured["request"] = (method, url, timeout)
+            return SimpleNamespace(status_code=307)
+
+    monkeypatch.setattr(server_module.httpx, "AsyncClient", FakeClient)
+
+    ok = await server_module.check_connection(
+        "https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/.gitattributes"
+    )
+
+    assert ok is True
+    assert captured["follow_redirects"] is True
+    assert captured["request"] == (
+        "HEAD",
+        "https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/.gitattributes",
+        10,
+    )

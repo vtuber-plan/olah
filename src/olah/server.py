@@ -67,13 +67,13 @@ logger = None
 
 async def check_connection(url: str) -> bool:
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.request(
                 method="HEAD",
                 url=url,
                 timeout=10,
             )
-        return response.status_code == 200
+        return 200 <= response.status_code < 400
     except httpx.TimeoutException:
         return False
 
