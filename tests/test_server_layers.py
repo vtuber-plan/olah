@@ -49,7 +49,7 @@ if "fastapi_utils.tasks" not in sys.modules:
     sys.modules["fastapi_utils"] = fastapi_utils_module
     sys.modules["fastapi_utils.tasks"] = fastapi_utils_tasks
 
-from olah import server_access, server_mirror, server_responses, server_upstream
+from olah import errors, server_access, server_mirror, server_responses, server_upstream
 from olah.proxy.result import ProxyResult, single_chunk_body
 
 
@@ -78,6 +78,27 @@ async def test_ensure_repo_access_validates_repo_type_and_rules(monkeypatch):
         server_access.build_repo_ref("unknown", "team", "demo"),
     )
     assert invalid.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_ensure_repo_visibility_checks_upstream_visibility_with_auth(monkeypatch):
+    repo = server_access.build_repo_ref("models", "team", "demo")
+    captured = {}
+
+    async def fake_check_proxy_rules_hf(*args, **kwargs):
+        return True
+
+    async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        captured["call"] = (repo_type, org, repo_name, commit, authorization)
+        return False
+
+    monkeypatch.setattr(server_access, "check_proxy_rules_hf", fake_check_proxy_rules_hf)
+    monkeypatch.setattr(server_access, "check_commit_hf", fake_check_commit_hf)
+
+    denied = await server_access.ensure_repo_visibility(_make_app(), repo, "Bearer secret")
+
+    assert denied.status_code == 401
+    assert captured["call"] == ("models", "team", "demo", None, "Bearer secret")
 
 
 def test_parse_repo_helpers_cover_compact_and_default_model_routes():
@@ -140,6 +161,35 @@ async def test_resolve_requested_commit_centralizes_repo_and_revision_errors(mon
         missing_commit_response="repo_not_found",
     )
     assert repo_error.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_resolve_requested_commit_skips_duplicate_repo_check_after_visibility_pass(monkeypatch):
+    app = _make_app()
+    repo = server_access.build_repo_ref("models", "team", "demo")
+    calls = []
+
+    async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        calls.append(commit)
+        return True
+
+    async def fake_get_commit_hf(*args, **kwargs):
+        return "abc123"
+
+    monkeypatch.setattr(server_upstream, "check_commit_hf", fake_check_commit_hf)
+    monkeypatch.setattr(server_upstream, "get_commit_hf", fake_get_commit_hf)
+
+    resolved, error = await server_upstream.resolve_requested_commit(
+        app,
+        repo,
+        "main",
+        "Bearer t",
+        repo_visible=True,
+    )
+
+    assert error is None
+    assert resolved == server_upstream.ResolvedCommit(requested="main", resolved="abc123")
+    assert calls == ["main"]
 
 
 @pytest.mark.asyncio
@@ -212,3 +262,28 @@ def test_main_and_cli_share_run_server(monkeypatch):
     server_module.cli()
 
     assert calls == ["init", ("run_server", args), "init", ("run_server", args)]
+
+
+@pytest.mark.asyncio
+async def test_meta_proxy_common_checks_visibility_before_local_mirror(monkeypatch):
+    import importlib
+
+    server_module = importlib.import_module("olah.server")
+    server_module.app.state.app_settings = SimpleNamespace(config=_make_app().state.app_settings.config)
+
+    async def fake_ensure_repo_visibility(app, repo, authorization):
+        return errors.error_repo_not_found()
+
+    monkeypatch.setattr(server_module, "ensure_repo_visibility", fake_ensure_repo_visibility)
+    monkeypatch.setattr(server_module, "load_local_mirror_payload", pytest.fail)
+
+    response = await server_module.meta_proxy_common(
+        repo_type="models",
+        org="team",
+        repo="demo",
+        commit="main",
+        method="get",
+        authorization=None,
+    )
+
+    assert response.status_code == 401

@@ -6,6 +6,7 @@ from fastapi.responses import Response
 from olah.constants import REPO_TYPES_MAPPING
 from olah.errors import error_page_not_found, error_repo_not_found
 from olah.utils.repo_utils import get_org_repo, parse_org_repo
+from olah.utils.repo_utils import check_commit_hf
 from olah.utils.rule_utils import check_proxy_rules_hf
 
 RepoType = Literal["models", "datasets", "spaces"]
@@ -43,5 +44,23 @@ async def ensure_repo_access(app, repo: RepoRef) -> Optional[Response]:
     if repo.repo_type not in REPO_TYPES_MAPPING:
         return error_page_not_found()
     if not await check_proxy_rules_hf(app, repo.repo_type, repo.org, repo.repo):
+        return error_repo_not_found()
+    return None
+
+
+async def ensure_repo_visibility(app, repo: RepoRef, authorization: Optional[str]) -> Optional[Response]:
+    access_error = await ensure_repo_access(app, repo)
+    if access_error is not None:
+        return access_error
+    if app.state.app_settings.config.offline:
+        return None
+    if not await check_commit_hf(
+        app,
+        repo.repo_type,
+        repo.org,
+        repo.repo,
+        commit=None,
+        authorization=authorization,
+    ):
         return error_repo_not_found()
     return None

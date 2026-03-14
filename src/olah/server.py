@@ -58,7 +58,7 @@ from olah.errors import error_repo_not_found, error_page_not_found, error_revisi
 from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
 from olah.proxy.meta import meta_generator
-from olah.server_access import build_repo_ref, ensure_repo_access, parse_repo_ref, parse_resolve_repo_ref
+from olah.server_access import build_repo_ref, ensure_repo_visibility, parse_repo_ref, parse_resolve_repo_ref
 from olah.server_mirror import load_local_mirror_payload
 from olah.server_responses import build_streaming_response
 from olah.server_upstream import get_latest_commit, prepare_revision_generator, resolve_requested_commit
@@ -193,7 +193,7 @@ async def custom_404_handler(_, __):
 # ======================
 async def meta_proxy_common(repo_type: Literal["models", "datasets", "spaces"], org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
     repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_access(app, repo_ref)
+    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
     if access_error is not None:
         return access_error
 
@@ -212,6 +212,7 @@ async def meta_proxy_common(repo_type: Literal["models", "datasets", "spaces"], 
             repo_ref,
             commit,
             authorization,
+            repo_visible=True,
             missing_commit_response="revision_not_found",
         )
         if commit_error is not None:
@@ -321,7 +322,7 @@ async def tree_proxy_common(
 ) -> Response:
     path = clean_path(path)
     repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_access(app, repo_ref)
+    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
     if access_error is not None:
         return access_error
 
@@ -340,6 +341,7 @@ async def tree_proxy_common(
             repo_ref,
             commit,
             authorization,
+            repo_visible=True,
             missing_commit_response="revision_not_found",
         )
         if commit_error is not None:
@@ -424,7 +426,7 @@ async def tree_proxy_commit(
 async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: str, paths: List[str], method: str, authorization: Optional[str]) -> Response:
     paths = [clean_path(path) for path in paths]
     repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_access(app, repo_ref)
+    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
     if access_error is not None:
         return access_error
 
@@ -443,6 +445,7 @@ async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: st
             repo_ref,
             commit,
             authorization,
+            repo_visible=True,
             missing_commit_response="revision_not_found",
         )
         if commit_error is not None:
@@ -517,7 +520,7 @@ async def pathsinfo_proxy_commit(
 # Git Commits
 async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
     repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_access(app, repo_ref)
+    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
     if access_error is not None:
         return access_error
 
@@ -536,6 +539,7 @@ async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str,
             repo_ref,
             commit,
             authorization,
+            repo_visible=True,
             missing_commit_response="revision_not_found",
         )
         if commit_error is not None:
@@ -632,7 +636,7 @@ async def file_head_common(
     repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
 ) -> Response:
     repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_access(app, repo_ref)
+    access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
     if access_error is not None:
         return access_error
 
@@ -652,6 +656,7 @@ async def file_head_common(
             repo_ref,
             commit,
             request.headers.get("authorization", None),
+            repo_visible=True,
             missing_commit_response="repo_not_found",
         )
         if commit_error is not None:
@@ -728,7 +733,7 @@ async def cdn_proxy_common(
     method: Literal["HEAD", "GET"],
 ) -> Response:
     repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_access(app, repo_ref)
+    access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
     if access_error is not None:
         return access_error
 
@@ -770,7 +775,7 @@ async def file_get_common(
     repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
 ) -> Response:
     repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_access(app, repo_ref)
+    access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
     if access_error is not None:
         return access_error
 
@@ -789,6 +794,7 @@ async def file_get_common(
             repo_ref,
             commit,
             request.headers.get("authorization", None),
+            repo_visible=True,
             missing_commit_response="repo_not_found",
         )
         if commit_error is not None:
