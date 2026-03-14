@@ -212,7 +212,8 @@ async def test_file_realtime_stream_builds_headers_and_streams_get_chunks(monkey
     )
     body = [chunk async for chunk in result.body]
 
-    assert result.status_code == 200
+    assert result.status_code == 206
+    assert result.headers["accept-ranges"] == "bytes"
     assert result.headers["content-length"] == "4"
     assert result.headers["content-range"] == "bytes 2-5/10"
     assert result.headers["etag"] == '"etag-123"'
@@ -261,7 +262,8 @@ async def test_file_realtime_stream_uses_head_stream_for_head_requests(monkeypat
 
     assert result.status_code == 200
     assert result.headers["content-length"] == "3"
-    assert result.headers["content-range"] == "bytes 0-2/3"
+    assert result.headers["accept-ranges"] == "bytes"
+    assert "content-range" not in result.headers
     assert result.headers["etag"] == '"etag-head"'
     assert body == [b"ignored-head-body"]
 
@@ -301,6 +303,7 @@ async def test_file_realtime_stream_without_repo_context_uses_remote_metadata(mo
     body = [chunk async for chunk in result.body]
 
     assert result.status_code == 200
+    assert result.headers["accept-ranges"] == "bytes"
     assert result.headers["content-length"] == "6"
     assert result.headers["etag"] == '"cdn-etag"'
     assert body == [b"hello!"]
@@ -358,6 +361,106 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
     assert captured[0].get("repo_type") is None
     assert captured[1]["url"] == "http://mirror.example/team/demo/hash.bin"
     assert captured[1].get("repo_type") is None
+
+
+@pytest.mark.asyncio
+async def test_file_realtime_stream_builds_multipart_response_for_multiple_ranges(monkeypatch, tmp_path):
+    captured = []
+
+    async def fake_pathsinfo_generator(*args, **kwargs):
+        return ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body(json.dumps([{"size": 8}])),
+        )
+
+    async def fake_resource_etag(*args, **kwargs):
+        return '"etag-multi"'
+
+    async def fake_file_chunk_get(**kwargs):
+        captured.append(kwargs["headers"]["range"])
+        if kwargs["headers"]["range"] == "bytes=0-1":
+            yield b"AB"
+        elif kwargs["headers"]["range"] == "bytes=4-5":
+            yield b"EF"
+        else:
+            raise AssertionError(f"unexpected range {kwargs['headers']['range']}")
+
+    monkeypatch.setattr(proxy_files, "pathsinfo_generator", fake_pathsinfo_generator)
+    monkeypatch.setattr(proxy_files, "_resource_etag", fake_resource_etag)
+    monkeypatch.setattr(proxy_files, "_file_chunk_get", fake_file_chunk_get)
+
+    result = await proxy_files._file_realtime_stream(
+        app=_make_app(tmp_path),
+        repo_type="models",
+        org="team",
+        repo="demo",
+        file_path="file.bin",
+        save_path=str(tmp_path / "save"),
+        head_path=str(tmp_path / "head"),
+        url="https://mirror.example/file.bin",
+        request=_make_request("GET", headers={"range": "bytes=0-1,4-5", "host": "mirror.example"}),
+        method="GET",
+        allow_cache=False,
+        commit="abc123",
+    )
+    body_chunks = [
+        chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+        async for chunk in result.body
+    ]
+    body = b"".join(body_chunks)
+
+    assert result.status_code == 206
+    assert result.headers["accept-ranges"] == "bytes"
+    assert result.headers["content-type"].startswith('multipart/byteranges; boundary="')
+    assert "content-range" not in result.headers
+    boundary = result.headers["content-type"].split('boundary="', 1)[1][:-1]
+    assert body.startswith(f"--{boundary}\r\n".encode("ascii"))
+    assert b"Content-Range: bytes 0-1/8" in body
+    assert b"Content-Range: bytes 4-5/8" in body
+    assert b"AB" in body
+    assert b"EF" in body
+    assert body.endswith(f"--{boundary}--\r\n".encode("ascii"))
+    assert int(result.headers["content-length"]) == len(body)
+    assert captured == ["bytes=0-1", "bytes=4-5"]
+
+
+@pytest.mark.asyncio
+async def test_file_realtime_stream_rejects_unsatisfiable_ranges(monkeypatch, tmp_path):
+    async def fake_pathsinfo_generator(*args, **kwargs):
+        return ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body(json.dumps([{"size": 3}])),
+        )
+
+    async def fake_resource_etag(*args, **kwargs):
+        return '"etag-416"'
+
+    monkeypatch.setattr(proxy_files, "pathsinfo_generator", fake_pathsinfo_generator)
+    monkeypatch.setattr(proxy_files, "_resource_etag", fake_resource_etag)
+    monkeypatch.setattr(proxy_files, "_file_chunk_get", pytest.fail)
+
+    result = await proxy_files._file_realtime_stream(
+        app=_make_app(tmp_path),
+        repo_type="models",
+        org="team",
+        repo="demo",
+        file_path="file.bin",
+        save_path=str(tmp_path / "save"),
+        head_path=str(tmp_path / "head"),
+        url="https://mirror.example/file.bin",
+        request=_make_request("GET", headers={"range": "bytes=5-9", "host": "mirror.example"}),
+        method="GET",
+        allow_cache=False,
+        commit="abc123",
+    )
+    body = [chunk async for chunk in result.body]
+
+    assert result.status_code == 416
+    assert result.headers["accept-ranges"] == "bytes"
+    assert result.headers["content-range"] == "bytes */3"
+    assert body == [b""]
 
 
 @pytest.mark.asyncio

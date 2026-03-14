@@ -14,6 +14,7 @@ from fastapi import FastAPI
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
+from olah.errors import error_proxy_invalid_data
 from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
@@ -69,9 +70,9 @@ async def pathsinfo_generator(
     method: str,
     authorization: Optional[str],
 ) -> ProxyResult:
-    headers = {}
+    request_headers = {}
     if authorization is not None:
-        headers["authorization"] = authorization
+        request_headers["authorization"] = authorization
 
     org_repo = get_org_repo(org, repo)
     # save
@@ -95,18 +96,35 @@ async def pathsinfo_generator(
         )
         # proxy
         if use_cache and not override_cache:
-            status, headers, content = await _pathsinfo_cache(save_path)
+            status, response_headers, content = await _pathsinfo_cache(save_path)
         else:
-            status, headers, content = await _pathsinfo_proxy(
-                app, headers, pathsinfo_url, method, path, allow_cache, save_path
+            status, response_headers, content = await _pathsinfo_proxy(
+                app, request_headers, pathsinfo_url, method, path, allow_cache, save_path
             )
 
+        if status != 200:
+            return ProxyResult(
+                status_code=status,
+                headers=dict(response_headers),
+                body=single_chunk_body(content),
+            )
         try:
             content_json = json.loads(content)
         except json.JSONDecodeError:
-            continue
-        if status == 200 and isinstance(content_json, list):
-            final_content.extend(content_json)
+            invalid = error_proxy_invalid_data()
+            return ProxyResult(
+                status_code=invalid.status_code,
+                headers=invalid.headers,
+                body=single_chunk_body(invalid.body),
+            )
+        if not isinstance(content_json, list):
+            invalid = error_proxy_invalid_data()
+            return ProxyResult(
+                status_code=invalid.status_code,
+                headers=invalid.headers,
+                body=single_chunk_body(invalid.body),
+            )
+        final_content.extend(content_json)
 
     return ProxyResult(
         status_code=200,

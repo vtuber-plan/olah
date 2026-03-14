@@ -105,6 +105,34 @@ def get_request_ranges(
     return unit, all_ranges, suffix
 
 
+def _single_range_header(start_pos: int, end_pos: int, file_size: int) -> str:
+    return f"bytes {start_pos}-{end_pos - 1}/{file_size}"
+
+
+def _multipart_boundary(etag: Optional[str], all_ranges: List[Tuple[int, int]], file_size: int) -> str:
+    boundary_seed = f"{etag or ''}:{file_size}:{all_ranges}".encode("utf-8")
+    return hashlib.sha256(boundary_seed).hexdigest()[:32]
+
+
+def _multipart_part_header(boundary: str, start_pos: int, end_pos: int, file_size: int) -> bytes:
+    return (
+        f"--{boundary}\r\n"
+        f"Content-Type: application/octet-stream\r\n"
+        f"Content-Range: {_single_range_header(start_pos, end_pos, file_size)}\r\n"
+        "\r\n"
+    ).encode("ascii")
+
+
+def _multipart_content_length(boundary: str, all_ranges: List[Tuple[int, int]], file_size: int) -> int:
+    total = 0
+    for start_pos, end_pos in all_ranges:
+        total += len(_multipart_part_header(boundary, start_pos, end_pos, file_size))
+        total += end_pos - start_pos
+        total += len(b"\r\n")
+    total += len(f"--{boundary}--\r\n".encode("ascii"))
+    return total
+
+
 async def _get_file_range_from_cache(
     cache_file: OlahCache, start_pos: int, end_pos: int
 ):
@@ -281,6 +309,39 @@ async def _file_chunk_get(
         cache_file.close()
 
 
+async def _stream_single_range(
+    app,
+    save_path: str,
+    head_path: str,
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    allow_cache: bool,
+    file_size: int,
+    requested_range: Optional[Tuple[int, int]] = None,
+) -> AsyncIterator[bytes]:
+    range_headers = dict(headers)
+    if requested_range is None:
+        range_headers.pop("range", None)
+    else:
+        start_pos, end_pos = requested_range
+        range_headers["range"] = f"bytes={start_pos}-{end_pos - 1}"
+
+    async for chunk in _file_chunk_get(
+        app=app,
+        save_path=save_path,
+        head_path=head_path,
+        client=client,
+        method=method,
+        url=url,
+        headers=range_headers,
+        allow_cache=allow_cache,
+        file_size=file_size,
+    ):
+        yield chunk
+
+
 async def _file_chunk_head(
     app,
     save_path: str,
@@ -429,6 +490,8 @@ async def _file_realtime_stream(
             method="post",
             authorization=authorization,
         )
+        if generator.status_code != 200:
+            return generator
         content = ""
         async for chunk in generator.body:
             content = chunk
@@ -466,14 +529,9 @@ async def _file_realtime_stream(
         etag = metadata.etag
 
     response_headers = {}
-    # Create content-length
-    _, all_ranges, suffix = get_request_ranges(file_size, request_headers.get("range"))
-    
-    response_headers["content-length"] = str(sum(r[1] - r[0] for r in all_ranges))
-    if suffix is not None:
-        response_headers["content-range"] = f"bytes -{suffix}/{file_size}"
-    elif len(all_ranges) != 0:
-        response_headers["content-range"] = f"bytes {','.join(f'{r[0]}-{r[1]-1}' for r in all_ranges)}/{file_size}"
+    range_header = request_headers.get("range")
+    _, all_ranges, _ = get_request_ranges(file_size, range_header)
+    response_headers["accept-ranges"] = "bytes"
     # Commit info
     if commit is not None:
         response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
@@ -482,21 +540,77 @@ async def _file_realtime_stream(
     if etag is None:
         return await error_result(error_proxy_timeout())
 
+    if range_header is None:
+        status_code = 200
+        response_headers["content-length"] = str(file_size)
+    elif len(all_ranges) == 0:
+        response_headers["content-range"] = f"bytes */{file_size}"
+        return ProxyResult(
+            status_code=416,
+            headers=response_headers,
+            body=single_chunk_body(b""),
+        )
+    elif len(all_ranges) == 1:
+        start_pos, end_pos = all_ranges[0]
+        status_code = 206
+        response_headers["content-length"] = str(end_pos - start_pos)
+        response_headers["content-range"] = _single_range_header(start_pos, end_pos, file_size)
+    else:
+        boundary = _multipart_boundary(etag, all_ranges, file_size)
+        status_code = 206
+        response_headers["content-type"] = f'multipart/byteranges; boundary="{boundary}"'
+        response_headers["content-length"] = str(
+            _multipart_content_length(boundary, all_ranges, file_size)
+        )
+
     async def body_iter() -> AsyncIterator[bytes]:
         async with httpx.AsyncClient() as client:
             if method.lower() == "get":
-                async for each_chunk in _file_chunk_get(
-                    app=app,
-                    save_path=save_path,
-                    head_path=head_path,
-                    client=client,
-                    method=method,
-                    url=hf_url,
-                    headers=request_headers,
-                    allow_cache=allow_cache,
-                    file_size=file_size,
-                ):
-                    yield each_chunk
+                if range_header is None:
+                    async for each_chunk in _stream_single_range(
+                        app=app,
+                        save_path=save_path,
+                        head_path=head_path,
+                        client=client,
+                        method=method,
+                        url=hf_url,
+                        headers=request_headers,
+                        allow_cache=allow_cache,
+                        file_size=file_size,
+                    ):
+                        yield each_chunk
+                elif len(all_ranges) == 1:
+                    async for each_chunk in _stream_single_range(
+                        app=app,
+                        save_path=save_path,
+                        head_path=head_path,
+                        client=client,
+                        method=method,
+                        url=hf_url,
+                        headers=request_headers,
+                        allow_cache=allow_cache,
+                        file_size=file_size,
+                        requested_range=all_ranges[0],
+                    ):
+                        yield each_chunk
+                else:
+                    for start_pos, end_pos in all_ranges:
+                        yield _multipart_part_header(boundary, start_pos, end_pos, file_size)
+                        async for each_chunk in _stream_single_range(
+                            app=app,
+                            save_path=save_path,
+                            head_path=head_path,
+                            client=client,
+                            method=method,
+                            url=hf_url,
+                            headers=request_headers,
+                            allow_cache=allow_cache,
+                            file_size=file_size,
+                            requested_range=(start_pos, end_pos),
+                        ):
+                            yield each_chunk
+                        yield b"\r\n"
+                    yield f"--{boundary}--\r\n".encode("ascii")
             elif method.lower() == "head":
                 async for each_chunk in _file_chunk_head(
                     app=app,
@@ -513,7 +627,7 @@ async def _file_realtime_stream(
             else:
                 raise Exception(f"Unsupported method: {method}")
 
-    return ProxyResult(status_code=200, headers=response_headers, body=body_iter())
+    return ProxyResult(status_code=status_code, headers=response_headers, body=body_iter())
 
 
 async def file_get_generator(

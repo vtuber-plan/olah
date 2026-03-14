@@ -71,6 +71,7 @@ async def test_pathsinfo_generator_prefers_cache_and_aggregates_valid_list_paylo
     cache_root = tmp_path / "repos" / "api" / "models" / "team" / "demo" / "paths-info" / "main"
     (cache_root / "a.txt").mkdir(parents=True)
     ((cache_root / "a.txt") / "paths-info_post.json").write_text("cached", encoding="utf-8")
+    captured = []
 
     async def fake_check_cache_rules_hf(*args, **kwargs):
         return True
@@ -79,6 +80,7 @@ async def test_pathsinfo_generator_prefers_cache_and_aggregates_valid_list_paylo
         return 200, {"content-type": "application/json"}, b'[{"path": "a.txt", "size": 1}]'
 
     async def fake_pathsinfo_proxy(*args, **kwargs):
+        captured.append((args, kwargs))
         return 200, {"content-type": "application/json"}, b'[{"path": "b.txt", "size": 2}]'
 
     monkeypatch.setattr(pathsinfo, "check_cache_rules_hf", fake_check_cache_rules_hf)
@@ -102,26 +104,18 @@ async def test_pathsinfo_generator_prefers_cache_and_aggregates_valid_list_paylo
     assert result.status_code == 200
     assert result.headers == {"content-type": "application/json"}
     assert content == [{"path": "a.txt", "size": 1}, {"path": "b.txt", "size": 2}]
+    assert captured[0][0][1] == {"authorization": "Bearer t"}
 
 
 @pytest.mark.asyncio
-async def test_pathsinfo_generator_skips_invalid_json_and_non_200_responses(monkeypatch, tmp_path):
+async def test_pathsinfo_generator_propagates_first_non_200_response(monkeypatch, tmp_path):
     app = _make_app(tmp_path)
 
     async def fake_check_cache_rules_hf(*args, **kwargs):
         return False
 
-    responses = iter(
-        [
-            (200, {"content-type": "application/json"}, b"not-json"),
-            (500, {"content-type": "application/json"}, b'[{"path": "ignored"}]'),
-            (200, {"content-type": "application/json"}, b'{"not": "a list"}'),
-            (200, {"content-type": "application/json"}, b'[{"path": "ok.txt", "size": 3}]'),
-        ]
-    )
-
     async def fake_pathsinfo_proxy(*args, **kwargs):
-        return next(responses)
+        return 500, {"x-error": "upstream"}, b"boom"
 
     monkeypatch.setattr(pathsinfo, "check_cache_rules_hf", fake_check_cache_rules_hf)
     monkeypatch.setattr(pathsinfo, "_pathsinfo_proxy", fake_pathsinfo_proxy)
@@ -138,4 +132,59 @@ async def test_pathsinfo_generator_skips_invalid_json_and_non_200_responses(monk
         authorization=None,
     )
     body = [chunk async for chunk in result.body]
-    assert json.loads(body[0]) == [{"path": "ok.txt", "size": 3}]
+    assert result.status_code == 500
+    assert result.headers == {"x-error": "upstream"}
+    assert body == [b"boom"]
+
+
+@pytest.mark.asyncio
+async def test_pathsinfo_generator_rejects_invalid_json_and_non_list_payloads(monkeypatch, tmp_path):
+    app = _make_app(tmp_path)
+
+    async def fake_check_cache_rules_hf(*args, **kwargs):
+        return False
+
+    responses = iter(
+        [
+            (200, {"content-type": "application/json"}, b"not-json"),
+            (200, {"content-type": "application/json"}, b'{"not": "a list"}'),
+        ]
+    )
+
+    async def fake_pathsinfo_proxy(*args, **kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(pathsinfo, "check_cache_rules_hf", fake_check_cache_rules_hf)
+    monkeypatch.setattr(pathsinfo, "_pathsinfo_proxy", fake_pathsinfo_proxy)
+
+    invalid_json = await pathsinfo.pathsinfo_generator(
+        app=app,
+        repo_type="models",
+        org="team",
+        repo="demo",
+        commit="main",
+        paths=["a"],
+        override_cache=True,
+        method="post",
+        authorization=None,
+    )
+    invalid_json_body = [chunk async for chunk in invalid_json.body]
+    assert invalid_json.status_code == 504
+    assert invalid_json.headers["x-error-code"] == "ProxyInvalidData"
+    assert invalid_json_body == [b""]
+
+    invalid_list = await pathsinfo.pathsinfo_generator(
+        app=app,
+        repo_type="models",
+        org="team",
+        repo="demo",
+        commit="main",
+        paths=["b"],
+        override_cache=True,
+        method="post",
+        authorization=None,
+    )
+    invalid_list_body = [chunk async for chunk in invalid_list.body]
+    assert invalid_list.status_code == 504
+    assert invalid_list.headers["x-error-code"] == "ProxyInvalidData"
+    assert invalid_list_body == [b""]
