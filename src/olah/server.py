@@ -65,6 +65,22 @@ if not BASE_SETTINGS:
 logger = None
 
 
+def normalize_server_host(host: Union[str, Sequence[str]]) -> str:
+    if isinstance(host, str):
+        host_candidates = host.split(",")
+    else:
+        host_candidates = list(host)
+
+    normalized_hosts = [str(item).strip() for item in host_candidates if str(item).strip()]
+    if len(normalized_hosts) == 0:
+        raise ValueError("Host cannot be empty.")
+    if len(normalized_hosts) > 1:
+        raise ValueError(
+            "Multiple hosts are not supported by uvicorn.run. Please run one Olah instance per host."
+        )
+    return normalized_hosts[0]
+
+
 async def check_connection(url: str) -> bool:
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -74,7 +90,7 @@ async def check_connection(url: str) -> bool:
                 timeout=10,
             )
         return 200 <= response.status_code < 400
-    except httpx.TimeoutException:
+    except httpx.HTTPError:
         return False
 
 
@@ -193,6 +209,9 @@ def init():
         config = OlahConfig(args.config)
     else:
         config = OlahConfig()
+        mirror_scheme_is_default = is_default_value(args, "mirror_scheme")
+        mirror_netloc_is_default = is_default_value(args, "mirror_netloc")
+        mirror_lfs_netloc_is_default = is_default_value(args, "mirror_lfs_netloc")
 
         if not is_default_value(args, "host"):
             config.host = args.host
@@ -222,8 +241,28 @@ def init():
             config.cache_size_limit = convert_to_bytes(args.cache_size_limit)
         if not is_default_value(args, "cache_clean_strategy"):
             config.cache_clean_strategy = args.cache_clean_strategy
-        elif not args.has_lfs_site and not is_default_value(args, "mirror_netloc"):
-            config.mirror_lfs_netloc = args.mirror_netloc
+
+        config.host = normalize_server_host(config.host)
+
+        if mirror_scheme_is_default:
+            config.mirror_scheme = config.default_mirror_scheme()
+        else:
+            config.mirror_scheme = args.mirror_scheme
+
+        if mirror_netloc_is_default:
+            config.mirror_netloc = config.default_mirror_netloc()
+        else:
+            config.mirror_netloc = args.mirror_netloc
+
+        if mirror_lfs_netloc_is_default:
+            if not args.has_lfs_site and not mirror_netloc_is_default:
+                config.mirror_lfs_netloc = config.mirror_netloc
+            else:
+                config.mirror_lfs_netloc = config.default_mirror_netloc()
+        else:
+            config.mirror_lfs_netloc = args.mirror_lfs_netloc
+
+    config.host = normalize_server_host(config.host)
 
     if is_default_value(args, "host"):
         args.host = config.host
@@ -254,10 +293,8 @@ def init():
     if is_default_value(args, "cache_clean_strategy"):
         args.cache_clean_strategy = config.cache_clean_strategy
 
-    if "," in args.host:
-        args.host = args.host.split(",")
-
-    args.mirror_scheme = config.mirror_scheme = "http" if args.ssl_key is None else "https"
+    args.host = normalize_server_host(args.host)
+    config.host = args.host
 
     print(args)
     if config.cache_size_limit is not None:

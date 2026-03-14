@@ -92,13 +92,9 @@ class OlahConfig(object):
         self.hf_netloc: str = "huggingface.co"
         self.hf_lfs_netloc: str = "cdn-lfs.huggingface.co"
 
-        self.mirror_scheme: str = "http" if self.ssl_key is None else "https"
-        self.mirror_netloc: str = (
-            f"{self.host if self._is_specific_addr(self.host) else 'localhost'}:{self.port}"
-        )
-        self.mirror_lfs_netloc: str = (
-            f"{self.host if self._is_specific_addr(self.host) else 'localhost'}:{self.port}"
-        )
+        self.mirror_scheme: str = self.default_mirror_scheme()
+        self.mirror_netloc: str = self.default_mirror_netloc()
+        self.mirror_lfs_netloc: str = self.default_mirror_netloc()
 
         self.mirrors_path: List[str] = []
 
@@ -115,6 +111,20 @@ class OlahConfig(object):
             return host not in ['0.0.0.0', '::']
         else:
             return False
+
+    def default_mirror_scheme(self, ssl_key: Optional[str] = None) -> str:
+        ssl_key = self.ssl_key if ssl_key is None else ssl_key
+        return "http" if ssl_key is None else "https"
+
+    def default_mirror_netloc(
+        self,
+        host: Optional[Union[List[str], str]] = None,
+        port: Optional[int] = None,
+    ) -> str:
+        host = self.host if host is None else host
+        port = self.port if port is None else port
+        default_host = host if self._is_specific_addr(host) else "localhost"
+        return f"{default_host}:{port}"
 
     def hf_url_base(self) -> str:
         return f"{self.hf_scheme}://{self.hf_netloc}"
@@ -139,6 +149,9 @@ class OlahConfig(object):
 
         if "basic" in config:
             basic = config["basic"]
+            previous_default_mirror_scheme = self.default_mirror_scheme()
+            previous_default_mirror_netloc = self.default_mirror_netloc()
+
             self.host = basic.get("host", self.host)
             self.port = basic.get("port", self.port)
             self.ssl_key = self.empty_str(basic.get("ssl-key", self.ssl_key))
@@ -151,11 +164,20 @@ class OlahConfig(object):
             self.hf_netloc = basic.get("hf-netloc", self.hf_netloc)
             self.hf_lfs_netloc = basic.get("hf-lfs-netloc", self.hf_lfs_netloc)
 
-            self.mirror_scheme = basic.get("mirror-scheme", self.mirror_scheme)
-            self.mirror_netloc = basic.get("mirror-netloc", self.mirror_netloc)
-            self.mirror_lfs_netloc = basic.get(
-                "mirror-lfs-netloc", self.mirror_lfs_netloc
-            )
+            if "mirror-scheme" in basic:
+                self.mirror_scheme = basic["mirror-scheme"]
+            elif self.mirror_scheme == previous_default_mirror_scheme:
+                self.mirror_scheme = self.default_mirror_scheme()
+
+            if "mirror-netloc" in basic:
+                self.mirror_netloc = basic["mirror-netloc"]
+            elif self.mirror_netloc == previous_default_mirror_netloc:
+                self.mirror_netloc = self.default_mirror_netloc()
+
+            if "mirror-lfs-netloc" in basic:
+                self.mirror_lfs_netloc = basic["mirror-lfs-netloc"]
+            elif self.mirror_lfs_netloc == previous_default_mirror_netloc:
+                self.mirror_lfs_netloc = self.default_mirror_netloc()
 
             self.mirrors_path = basic.get("mirrors-path", self.mirrors_path)
 

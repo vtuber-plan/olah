@@ -143,7 +143,9 @@ def parse_range_params(range_header: str) -> Tuple[str, List[Tuple[Optional[int]
 def get_all_ranges(file_size: int, unit: str, ranges: List[Tuple[Optional[int], Optional[int]]], suffix: Optional[int]) -> List[Tuple[int, int]]:
     all_ranges: List[Tuple[int, int]] = []
     if suffix is not None:
-        all_ranges.append((file_size - suffix, file_size))
+        if file_size <= 0 or suffix <= 0:
+            return all_ranges
+        all_ranges.append((max(0, file_size - suffix), file_size))
     else:
         for r in ranges:
             r_start = r[0] if r[0] is not None else 0

@@ -213,7 +213,7 @@ async def get_newest_commit_hf(
                 return await get_newest_commit_hf_offline(app, repo_type, org, repo)
             obj = json.loads(response.text)
         return obj.get("sha", None)
-    except httpx.TimeoutException as e:
+    except (httpx.HTTPError, ValueError, OSError):
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
 
 
@@ -293,7 +293,7 @@ async def get_commit_hf(
                 return await get_commit_hf_offline(app, repo_type, org, repo, commit)
             obj = json.loads(response.text)
         return obj.get("sha", None)
-    except:
+    except (httpx.HTTPError, ValueError, OSError):
         return await get_commit_hf_offline(app, repo_type, org, repo, commit)
 
 
@@ -335,7 +335,15 @@ async def check_commit_hf(
     headers = {}
     if authorization is not None:
         headers["authorization"] = authorization
-    async with httpx.AsyncClient() as client:
-        response = await client.request(method="HEAD", url=url, headers=headers, timeout=WORKER_API_TIMEOUT)
-        status_code = response.status_code
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method="HEAD",
+                url=url,
+                headers=headers,
+                timeout=WORKER_API_TIMEOUT,
+            )
+            status_code = response.status_code
+    except httpx.HTTPError:
+        return False
     return status_code in [200, 307]

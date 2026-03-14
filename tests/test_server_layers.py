@@ -195,6 +195,23 @@ async def test_resolve_requested_commit_skips_duplicate_repo_check_after_visibil
 
 
 @pytest.mark.asyncio
+async def test_get_latest_commit_uses_offline_cache_lookup(monkeypatch):
+    app = _make_app(offline=True)
+    repo = server_access.build_repo_ref("models", "team", "demo")
+
+    async def fake_get_newest_commit_hf(app, repo_type, org, repo_name, authorization=None):
+        assert app.state.app_settings.config.offline is True
+        assert (repo_type, org, repo_name, authorization) == ("models", "team", "demo", "Bearer t")
+        return "cached-sha"
+
+    monkeypatch.setattr(server_upstream, "get_newest_commit_hf", fake_get_newest_commit_hf)
+
+    latest_commit = await server_upstream.get_latest_commit(app, repo, "Bearer t")
+
+    assert latest_commit == "cached-sha"
+
+
+@pytest.mark.asyncio
 async def test_prepare_revision_generator_refreshes_alias_before_resolved_commit():
     app = _make_app(offline=False)
     calls = []
@@ -421,6 +438,45 @@ async def test_cdn_proxy_common_checks_visibility_before_generator(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_whoami_v2_returns_gateway_timeout_on_upstream_http_errors(monkeypatch):
+    from fastapi import Request
+
+    app = _make_app()
+    app.state.app_settings.config.hf_netloc = "huggingface.co"
+    app.state.app_settings.config.hf_url_base = lambda: "https://huggingface.co"
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/whoami-v2",
+        "raw_path": b"/api/whoami-v2",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 18090),
+        "app": app,
+    }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, *args, **kwargs):
+            raise server_api_routes.httpx.ConnectError("boom")
+
+    monkeypatch.setattr(server_api_routes.httpx, "AsyncClient", FakeClient)
+
+    response = await server_api_routes.whoami_v2(Request(scope))
+
+    assert response.status_code == 504
+
+
+@pytest.mark.asyncio
 async def test_check_connection_treats_redirects_as_reachable(monkeypatch):
     import importlib
 
@@ -454,3 +510,47 @@ async def test_check_connection_treats_redirects_as_reachable(monkeypatch):
         "https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/.gitattributes",
         10,
     )
+
+
+@pytest.mark.asyncio
+async def test_check_connection_returns_false_on_http_errors(monkeypatch):
+    import importlib
+
+    server_module = importlib.import_module("olah.server")
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, timeout):
+            raise server_module.httpx.ConnectError("boom")
+
+    monkeypatch.setattr(server_module.httpx, "AsyncClient", FakeClient)
+
+    ok = await server_module.check_connection("https://huggingface.co")
+
+    assert ok is False
+
+
+def test_normalize_server_host_accepts_single_host_and_rejects_multiple():
+    import importlib
+
+    server_module = importlib.import_module("olah.server")
+
+    assert server_module.normalize_server_host("127.0.0.1") == "127.0.0.1"
+    assert server_module.normalize_server_host(" 127.0.0.1 ") == "127.0.0.1"
+    assert server_module.normalize_server_host(["127.0.0.1"]) == "127.0.0.1"
+
+    with pytest.raises(ValueError, match="Multiple hosts are not supported"):
+        server_module.normalize_server_host("127.0.0.1,0.0.0.0")
+
+
+def test_repo_name_from_cache_path_supports_posix_and_windows_separators():
+    assert server_file_routes._repo_name_from_cache_path("/tmp/repos/api/models/org/repo") == "org/repo"
+    assert server_file_routes._repo_name_from_cache_path(r"C:\repos\api\models\org\repo") == "org/repo"

@@ -271,13 +271,16 @@ async def commits_proxy_common(
 async def whoami_v2(request: Request):
     new_headers = {k.lower(): v for k, v in request.headers.items()}
     new_headers["host"] = request.app.state.app_settings.config.hf_netloc
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method="GET",
-            url=urljoin(request.app.state.app_settings.config.hf_url_base(), "/api/whoami-v2"),
-            headers=new_headers,
-            timeout=10,
-        )
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method="GET",
+                url=urljoin(request.app.state.app_settings.config.hf_url_base(), "/api/whoami-v2"),
+                headers=new_headers,
+                timeout=10,
+            )
+    except httpx.HTTPError:
+        return Response(status_code=504)
     response_headers = {k.lower(): v for k, v in response.headers.items()}
     response_headers.pop("content-encoding", None)
     response_headers.pop("content-length", None)

@@ -218,7 +218,7 @@ async def _get_file_range_from_remote(
                 yield raw_chunk
                 chunk_bytes += len(raw_chunk)
 
-        if is_compressed:
+        if is_compressed or "content-length" not in response.headers:
             response_content_length = chunk_bytes
         else:
             response_content_length = int(response.headers["content-length"])
@@ -420,7 +420,7 @@ async def _resource_etag(hf_url: str, authorization: Optional[str]=None, offline
                 ret_etag = response.headers["etag"]
             else:
                 ret_etag = f'"{content_hash[:32]}-10"'
-        except httpx.TimeoutException:
+        except httpx.HTTPError:
             ret_etag = None
     return ret_etag
 
@@ -438,24 +438,28 @@ async def _remote_file_metadata(
     headers = {}
     if authorization is not None:
         headers["authorization"] = authorization
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method="HEAD",
-            url=hf_url,
-            headers=headers,
-            timeout=WORKER_API_TIMEOUT,
-            follow_redirects=True,
-        )
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method="HEAD",
+                url=hf_url,
+                headers=headers,
+                timeout=WORKER_API_TIMEOUT,
+                follow_redirects=True,
+            )
+    except (httpx.HTTPError, ValueError):
+        return None
     if response.status_code >= 400:
         return None
 
     content_length = response.headers.get("content-length")
     if content_length is None:
         return None
-    return RemoteFileMetadata(
-        file_size=int(content_length),
-        etag=response.headers.get("etag"),
-    )
+    try:
+        file_size = int(content_length)
+    except ValueError:
+        return None
+    return RemoteFileMetadata(file_size=file_size, etag=response.headers.get("etag"))
 
 async def _file_realtime_stream(
     app,

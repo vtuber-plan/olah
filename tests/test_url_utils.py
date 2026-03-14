@@ -52,6 +52,8 @@ def test_get_all_ranges_normalizes_bounds_and_skips_invalid_ranges():
         (0, 3),
     ]
     assert url_utils.get_all_ranges(10, "bytes", [], 3) == [(7, 10)]
+    assert url_utils.get_all_ranges(100, "bytes", [], 500) == [(0, 100)]
+    assert url_utils.get_all_ranges(0, "bytes", [], 10) == []
 
 
 def test_query_param_helpers_add_read_and_remove_values():

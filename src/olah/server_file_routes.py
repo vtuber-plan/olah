@@ -7,6 +7,7 @@
 
 import glob
 import os
+import re
 import traceback
 from typing import Literal
 
@@ -34,6 +35,13 @@ class _NullLogger:
 
 def _get_logger(app: FastAPI):
     return getattr(app.state, "logger", None) or _NullLogger()
+
+
+def _repo_name_from_cache_path(repo_path: str) -> str:
+    parts = [part for part in re.split(r"[\\/]+", repo_path) if part]
+    if len(parts) < 2:
+        return repo_path
+    return get_org_repo(parts[-2], parts[-1])
 
 
 async def file_head_common(
@@ -345,9 +353,9 @@ async def repos(request: Request):
     datasets_repos = glob.glob(os.path.join(request.app.state.app_settings.config.repos_path, "api/datasets/*/*"))
     models_repos = glob.glob(os.path.join(request.app.state.app_settings.config.repos_path, "api/models/*/*"))
     spaces_repos = glob.glob(os.path.join(request.app.state.app_settings.config.repos_path, "api/spaces/*/*"))
-    datasets_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in datasets_repos]
-    models_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in models_repos]
-    spaces_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in spaces_repos]
+    datasets_repos = [_repo_name_from_cache_path(repo) for repo in datasets_repos]
+    models_repos = [_repo_name_from_cache_path(repo) for repo in models_repos]
+    spaces_repos = [_repo_name_from_cache_path(repo) for repo in spaces_repos]
 
     return request.app.state.templates.TemplateResponse(
         "repos.html",

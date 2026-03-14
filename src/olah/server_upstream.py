@@ -20,8 +20,6 @@ class ResolvedCommit:
 
 
 async def get_latest_commit(app, repo: RepoRef, authorization: Optional[str]) -> Optional[str]:
-    if app.state.app_settings.config.offline:
-        return "main"
     return await get_newest_commit_hf(
         app,
         repo.repo_type,

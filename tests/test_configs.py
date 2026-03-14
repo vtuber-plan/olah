@@ -82,6 +82,43 @@ def test_olah_config_reads_toml_and_normalizes_empty_ssl_fields(tmp_path):
     assert config.cache.allow("team/project") is True
 
 
+def test_olah_config_derives_mirror_netloc_from_updated_host_and_port(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            [basic]
+            host = "0.0.0.0"
+            port = 9001
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = OlahConfig(str(config_path))
+
+    assert config.mirror_netloc == "localhost:9001"
+    assert config.mirror_lfs_netloc == "localhost:9001"
+
+
+def test_olah_config_derives_https_mirror_scheme_when_ssl_is_configured(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            [basic]
+            ssl-key = "/tmp/key.pem"
+            ssl-cert = "/tmp/cert.pem"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = OlahConfig(str(config_path))
+
+    assert config.mirror_scheme == "https"
+
+
 def test_is_specific_addr_only_accepts_real_single_host():
     config = OlahConfig()
 

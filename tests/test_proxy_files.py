@@ -6,6 +6,7 @@ import types
 from types import SimpleNamespace
 
 import brotli
+import httpx
 import pytest
 from fastapi import Request
 from olah.proxy.result import ProxyResult, single_chunk_body
@@ -313,6 +314,29 @@ async def test_file_realtime_stream_without_repo_context_uses_remote_metadata(mo
 
 
 @pytest.mark.asyncio
+async def test_file_realtime_stream_returns_proxy_timeout_when_metadata_lookup_fails(monkeypatch, tmp_path):
+    async def fake_remote_file_metadata(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(proxy_files, "_remote_file_metadata", fake_remote_file_metadata)
+
+    result = await proxy_files._file_realtime_stream(
+        app=_make_app(tmp_path),
+        save_path=str(tmp_path / "save"),
+        head_path=str(tmp_path / "head"),
+        url="https://mirror.example/team/demo/hash.bin",
+        request=_make_request("GET", headers={"host": "mirror.example"}),
+        method="GET",
+        allow_cache=False,
+    )
+    body = [chunk async for chunk in result.body]
+
+    assert result.status_code == 504
+    assert result.headers["x-error-code"] == "ProxyTimeout"
+    assert body == [b""]
+
+
+@pytest.mark.asyncio
 async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp_path):
     captured = []
 
@@ -581,6 +605,70 @@ async def test_get_file_range_from_remote_raises_on_incomplete_content_length():
             )
         ]
         assert chunks == [b"abc"]
+
+
+@pytest.mark.asyncio
+async def test_get_file_range_from_remote_supports_chunked_responses_without_content_length():
+    payload = b"chunked-data"
+
+    class FakeResponse:
+        status_code = 206
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_raw(self):
+            yield payload[:5]
+            yield payload[5:]
+
+    class FakeClient:
+        def stream(self, **kwargs):
+            return FakeResponse()
+
+    class FakeCache:
+        def _get_file_size(self):
+            return len(payload)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_files._get_file_range_from_remote(
+            client=FakeClient(),
+            remote_info=proxy_files.RemoteInfo("GET", "https://huggingface.co/file.bin", {}),
+            cache_file=FakeCache(),
+            start_pos=0,
+            end_pos=len(payload),
+        )
+    ]
+
+    assert b"".join(chunks) == payload
+
+
+@pytest.mark.asyncio
+async def test_remote_file_metadata_returns_none_on_http_errors(monkeypatch):
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, *args, **kwargs):
+            raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", FakeAsyncClient)
+
+    metadata = await proxy_files._remote_file_metadata(
+        app=None,
+        hf_url="https://remote/file",
+        authorization=None,
+        offline=False,
+    )
+
+    assert metadata is None
 
 
 @pytest.mark.asyncio

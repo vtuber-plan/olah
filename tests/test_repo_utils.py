@@ -118,3 +118,51 @@ def test_get_newest_commit_hf_falls_back_to_offline_on_timeout(monkeypatch, tmp_
     )
 
     assert commit == "offline-sha"
+
+
+def test_get_newest_commit_hf_falls_back_to_offline_on_connect_error(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    revision_path = tmp_path / "api" / "models" / "team" / "demo" / "revision" / "cached"
+    revision_path.mkdir(parents=True)
+    (revision_path / "meta_head.json").write_text(
+        json.dumps({"lastModified": "2024-03-01T00:00:00", "sha": "offline-sha"}),
+        encoding="utf-8",
+    )
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *args, **kwargs):
+            raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(repo_utils.httpx, "AsyncClient", FakeAsyncClient)
+
+    commit = asyncio.run(
+        repo_utils.get_newest_commit_hf(app, "models", "team", "demo", authorization="Bearer token")
+    )
+
+    assert commit == "offline-sha"
+
+
+def test_check_commit_hf_returns_false_when_upstream_request_fails(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, *args, **kwargs):
+            raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(repo_utils.httpx, "AsyncClient", FakeAsyncClient)
+
+    ok = asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo", commit="main"))
+
+    assert ok is False
