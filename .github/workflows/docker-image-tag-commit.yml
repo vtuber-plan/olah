@@ -1,35 +1,40 @@
-
-name: Docker Image Build/Publish tag with commit
+name: Docker Image Build/Publish source image
 
 on:
   push:
     branches:
-      - 'dev'
+      - dev
     paths:
+      - src/**
+      - pyproject.toml
+      - requirements.txt
       - docker/build@source/dockerfile
       - .github/workflows/docker-image-tag-commit.yml
   workflow_dispatch:
     inputs:
-      commit_id:
-        description: olah commit id(like 'main' 'db028a3b')
+      git_ref:
+        description: Git ref to build from, such as dev or a commit SHA
         required: true
-        default: main
+        default: dev
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-source-${{ github.event_name }}-${{ github.ref_name || github.event.inputs.git_ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-push-docker-image:
-    name: Build Docker image and push to repositories
+    name: Build source Docker image and push to registries
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        BRANCH_CHECKOUT:
-          - ${{ github.event.inputs.commit_id || 'main' }}
-        platforms:
-          - linux/amd64,linux/arm64
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref || github.ref_name }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -50,26 +55,21 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Checkout commit
+      - name: Compute image tags
+        env:
+          DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/olah
+          GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/olah
         run: |
-          git checkout ${{ matrix.BRANCH_CHECKOUT }}
-
-      - name: Set env git short head
-        working-directory: ./olah
-        run: echo "COMMIT_SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-
-      - name: Meta data image
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/olah
-            ghcr.io/${{ github.repository_owner }}/olah
-          tags: |
-            type=raw,value=${{ matrix.BRANCH_CHECKOUT }}
-            type=raw,value=${{ env.COMMIT_SHORT }}
-          flavor: |
-            latest=false
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          TAGS="${DOCKERHUB_IMAGE}:sha-${SHORT_SHA}"$'\n'"${GHCR_IMAGE}:sha-${SHORT_SHA}"
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            TAGS="${TAGS}"$'\n'"${DOCKERHUB_IMAGE}:dev"$'\n'"${GHCR_IMAGE}:dev"
+          fi
+          {
+            echo "IMAGE_TAGS<<EOF"
+            echo "${TAGS}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       - name: Build push image
         id: build
@@ -77,10 +77,9 @@ jobs:
         with:
           context: .
           file: ./docker/build@source/dockerfile
-          platforms: ${{ matrix.platforms }}
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.IMAGE_TAGS }}
 
       - name: Print image digest
-        run: echo ${{ steps.build.outputs.digest }}
+        run: echo "${{ steps.build.outputs.digest }}"

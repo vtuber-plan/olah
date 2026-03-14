@@ -1,20 +1,27 @@
-name: Olah GitHub Actions to release
-run-name: Olah GitHub Actions to release
+name: Build and publish release artifacts
+run-name: Build and publish release artifacts for ${{ github.ref_name }}
+
 on:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build:
+  build-and-release:
+    name: Build wheel and publish GitHub release
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.12"]
 
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
+
       - name: Set up Apache Arrow
         run: |
           sudo apt update
@@ -23,33 +30,40 @@ jobs:
           sudo apt install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
           sudo apt update
           sudo apt install -y -V libarrow-dev libarrow-glib-dev libparquet-dev libparquet-glib-dev
-      - name: Set up Python ${{ matrix.python-version }}
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install Olah
+          python-version: "3.12"
+
+      - name: Install build dependencies
         run: |
-          cd ${{ github.workspace }}
           pip install --upgrade pip
           pip install -e .
           pip install -r requirements.txt
+          pip install build
+
+      - name: Validate tag matches package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(python -c "from pathlib import Path; import tomllib; print(tomllib.loads(Path('pyproject.toml').read_text())['project']['version'])")"
+          if [[ "${TAG_VERSION}" != "${PACKAGE_VERSION}" ]]; then
+            echo "Tag version ${TAG_VERSION} does not match pyproject version ${PACKAGE_VERSION}" >&2
+            exit 1
+          fi
 
       - name: Test Olah
-        run: |
-          cd ${{ github.workspace }}
-          python -m pytest tests
+        run: python -m pytest tests
 
       - name: Build Olah
-        run: |
-          cd ${{ github.workspace }}
-          pip install build
-          python -m build
+        run: python -m build
 
-      - name: Release
-        uses: "marvinpinto/action-automatic-releases@latest"
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
         with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          prerelease: true
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: false
           files: |
             dist/*.tar.gz
             dist/*.whl

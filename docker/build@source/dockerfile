@@ -14,4 +14,4 @@ VOLUME /data/mirrors
 
 ENTRYPOINT [ "olah-cli" ]
 
-CMD ["--repos-path", "/repos"]
+CMD ["--repos-path", "/data/repos"]

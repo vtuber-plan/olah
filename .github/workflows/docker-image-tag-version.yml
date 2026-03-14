@@ -1,52 +1,58 @@
-
-name: Docker Image Build/Publish tag with version
+name: Docker Image Build/Publish release image
 
 on:
-  push:
-    tags:
-      - "v*"
-    branches:
-      - 'main'
-    paths:
-      - docker/build@pypi/dockerfile
-      - .github/workflows/docker-image-tag-version.yml
+  release:
+    types:
+      - published
   workflow_dispatch:
     inputs:
       olah_version:
-        description: olah version of pypi
+        description: Published Olah version to install from PyPI
         required: true
-        default: 0.3.3
+        default: 0.4.1
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-release-${{ github.event.release.tag_name || github.event.inputs.olah_version }}
+  cancel-in-progress: false
 
 jobs:
   build-and-push-docker-image:
-    name: Build Docker image and push to repositories
+    name: Build release Docker image and push to registries
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        platform:
-          - linux/amd64,linux/arm64
-
     steps:
-      - name: Set OLAH_SOURCE/OLAH_TAG variable for push or workflow_dispatch
-        id: set_olah_source
+      - name: Determine package source and image tags
+        env:
+          DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/olah
+          GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/olah
         run: |
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-              TAG_NAME=${GITHUB_REF##*/}
-              VERSION=${TAG_NAME#v}
-              OLAH_SOURCE="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/olah-${VERSION}-py3-none-any.whl"
-              OLAH_TAG="${VERSION}"
-            elif [[ "${{ github.ref }}" == refs/heads/main ]]; then
-              OLAH_SOURCE="olah"
-              OLAH_TAG="lastet"
-            fi
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            OLAH_SOURCE="olah==${{ github.event.inputs.olah_version }}"
-            OLAH_TAG="${{ github.event.inputs.olah_version }}"
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG_NAME="${{ github.event.release.tag_name }}"
+            VERSION="${TAG_NAME#v}"
+            OLAH_SOURCE="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/olah-${VERSION}-py3-none-any.whl"
+            PUSH_LATEST="true"
+          else
+            VERSION="${{ github.event.inputs.olah_version }}"
+            OLAH_SOURCE="olah==${VERSION}"
+            PUSH_LATEST="false"
           fi
-          echo "OLAH_SOURCE=$OLAH_SOURCE" >> $GITHUB_ENV
-          echo "OLAH_TAG=$OLAH_TAG" >> $GITHUB_ENV
+
+          TAGS="${DOCKERHUB_IMAGE}:${VERSION}"$'\n'"${GHCR_IMAGE}:${VERSION}"
+          if [[ "${PUSH_LATEST}" == "true" ]]; then
+            TAGS="${TAGS}"$'\n'"${DOCKERHUB_IMAGE}:latest"$'\n'"${GHCR_IMAGE}:latest"
+          fi
+
+          echo "OLAH_SOURCE=${OLAH_SOURCE}" >> "$GITHUB_ENV"
+          echo "OLAH_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          {
+            echo "IMAGE_TAGS<<EOF"
+            echo "${TAGS}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -70,19 +76,6 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Meta data image
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/olah
-            ghcr.io/${{ github.repository_owner }}/olah
-          tags: |
-            type=raw,value=${{ env.OLAH_TAG }}
-            type=raw,value=lastet
-          flavor: |
-            latest=false
-
       - name: Build push image
         id: build
         uses: docker/build-push-action@v5
@@ -91,10 +84,9 @@ jobs:
           file: ./docker/build@pypi/dockerfile
           build-args: |
             OLAH_SOURCE=${{ env.OLAH_SOURCE }}
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.IMAGE_TAGS }}
 
       - name: Print image digest
-        run: echo ${{ steps.build.outputs.digest }}
+        run: echo "${{ steps.build.outputs.digest }}"
