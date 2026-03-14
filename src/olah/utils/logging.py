@@ -18,6 +18,8 @@ import warnings
 from olah.constants import DEFAULT_LOGGER_DIR
 
 handler = None
+_original_stdout = sys.stdout
+_original_stderr = sys.stderr
 
 
 # Define a custom formatter without color codes
@@ -63,13 +65,19 @@ def build_logger(
     # Redirect stdout and stderr to loggers
     stdout_logger = logging.getLogger("stdout")
     stdout_logger.setLevel(logging.DEBUG)
-    sl = StreamToLogger(stdout_logger, logging.INFO)
-    sys.stdout = sl
+    if not isinstance(sys.stdout, StreamToLogger):
+        sys.stdout = StreamToLogger(stdout_logger, logging.INFO, terminal=_original_stdout)
+    else:
+        sys.stdout.logger = stdout_logger
+        sys.stdout.log_level = logging.INFO
 
     stderr_logger = logging.getLogger("stderr")
     stderr_logger.setLevel(logging.ERROR)
-    sl = StreamToLogger(stderr_logger, logging.ERROR)
-    sys.stderr = sl
+    if not isinstance(sys.stderr, StreamToLogger):
+        sys.stderr = StreamToLogger(stderr_logger, logging.ERROR, terminal=_original_stderr)
+    else:
+        sys.stderr.logger = stderr_logger
+        sys.stderr.log_level = logging.ERROR
 
     # Get logger
     logger = logging.getLogger(logger_name)
@@ -97,8 +105,8 @@ class StreamToLogger(object):
     Fake file-like stream object that redirects writes to a logger instance.
     """
 
-    def __init__(self, logger, log_level=logging.INFO):
-        self.terminal = sys.stdout
+    def __init__(self, logger, log_level=logging.INFO, terminal=None):
+        self.terminal = sys.stdout if terminal is None else terminal
         self.logger = logger
         self.log_level = log_level
         self.linebuf = ""

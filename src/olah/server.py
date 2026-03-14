@@ -5,35 +5,43 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
-from contextlib import asynccontextmanager
+import argparse
 import datetime
 import os
-import glob
-import argparse
 import sys
 import time
-import traceback
-from typing import Annotated, List, Literal, Optional, Sequence, Tuple, Union
-from urllib.parse import urljoin
-from fastapi import FastAPI, Header, Request, Form
-from fastapi.responses import (
-    FileResponse,
-    HTMLResponse,
-    StreamingResponse,
-    Response,
-    JSONResponse,
-)
+from contextlib import asynccontextmanager
+from typing import Sequence, Tuple, Union
+
+import httpx
+from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 from fastapi_utils.tasks import repeat_every
 
-import git
-import httpx
+from olah.configs import OlahConfig
+from olah.constants import OLAH_CODE_DIR
+from olah.errors import error_page_not_found
+from olah.server_routes import (
+    cdn_proxy_common,
+    commits_proxy_common,
+    file_get_common,
+    file_head_common,
+    lfs_proxy_common,
+    meta_proxy_common,
+    pathsinfo_proxy_common,
+    router,
+    tree_proxy_common,
+)
+from olah.utils.disk_utils import (
+    convert_bytes_to_human_readable,
+    convert_to_bytes,
+    get_folder_size,
+    sort_files_by_access_time,
+    sort_files_by_modify_time,
+    sort_files_by_size,
+)
+from olah.utils.logging import build_logger
 
-from olah.proxy.commits import commits_generator
-from olah.proxy.pathsinfo import pathsinfo_generator
-from olah.proxy.tree import tree_generator
-from olah.utils.disk_utils import convert_bytes_to_human_readable, convert_to_bytes, get_folder_size, sort_files_by_access_time, sort_files_by_modify_time, sort_files_by_size
-from olah.utils.url_utils import clean_path
 
 BASE_SETTINGS = False
 if not BASE_SETTINGS:
@@ -53,25 +61,10 @@ if not BASE_SETTINGS:
 if not BASE_SETTINGS:
     raise Exception("Cannot import BaseSettings from pydantic or pydantic-settings")
 
-from olah.configs import OlahConfig
-from olah.errors import error_repo_not_found, error_page_not_found, error_revision_not_found
-from olah.proxy.files import cdn_file_get_generator, file_get_generator
-from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
-from olah.proxy.meta import meta_generator
-from olah.server_access import build_repo_ref, ensure_repo_visibility, parse_repo_ref, parse_resolve_repo_ref
-from olah.server_mirror import load_local_mirror_payload
-from olah.server_responses import build_streaming_response
-from olah.server_upstream import get_latest_commit, prepare_revision_generator, resolve_requested_commit
-from olah.utils.rule_utils import check_proxy_rules_hf, get_org_repo
-from olah.utils.repo_utils import parse_org_repo
-from olah.constants import OLAH_CODE_DIR, REPO_TYPES_MAPPING
-from olah.utils.logging import build_logger
 
 logger = None
 
-# ======================
-# Utilities
-# ======================
+
 async def check_connection(url: str) -> bool:
     try:
         async with httpx.AsyncClient() as client:
@@ -80,23 +73,12 @@ async def check_connection(url: str) -> bool:
                 url=url,
                 timeout=10,
             )
-        if response.status_code != 200:
-            return False
-        else:
-            return True
+        return response.status_code == 200
     except httpx.TimeoutException:
         return False
 
-# from pympler import tracker, classtracker
-# tr = tracker.SummaryTracker()
-# cr = classtracker.ClassTracker()
-# from olah.cache.bitset import Bitset
-# from olah.cache.olah_cache import OlahCache, OlahCacheHeader
-# cr.track_class(Bitset)
-# cr.track_class(OlahCacheHeader)
-# cr.track_class(OlahCache)
 
-@repeat_every(seconds=60*5)
+@repeat_every(seconds=60 * 5)
 async def check_hf_connection() -> None:
     if app.state.app_settings.config.offline:
         return
@@ -107,6 +89,7 @@ async def check_hf_connection() -> None:
     )
     if not hf_online_status:
         print("Failed to reach Huggingface Site.", file=sys.stderr)
+
 
 @repeat_every(seconds=60 * 60)
 async def check_disk_usage() -> None:
@@ -123,29 +106,23 @@ async def check_disk_usage() -> None:
 
     if current_size < limit_size:
         return
-    print(
-        f"Cache size exceeded! Limit: {limit_size_h}, Current: {current_size_h}."
-    )
+    print(f"Cache size exceeded! Limit: {limit_size_h}, Current: {current_size_h}.")
     print("Cleaning...")
     files_path = os.path.join(app.state.app_settings.config.repos_path, "files")
     lfs_path = os.path.join(app.state.app_settings.config.repos_path, "lfs")
 
     files: Sequence[Tuple[str, Union[int, datetime.datetime]]] = []
     if app.state.app_settings.config.cache_clean_strategy == "LRU":
-        files = sort_files_by_access_time(files_path) + sort_files_by_access_time(
-            lfs_path
-        )
+        files = sort_files_by_access_time(files_path) + sort_files_by_access_time(lfs_path)
         files = sorted(files, key=lambda x: x[1])
     elif app.state.app_settings.config.cache_clean_strategy == "FIFO":
-        files = sort_files_by_modify_time(files_path) + sort_files_by_modify_time(
-            lfs_path
-        )
+        files = sort_files_by_modify_time(files_path) + sort_files_by_modify_time(lfs_path)
         files = sorted(files, key=lambda x: x[1])
     elif app.state.app_settings.config.cache_clean_strategy == "LARGE_FIRST":
         files = sort_files_by_size(files_path) + sort_files_by_size(lfs_path)
         files = sorted(files, key=lambda x: x[1], reverse=True)
 
-    for filepath, index in files:
+    for filepath, _ in files:
         if current_size < limit_size:
             break
         filesize = os.path.getsize(filepath)
@@ -160,796 +137,30 @@ async def check_disk_usage() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # TODO: Check repo cache path
     await check_hf_connection()
     await check_disk_usage()
     yield
 
 
-# ======================
-# Application
-# ======================
-code_file_path = os.path.abspath(__file__)
 app = FastAPI(lifespan=lifespan, debug=False)
 templates = Jinja2Templates(directory=os.path.join(OLAH_CODE_DIR, "static"))
+app.state.templates = templates
+app.state.logger = None
+app.include_router(router)
 
 
 class AppSettings(BaseSettings):
-    # The address of the model controller.
     config: OlahConfig = OlahConfig()
 
 
-# ======================
-# Exception handlers
-# ======================
 @app.exception_handler(404)
 async def custom_404_handler(_, __):
     return error_page_not_found()
 
 
-# ======================
-# File Meta Info API Hooks
-# See also: https://huggingface.co/docs/hub/api#repo-listing-api
-# ======================
-async def meta_proxy_common(repo_type: Literal["models", "datasets", "spaces"], org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
-    repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
-    if access_error is not None:
-        return access_error
-
-    meta_data = load_local_mirror_payload(
-        app,
-        repo_ref,
-        lambda local_repo: local_repo.get_meta(commit),
-        logger,
-    )
-    if meta_data is not None:
-        return JSONResponse(content=meta_data)
-
-    try:
-        resolved_commit, commit_error = await resolve_requested_commit(
-            app,
-            repo_ref,
-            commit,
-            authorization,
-            repo_visible=True,
-            missing_commit_response="revision_not_found",
-        )
-        if commit_error is not None:
-            return commit_error
-
-        generator = await prepare_revision_generator(
-            app,
-            resolved_commit,
-            lambda target_commit, override_cache: meta_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=target_commit,
-                override_cache=override_cache,
-                method=method,
-                authorization=authorization,
-            ),
-        )
-        return await build_streaming_response(generator)
-    except httpx.ConnectTimeout:
-        traceback.print_exc()
-        return Response(status_code=504)
-
-
-@app.head("/api/{repo_type}/{org_repo}")
-@app.get("/api/{repo_type}/{org_repo}")
-async def meta_proxy(repo_type: str, org_repo: str, request: Request):
-    repo_ref = parse_repo_ref(repo_type, org_repo)
-    if repo_ref is None:
-        return error_repo_not_found()
-    new_commit = await get_latest_commit(app, repo_ref, request.headers.get("authorization", None))
-    if new_commit is None:
-        return error_repo_not_found()
-    return await meta_proxy_common(
-        repo_type=repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        commit=new_commit,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-
-@app.head("/api/{repo_type}/{org}/{repo}")
-@app.get("/api/{repo_type}/{org}/{repo}")
-async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
-    repo_ref = build_repo_ref(repo_type, org, repo)
-    new_commit = await get_latest_commit(app, repo_ref, request.headers.get("authorization", None))
-    if new_commit is None:
-        return error_repo_not_found()
-    return await meta_proxy_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
-        commit=new_commit,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-
-@app.head("/api/{repo_type}/{org}/{repo}/revision/{commit}")
-@app.get("/api/{repo_type}/{org}/{repo}/revision/{commit}")
-async def meta_proxy_commit2(
-    repo_type: str, org: str, repo: str, commit: str, request: Request
-):
-    return await meta_proxy_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
-        commit=commit,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-
-@app.head("/api/{repo_type}/{org_repo}/revision/{commit}")
-@app.get("/api/{repo_type}/{org_repo}/revision/{commit}")
-async def meta_proxy_commit(
-    repo_type: str, org_repo: str, commit: str, request: Request
-):
-    repo_ref = parse_repo_ref(repo_type, org_repo)
-    if repo_ref is None:
-        return error_repo_not_found()
-
-    return await meta_proxy_common(
-        repo_type=repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        commit=commit,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-
-# Git Tree
-async def tree_proxy_common(
-    repo_type: str,
-    org: str,
-    repo: str,
-    commit: str,
-    path: str,
-    recursive: bool,
-    expand: bool,
-    method: str,
-    authorization: Optional[str]
-) -> Response:
-    path = clean_path(path)
-    repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
-    if access_error is not None:
-        return access_error
-
-    tree_data = load_local_mirror_payload(
-        app,
-        repo_ref,
-        lambda local_repo: local_repo.get_tree(commit, path, recursive=recursive, expand=expand),
-        logger,
-    )
-    if tree_data is not None:
-        return JSONResponse(content=tree_data)
-
-    try:
-        resolved_commit, commit_error = await resolve_requested_commit(
-            app,
-            repo_ref,
-            commit,
-            authorization,
-            repo_visible=True,
-            missing_commit_response="revision_not_found",
-        )
-        if commit_error is not None:
-            return commit_error
-
-        generator = await prepare_revision_generator(
-            app,
-            resolved_commit,
-            lambda target_commit, override_cache: tree_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=target_commit,
-                path=path,
-                recursive=recursive,
-                expand=expand,
-                override_cache=override_cache,
-                method=method,
-                authorization=authorization,
-            ),
-        )
-        return await build_streaming_response(generator)
-    except httpx.ConnectTimeout:
-        traceback.print_exc()
-        return Response(status_code=504)
-
-
-@app.head("/api/{repo_type}/{org}/{repo}/tree/{commit}/{file_path:path}")
-@app.get("/api/{repo_type}/{org}/{repo}/tree/{commit}/{file_path:path}")
-async def tree_proxy_commit2(
-    repo_type: str,
-    org: str,
-    repo: str,
-    commit: str,
-    file_path: str,
-    request: Request,
-    recursive: bool = False,
-    expand: bool=False,
-):
-    return await tree_proxy_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
-        commit=commit,
-        path=file_path,
-        recursive=recursive,
-        expand=expand,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-
-@app.head("/api/{repo_type}/{org_repo}/tree/{commit}/{file_path:path}")
-@app.get("/api/{repo_type}/{org_repo}/tree/{commit}/{file_path:path}")
-async def tree_proxy_commit(
-    repo_type: str,
-    org_repo: str,
-    commit: str,
-    file_path: str,
-    request: Request,
-    recursive: bool = False,
-    expand: bool=False,
-):
-    repo_ref = parse_repo_ref(repo_type, org_repo)
-    if repo_ref is None:
-        return error_repo_not_found()
-
-    return await tree_proxy_common(
-        repo_type=repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        commit=commit,
-        path=file_path,
-        recursive=recursive,
-        expand=expand,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-# Git Pathsinfo
-async def pathsinfo_proxy_common(repo_type: str, org: str, repo: str, commit: str, paths: List[str], method: str, authorization: Optional[str]) -> Response:
-    paths = [clean_path(path) for path in paths]
-    repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
-    if access_error is not None:
-        return access_error
-
-    pathsinfo_data = load_local_mirror_payload(
-        app,
-        repo_ref,
-        lambda local_repo: local_repo.get_pathinfos(commit, paths),
-        logger,
-    )
-    if pathsinfo_data is not None:
-        return JSONResponse(content=pathsinfo_data)
-
-    try:
-        resolved_commit, commit_error = await resolve_requested_commit(
-            app,
-            repo_ref,
-            commit,
-            authorization,
-            repo_visible=True,
-            missing_commit_response="revision_not_found",
-        )
-        if commit_error is not None:
-            return commit_error
-
-        generator = await prepare_revision_generator(
-            app,
-            resolved_commit,
-            lambda target_commit, override_cache: pathsinfo_generator(
-                app,
-                repo_type,
-                org,
-                repo,
-                target_commit,
-                paths,
-                override_cache=override_cache,
-                method=method,
-                authorization=authorization,
-            ),
-        )
-        return await build_streaming_response(generator)
-    except httpx.ConnectTimeout:
-        traceback.print_exc()
-        return Response(status_code=504)
-
-
-@app.head("/api/{repo_type}/{org}/{repo}/paths-info/{commit}")
-@app.post("/api/{repo_type}/{org}/{repo}/paths-info/{commit}")
-async def pathsinfo_proxy_commit2(
-    repo_type: str,
-    org: str,
-    repo: str,
-    commit: str,
-    paths: Annotated[List[str], Form()],
-    request: Request,
-):
-    return await pathsinfo_proxy_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
-        commit=commit,
-        paths=paths,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-
-@app.head("/api/{repo_type}/{org_repo}/paths-info/{commit}")
-@app.post("/api/{repo_type}/{org_repo}/paths-info/{commit}")
-async def pathsinfo_proxy_commit(
-    repo_type: str,
-    org_repo: str,
-    commit: str,
-    paths: Annotated[List[str], Form()],
-    request: Request,
-):
-    repo_ref = parse_repo_ref(repo_type, org_repo)
-    if repo_ref is None:
-        return error_repo_not_found()
-
-    return await pathsinfo_proxy_common(
-        repo_type=repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        commit=commit,
-        paths=paths,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-
-# Git Commits
-async def commits_proxy_common(repo_type: str, org: str, repo: str, commit: str, method: str, authorization: Optional[str]) -> Response:
-    repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
-    if access_error is not None:
-        return access_error
-
-    commits_data = load_local_mirror_payload(
-        app,
-        repo_ref,
-        lambda local_repo: local_repo.get_commits(commit),
-        logger,
-    )
-    if commits_data is not None:
-        return JSONResponse(content=commits_data)
-
-    try:
-        resolved_commit, commit_error = await resolve_requested_commit(
-            app,
-            repo_ref,
-            commit,
-            authorization,
-            repo_visible=True,
-            missing_commit_response="revision_not_found",
-        )
-        if commit_error is not None:
-            return commit_error
-
-        generator = await prepare_revision_generator(
-            app,
-            resolved_commit,
-            lambda target_commit, override_cache: commits_generator(
-                app=app,
-                repo_type=repo_type,
-                org=org,
-                repo=repo,
-                commit=target_commit,
-                override_cache=override_cache,
-                method=method,
-                authorization=authorization,
-            ),
-        )
-        return await build_streaming_response(generator)
-    except httpx.ConnectTimeout:
-        traceback.print_exc()
-        return Response(status_code=504)
-
-
-@app.head("/api/{repo_type}/{org}/{repo}/commits/{commit}")
-@app.get("/api/{repo_type}/{org}/{repo}/commits/{commit}")
-async def commits_proxy_commit2(
-    repo_type: str, org: str, repo: str, commit: str, request: Request
-):
-    return await commits_proxy_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
-        commit=commit,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-
-@app.head("/api/{repo_type}/{org_repo}/commits/{commit}")
-@app.get("/api/{repo_type}/{org_repo}/commits/{commit}")
-async def commits_proxy_commit(
-    repo_type: str, org_repo: str, commit: str, request: Request
-):
-    repo_ref = parse_repo_ref(repo_type, org_repo)
-    if repo_ref is None:
-        return error_repo_not_found()
-
-    return await commits_proxy_common(
-        repo_type=repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        commit=commit,
-        method=request.method.lower(),
-        authorization=request.headers.get("authorization", None),
-    )
-
-
-# ======================
-# Authentication API Hooks
-# ======================
-@app.get("/api/whoami-v2")
-async def whoami_v2(request: Request):
-    """
-    Sensitive Information!!! 
-    """
-    new_headers = {k.lower(): v for k, v in request.headers.items()}
-    new_headers["host"] = app.state.app_settings.config.hf_netloc
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method="GET",
-            url=urljoin(app.state.app_settings.config.hf_url_base(), "/api/whoami-v2"),
-            headers=new_headers,
-            timeout=10,
-        )
-    # final_content = decompress_data(response.headers.get("content-encoding", None))
-    response_headers = {k.lower(): v for k, v in response.headers.items()}
-    if "content-encoding" in response_headers:
-        response_headers.pop("content-encoding")
-    if "content-length" in response_headers:
-        response_headers.pop("content-length")
-    return Response(
-        content=response.content,
-        status_code=response.status_code,
-        headers=response_headers,
-    )
-
-
-# ======================
-# File Head Hooks
-# ======================
-async def file_head_common(
-    repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
-) -> Response:
-    repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
-    if access_error is not None:
-        return access_error
-
-    head = load_local_mirror_payload(
-        app,
-        repo_ref,
-        lambda local_repo: local_repo.get_file_head(commit_hash=commit, path=file_path),
-        logger,
-    )
-    if head is not None:
-        return Response(headers=head)
-
-    # Proxy the HF File Head
-    try:
-        resolved_commit, commit_error = await resolve_requested_commit(
-            app,
-            repo_ref,
-            commit,
-            request.headers.get("authorization", None),
-            repo_visible=True,
-            missing_commit_response="repo_not_found",
-        )
-        if commit_error is not None:
-            return commit_error
-        generator = await file_get_generator(
-            app,
-            repo_type,
-            org,
-            repo,
-            resolved_commit.resolved,
-            file_path=file_path,
-            method="HEAD",
-            request=request,
-        )
-        return await build_streaming_response(generator)
-    except httpx.ConnectTimeout:
-        traceback.print_exc()
-        return Response(status_code=504)
-
-
-@app.head("/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_head3(
-    repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
-):
-    return await file_head_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
-        commit=commit,
-        file_path=file_path,
-        request=request,
-    )
-
-
-@app.head("/{org_or_repo_type}/{repo_name}/resolve/{commit}/{file_path:path}")
-async def file_head2(
-    org_or_repo_type: str, repo_name: str, commit: str, file_path: str, request: Request
-):
-    repo_ref = parse_resolve_repo_ref(org_or_repo_type, repo_name)
-    if repo_ref is None:
-        return error_repo_not_found()
-
-    return await file_head_common(
-        repo_type=repo_ref.repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        commit=commit,
-        file_path=file_path,
-        request=request,
-    )
-
-
-@app.head("/{org_repo}/resolve/{commit}/{file_path:path}")
-async def file_head(org_repo: str, commit: str, file_path: str, request: Request):
-    repo_ref = parse_repo_ref("models", org_repo)
-    if repo_ref is None:
-        return error_repo_not_found()
-    return await file_head_common(
-        repo_type=repo_ref.repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        commit=commit,
-        file_path=file_path,
-        request=request,
-    )
-
-
-async def cdn_proxy_common(
-    repo_type: str,
-    org: str,
-    repo: str,
-    hash_file: str,
-    request: Request,
-    method: Literal["HEAD", "GET"],
-) -> Response:
-    repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
-    if access_error is not None:
-        return access_error
-
-    try:
-        generator = await cdn_file_get_generator(
-            app,
-            repo_type,
-            org,
-            repo,
-            hash_file,
-            method=method,
-            request=request,
-        )
-        return await build_streaming_response(generator)
-    except httpx.ConnectTimeout:
-        return Response(status_code=504)
-
-
-@app.head("/{org_repo}/{hash_file}")
-@app.head("/{repo_type}/{org_repo}/{hash_file}")
-async def cdn_file_head(org_repo: str, hash_file: str, request: Request, repo_type: str = "models"):
-    repo_ref = parse_repo_ref(repo_type, org_repo)
-    if repo_ref is None:
-        return error_repo_not_found()
-    return await cdn_proxy_common(
-        repo_type=repo_ref.repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        hash_file=hash_file,
-        request=request,
-        method="HEAD",
-    )
-
-
-# ======================
-# File Hooks
-# ======================
-async def file_get_common(
-    repo_type: str, org: str, repo: str, commit: str, file_path: str, request: Request
-) -> Response:
-    repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
-    if access_error is not None:
-        return access_error
-
-    content_stream = load_local_mirror_payload(
-        app,
-        repo_ref,
-        lambda local_repo: local_repo.get_file(commit_hash=commit, path=file_path),
-        logger,
-    )
-    if content_stream is not None:
-        return StreamingResponse(content_stream)
-
-    try:
-        resolved_commit, commit_error = await resolve_requested_commit(
-            app,
-            repo_ref,
-            commit,
-            request.headers.get("authorization", None),
-            repo_visible=True,
-            missing_commit_response="repo_not_found",
-        )
-        if commit_error is not None:
-            return commit_error
-        generator = await file_get_generator(
-            app,
-            repo_type,
-            org,
-            repo,
-            resolved_commit.resolved,
-            file_path=file_path,
-            method="GET",
-            request=request,
-        )
-        return await build_streaming_response(generator)
-    except httpx.ConnectTimeout:
-        traceback.print_exc()
-        return Response(status_code=504)
-
-
-@app.get("/{repo_type}/{org}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_get3(
-    org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str
-):
-    return await file_get_common(
-        repo_type=repo_type,
-        org=org,
-        repo=repo,
-        commit=commit,
-        file_path=file_path,
-        request=request,
-    )
-
-
-@app.get("/{org_or_repo_type}/{repo_name}/resolve/{commit}/{file_path:path}")
-async def file_get2(
-    org_or_repo_type: str, repo_name: str, commit: str, file_path: str, request: Request
-):
-    repo_ref = parse_resolve_repo_ref(org_or_repo_type, repo_name)
-    if repo_ref is None:
-        return error_repo_not_found()
-
-    return await file_get_common(
-        repo_type=repo_ref.repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        commit=commit,
-        file_path=file_path,
-        request=request,
-    )
-
-
-@app.get("/{org_repo}/resolve/{commit}/{file_path:path}")
-async def file_get(org_repo: str, commit: str, file_path: str, request: Request):
-    repo_ref = parse_repo_ref("models", org_repo)
-    if repo_ref is None:
-        return error_repo_not_found()
-
-    return await file_get_common(
-        repo_type=repo_ref.repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        commit=commit,
-        file_path=file_path,
-        request=request,
-    )
-
-
-@app.get("/{org_repo}/{hash_file}")
-@app.get("/{repo_type}/{org_repo}/{hash_file}")
-async def cdn_file_get(
-    org_repo: str, hash_file: str, request: Request, repo_type: str = "models"
-):
-    repo_ref = parse_repo_ref(repo_type, org_repo)
-    if repo_ref is None:
-        return error_repo_not_found()
-    return await cdn_proxy_common(
-        repo_type=repo_ref.repo_type,
-        org=repo_ref.org,
-        repo=repo_ref.repo,
-        hash_file=hash_file,
-        request=request,
-        method="GET",
-    )
-
-
-async def lfs_proxy_common(
-    dir1: str,
-    dir2: str,
-    hash_repo: str,
-    hash_file: str,
-    request: Request,
-    method: Literal["HEAD", "GET"],
-) -> Response:
-    try:
-        if method == "HEAD":
-            generator = await lfs_head_generator(app, dir1, dir2, hash_repo, hash_file, request)
-        else:
-            generator = await lfs_get_generator(app, dir1, dir2, hash_repo, hash_file, request)
-        return await build_streaming_response(generator)
-    except httpx.ConnectTimeout:
-        return Response(status_code=504)
-
-
-# ======================
-# LFS Hooks
-# ======================
-@app.head("/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}")
-async def lfs_head(dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request):
-    return await lfs_proxy_common(dir1, dir2, hash_repo, hash_file, request, method="HEAD")
-
-@app.get("/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}")
-async def lfs_get(dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request):
-    return await lfs_proxy_common(dir1, dir2, hash_repo, hash_file, request, method="GET")
-
-
-# ======================
-# Web Page Hooks
-# ======================
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "scheme": app.state.app_settings.config.mirror_scheme,
-            "netloc": app.state.app_settings.config.mirror_netloc,
-        },
-    )
-
-@app.get("/repos", response_class=HTMLResponse)
-async def repos(request: Request):
-    datasets_repos = glob.glob(os.path.join(app.state.app_settings.config.repos_path, "api/datasets/*/*"))
-    models_repos = glob.glob(os.path.join(app.state.app_settings.config.repos_path, "api/models/*/*"))
-    spaces_repos = glob.glob(os.path.join(app.state.app_settings.config.repos_path, "api/spaces/*/*"))
-    datasets_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in datasets_repos]
-    models_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in models_repos]
-    spaces_repos = [get_org_repo(*repo.split("/")[-2:]) for repo in spaces_repos]
-
-    return templates.TemplateResponse(
-        "repos.html",
-        {
-            "request": request,
-            "datasets_repos": datasets_repos,
-            "models_repos": models_repos,
-            "spaces_repos": spaces_repos,
-        },
-    )
-
-
 def init():
     global logger
-    parser = argparse.ArgumentParser(
-        description="Olah Huggingface Mirror Server."
-    )
+    parser = argparse.ArgumentParser(description="Olah Huggingface Mirror Server.")
     parser.add_argument("--config", "-c", type=str, default="")
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8090)
@@ -967,12 +178,13 @@ def init():
     parser.add_argument("--cache-clean-strategy", type=str, default="LRU", help="The clean strategy of cache. ('LRU', 'FIFO', 'LARGE_FIRST')")
     parser.add_argument("--log-path", type=str, default="./logs", help="The folder to save logs")
     args = parser.parse_args()
-    
+
     logger = build_logger("olah", "olah.log", logger_dir=args.log_path)
-    
-    def is_default_value(args, arg_name):
-        if hasattr(args, arg_name):
-            arg_value = getattr(args, arg_name)
+    app.state.logger = logger
+
+    def is_default_value(namespace, arg_name):
+        if hasattr(namespace, arg_name):
+            arg_value = getattr(namespace, arg_name)
             arg_default = parser.get_default(arg_name)
             return arg_value == arg_default
         return False
@@ -981,17 +193,17 @@ def init():
         config = OlahConfig(args.config)
     else:
         config = OlahConfig()
-        
+
         if not is_default_value(args, "host"):
             config.host = args.host
         if not is_default_value(args, "port"):
             config.port = args.port
-        
+
         if not is_default_value(args, "ssl_key"):
             config.ssl_key = args.ssl_key
         if not is_default_value(args, "ssl_cert"):
             config.ssl_cert = args.ssl_cert
-        
+
         if not is_default_value(args, "repos_path"):
             config.repos_path = args.repos_path
         if not is_default_value(args, "hf_scheme"):
@@ -1010,9 +222,8 @@ def init():
             config.cache_size_limit = convert_to_bytes(args.cache_size_limit)
         if not is_default_value(args, "cache_clean_strategy"):
             config.cache_clean_strategy = args.cache_clean_strategy
-        else:
-            if not args.has_lfs_site and not is_default_value(args, "mirror_netloc"):
-                config.mirror_lfs_netloc = args.mirror_netloc
+        elif not args.has_lfs_site and not is_default_value(args, "mirror_netloc"):
+            config.mirror_lfs_netloc = args.mirror_netloc
 
     if is_default_value(args, "host"):
         args.host = config.host
@@ -1024,7 +235,7 @@ def init():
         args.ssl_cert = config.ssl_cert
     if is_default_value(args, "repos_path"):
         args.repos_path = config.repos_path
-    
+
     if is_default_value(args, "hf_scheme"):
         args.hf_scheme = config.hf_scheme
     if is_default_value(args, "hf_netloc"):
@@ -1037,36 +248,37 @@ def init():
         args.mirror_netloc = config.mirror_netloc
     if is_default_value(args, "mirror_lfs_netloc"):
         args.mirror_lfs_netloc = config.mirror_lfs_netloc
-    
+
     if is_default_value(args, "cache_size_limit"):
         args.cache_size_limit = config.cache_size_limit
     if is_default_value(args, "cache_clean_strategy"):
         args.cache_clean_strategy = config.cache_clean_strategy
 
-    # Post processing
     if "," in args.host:
         args.host = args.host.split(",")
-    
+
     args.mirror_scheme = config.mirror_scheme = "http" if args.ssl_key is None else "https"
 
     print(args)
-    # Warnings
     if config.cache_size_limit is not None:
-        logger.info(f"""
+        logger.info(
+            f"""
 ======== WARNING ========
 Due to the cache_size_limit parameter being set, Olah will periodically delete cache files.
 Please ensure that the cache directory specified in repos_path '{config.repos_path}' is correct.
 Incorrect settings may result in unintended file deletion and loss!!! !!!
-=========================""")
-        for i in range(10):
+========================="""
+        )
+        for _ in range(10):
             time.sleep(0.2)
-    
-    # Init app settings
+
     app.state.app_settings = AppSettings(config=config)
     return args
 
+
 def run_server(args):
     import uvicorn
+
     uvicorn.run(
         "olah.server:app",
         host=args.host,
@@ -1074,17 +286,22 @@ def run_server(args):
         log_level="info",
         reload=False,
         ssl_keyfile=args.ssl_key,
-        ssl_certfile=args.ssl_cert
+        ssl_certfile=args.ssl_cert,
     )
 
 
-def main():
+def _run_cli():
     args = init()
     run_server(args)
 
+
+def main():
+    _run_cli()
+
+
 def cli():
-    args = init()
-    run_server(args)
+    _run_cli()
+
 
 if __name__ == "__main__":
     main()

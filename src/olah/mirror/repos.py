@@ -8,6 +8,7 @@ import hashlib
 import io
 import os
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Union
 import gitdb
 from git import Commit, Optional, Repo, Tree
@@ -19,6 +20,8 @@ from olah.mirror.meta import RepoMeta
 
 
 class LocalMirrorRepo(object):
+    MAX_COMMITS = 50
+
     def __init__(self, path: str, repo_type: str, org: str, repo: str) -> None:
         self._path = path
         self._repo_type = repo_type
@@ -26,6 +29,10 @@ class LocalMirrorRepo(object):
         self._repo = repo
 
         self._git_repo = Repo(self._path)
+        self._earliest_commit: Optional[Commit] = None
+
+    def _format_git_datetime(self, value: datetime) -> str:
+        return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     def _sha256(self, text: Union[str, bytes]) -> str:
         if isinstance(text, bytes) or isinstance(text, bytearray):
@@ -161,17 +168,17 @@ class LocalMirrorRepo(object):
         return self._get_tree_files(commit.tree)
 
     def _get_earliest_commit(self) -> Commit:
-        earliest_commit = None
-        earliest_commit_date = None
+        if self._earliest_commit is not None:
+            return self._earliest_commit
 
-        for commit in self._git_repo.iter_commits():
-            commit_date = commit.committed_datetime
-
-            if earliest_commit_date is None or commit_date < earliest_commit_date:
-                earliest_commit = commit
-                earliest_commit_date = commit_date
-
-        return earliest_commit
+        root_commits = list(
+            self._git_repo.iter_commits(rev="--all", max_parents=0)
+        )
+        self._earliest_commit = min(
+            root_commits,
+            key=lambda commit: commit.committed_datetime,
+        )
+        return self._earliest_commit
 
     def get_index_object_by_path(
         self, commit_hash: str, path: str
@@ -243,15 +250,17 @@ class LocalMirrorRepo(object):
         except gitdb.exc.BadName:
             return None
 
-        parent_commits = [commit] + [each_commit for each_commit in commit.iter_parents()]
         items = []
-        for each_commit in parent_commits:
+        for each_commit in self._git_repo.iter_commits(
+            rev=commit.hexsha,
+            max_count=self.MAX_COMMITS,
+        ):
             item = {
                 "id": each_commit.hexsha,
                 "title": each_commit.message,
                 "message": "",
                 "authors": [],
-                "date": each_commit.committed_datetime.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                "date": self._format_git_datetime(each_commit.committed_datetime),
             }
             item["authors"].append({
                 "name": each_commit.author.name,
@@ -271,9 +280,7 @@ class LocalMirrorRepo(object):
         meta.id = f"{self._org}/{self._repo}"
         meta.author = self._org
         meta.sha = commit.hexsha
-        meta.lastModified = self._git_repo.head.commit.committed_datetime.strftime(
-            "%Y-%m-%dT%H:%M:%S.%fZ"
-        )
+        meta.lastModified = self._format_git_datetime(commit.committed_datetime)
         meta.private = False
         meta.gated = False
         meta.disabled = False
@@ -288,8 +295,8 @@ class LocalMirrorRepo(object):
         meta.siblings = [
             {"rfilename": p} for p in self._get_commit_filepaths_recursive(commit)
         ]
-        meta.createdAt = self._get_earliest_commit().committed_datetime.strftime(
-            "%Y-%m-%dT%H:%M:%S.%fZ"
+        meta.createdAt = self._format_git_datetime(
+            self._get_earliest_commit().committed_datetime
         )
         return meta.to_dict()
 

@@ -359,8 +359,10 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
 
     assert captured[0]["url"] == "http://mirror.example/team/demo/hash.bin"
     assert captured[0].get("repo_type") is None
+    assert captured[0]["allow_cache"] is True
     assert captured[1]["url"] == "http://mirror.example/team/demo/hash.bin"
     assert captured[1].get("repo_type") is None
+    assert captured[1]["allow_cache"] is False
 
 
 @pytest.mark.asyncio

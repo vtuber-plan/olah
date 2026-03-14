@@ -27,8 +27,9 @@ async def lfs_head_generator(
     make_dirs(head_path)
     make_dirs(save_path)
 
-    # use_cache = os.path.exists(head_path) and os.path.exists(save_path)
-    allow_cache = True
+    # Raw LFS URLs do not carry repo identity, so cached hits cannot be safely
+    # revalidated against repo visibility on later requests.
+    allow_cache = False
 
     # proxy
     return await _file_realtime_stream(
@@ -57,8 +58,9 @@ async def lfs_get_generator(
     make_dirs(head_path)
     make_dirs(save_path)
 
-    # use_cache = os.path.exists(head_path) and os.path.exists(save_path)
-    allow_cache = True
+    # Raw LFS URLs do not carry repo identity, so cached hits cannot be safely
+    # revalidated against repo visibility on later requests.
+    allow_cache = False
 
     # proxy
     return await _file_realtime_stream(

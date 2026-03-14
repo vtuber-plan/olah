@@ -50,6 +50,8 @@ if "fastapi_utils.tasks" not in sys.modules:
     sys.modules["fastapi_utils.tasks"] = fastapi_utils_tasks
 
 from olah import errors, server_access, server_mirror, server_responses, server_upstream
+from olah import server_api_routes, server_file_routes
+from olah.utils import logging as olah_logging
 from olah.proxy.result import ProxyResult, single_chunk_body
 
 
@@ -264,26 +266,133 @@ def test_main_and_cli_share_run_server(monkeypatch):
     assert calls == ["init", ("run_server", args), "init", ("run_server", args)]
 
 
+def test_build_logger_redirects_stdout_and_stderr_only_once(tmp_path):
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    original_handler = olah_logging.handler
+
+    try:
+        olah_logging.handler = None
+        olah_logging._original_stdout = original_stdout
+        olah_logging._original_stderr = original_stderr
+
+        first = olah_logging.build_logger("olah-test-1", "test.log", logger_dir=str(tmp_path))
+        stdout_wrapper = sys.stdout
+        stderr_wrapper = sys.stderr
+
+        second = olah_logging.build_logger("olah-test-2", "test.log", logger_dir=str(tmp_path))
+
+        assert first.name == "olah-test-1"
+        assert second.name == "olah-test-2"
+        assert sys.stdout is stdout_wrapper
+        assert sys.stderr is stderr_wrapper
+        assert stdout_wrapper.terminal is original_stdout
+        assert stderr_wrapper.terminal is original_stderr
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        if olah_logging.handler is not None:
+            olah_logging.handler.close()
+        olah_logging.handler = original_handler
+
+
 @pytest.mark.asyncio
 async def test_meta_proxy_common_checks_visibility_before_local_mirror(monkeypatch):
-    import importlib
-
-    server_module = importlib.import_module("olah.server")
-    server_module.app.state.app_settings = SimpleNamespace(config=_make_app().state.app_settings.config)
+    app = _make_app()
+    app.state.logger = None
 
     async def fake_ensure_repo_visibility(app, repo, authorization):
         return errors.error_repo_not_found()
 
-    monkeypatch.setattr(server_module, "ensure_repo_visibility", fake_ensure_repo_visibility)
-    monkeypatch.setattr(server_module, "load_local_mirror_payload", pytest.fail)
+    monkeypatch.setattr(server_api_routes, "ensure_repo_visibility", fake_ensure_repo_visibility)
+    monkeypatch.setattr(server_api_routes, "load_local_mirror_payload", pytest.fail)
 
-    response = await server_module.meta_proxy_common(
+    response = await server_api_routes.meta_proxy_common(
+        app,
         repo_type="models",
         org="team",
         repo="demo",
         commit="main",
         method="get",
         authorization=None,
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_file_get_common_checks_visibility_before_local_mirror(monkeypatch):
+    from fastapi import Request
+
+    app = _make_app()
+    app.state.logger = None
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/team/demo/resolve/main/file.bin",
+        "raw_path": b"/team/demo/resolve/main/file.bin",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 18090),
+    }
+
+    async def fake_ensure_repo_visibility(app, repo, authorization):
+        return errors.error_repo_not_found()
+
+    monkeypatch.setattr(server_file_routes, "ensure_repo_visibility", fake_ensure_repo_visibility)
+    monkeypatch.setattr(server_file_routes, "load_local_mirror_payload", pytest.fail)
+
+    response = await server_file_routes.file_get_common(
+        app,
+        repo_type="models",
+        org="team",
+        repo="demo",
+        commit="main",
+        file_path="file.bin",
+        request=Request(scope),
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_cdn_proxy_common_checks_visibility_before_generator(monkeypatch):
+    from fastapi import Request
+
+    app = _make_app()
+    app.state.logger = None
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/team/demo/hash.bin",
+        "raw_path": b"/team/demo/hash.bin",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 18090),
+    }
+
+    async def fake_ensure_repo_visibility(app, repo, authorization):
+        return errors.error_repo_not_found()
+
+    monkeypatch.setattr(server_file_routes, "ensure_repo_visibility", fake_ensure_repo_visibility)
+    monkeypatch.setattr(server_file_routes, "cdn_file_get_generator", pytest.fail)
+
+    response = await server_file_routes.cdn_proxy_common(
+        app,
+        repo_type="models",
+        org="team",
+        repo="demo",
+        hash_file="hash.bin",
+        request=Request(scope),
+        method="GET",
     )
 
     assert response.status_code == 401
