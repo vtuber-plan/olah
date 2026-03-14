@@ -1,13 +1,15 @@
 name: Docker Image Build/Publish release image
 
 on:
-  release:
+  workflow_run:
+    workflows:
+      - Build and publish release artifacts
     types:
-      - published
+      - completed
   workflow_dispatch:
     inputs:
       olah_version:
-        description: Published Olah version to install from PyPI
+        description: Published Olah version already available on PyPI
         required: true
         default: 0.4.1
 
@@ -16,12 +18,13 @@ permissions:
   packages: write
 
 concurrency:
-  group: docker-release-${{ github.event.release.tag_name || github.event.inputs.olah_version }}
+  group: docker-release-${{ github.event.workflow_run.head_branch || github.event.inputs.olah_version }}
   cancel-in-progress: false
 
 jobs:
   build-and-push-docker-image:
     name: Build release Docker image and push to registries
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -30,8 +33,8 @@ jobs:
           DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/olah
           GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/olah
         run: |
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            TAG_NAME="${{ github.event.release.tag_name }}"
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            TAG_NAME="${{ github.event.workflow_run.head_branch }}"
             VERSION="${TAG_NAME#v}"
             OLAH_SOURCE="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/olah-${VERSION}-py3-none-any.whl"
             PUSH_LATEST="true"
