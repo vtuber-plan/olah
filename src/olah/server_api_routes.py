@@ -291,6 +291,58 @@ async def whoami_v2(request: Request):
     )
 
 
+async def _xet_read_token_passthrough(repo_type: str, org_repo: str, commit: str, request: Request) -> Response:
+    # The Xet client refreshes its CAS access token by calling
+    # /api/<repo_type>/<org>/<repo>/xet-read-token/<commit> on the configured HF
+    # endpoint. With HF_ENDPOINT pointed at olah, that GET lands here, so we
+    # forward it verbatim to upstream HF — but only after the same access
+    # policy gate the file-resolve routes apply, otherwise this route would
+    # silently bypass mirror rules for any repo upstream is willing to grant.
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
+        return error_repo_not_found()
+    access_error = await ensure_repo_visibility(request.app, repo_ref, request.headers.get("authorization", None))
+    if access_error is not None:
+        return access_error
+    target = urljoin(
+        request.app.state.app_settings.config.hf_url_base(),
+        f"/api/{repo_type}/{org_repo}/xet-read-token/{commit}",
+    )
+    upstream_headers = {k.lower(): v for k, v in request.headers.items()}
+    upstream_headers["host"] = request.app.state.app_settings.config.hf_netloc
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method=request.method,
+                url=target,
+                headers=upstream_headers,
+                timeout=10,
+            )
+    except httpx.HTTPError:
+        return Response(status_code=504)
+    response_headers = {k.lower(): v for k, v in response.headers.items()}
+    response_headers.pop("content-encoding", None)
+    response_headers.pop("content-length", None)
+    response_headers.pop("transfer-encoding", None)
+    return Response(
+        content=response.content,
+        status_code=response.status_code,
+        headers=response_headers,
+    )
+
+
+@router.head("/api/{repo_type}/{org}/{repo}/xet-read-token/{commit}")
+@router.get("/api/{repo_type}/{org}/{repo}/xet-read-token/{commit}")
+async def xet_read_token_expanded(repo_type: str, org: str, repo: str, commit: str, request: Request):
+    return await _xet_read_token_passthrough(repo_type, f"{org}/{repo}", commit, request)
+
+
+@router.head("/api/{repo_type}/{org_repo}/xet-read-token/{commit}")
+@router.get("/api/{repo_type}/{org_repo}/xet-read-token/{commit}")
+async def xet_read_token_compact(repo_type: str, org_repo: str, commit: str, request: Request):
+    return await _xet_read_token_passthrough(repo_type, org_repo, commit, request)
+
+
 @router.head("/api/{repo_type}/{org_repo}")
 @router.get("/api/{repo_type}/{org_repo}")
 async def meta_proxy_compact(repo_type: str, org_repo: str, request: Request):

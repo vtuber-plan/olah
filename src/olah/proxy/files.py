@@ -46,10 +46,20 @@ from olah.utils.zip_utils import Decompressor, decompress_data
 from olah.proxy.result import ProxyResult, single_chunk_body
 
 
+XET_RESPONSE_HEADERS = (
+    "x-xet-hash",
+    "x-xet-refresh-route",
+    "x-linked-size",
+    "x-linked-etag",
+    "link",
+)
+
+
 @dataclass(frozen=True)
 class RemoteFileMetadata:
     file_size: int
     etag: Optional[str]
+    xet_headers: Optional[Dict[str, str]] = None
 
 
 def get_block_info(pos: int, block_size: int, file_size: int) -> Tuple[int, int, int]:
@@ -454,12 +464,86 @@ async def _remote_file_metadata(
 
     content_length = response.headers.get("content-length")
     if content_length is None:
+        # Xet-only files have no content-length in the resolve HEAD; fall back to x-linked-size.
+        content_length = response.headers.get("x-linked-size")
+    if content_length is None:
         return None
     try:
         file_size = int(content_length)
     except ValueError:
         return None
-    return RemoteFileMetadata(file_size=file_size, etag=response.headers.get("etag"))
+    xet_headers = {h: response.headers[h] for h in XET_RESPONSE_HEADERS if h in response.headers}
+    return RemoteFileMetadata(
+        file_size=file_size,
+        etag=response.headers.get("etag") or response.headers.get("x-linked-etag"),
+        xet_headers=xet_headers or None,
+    )
+
+
+async def _detect_xet_passthrough(
+    hf_url: str,
+    authorization: Optional[str],
+    commit: Optional[str],
+) -> Optional[ProxyResult]:
+    # Xet files cannot stream through olah: the client must speak the Xet
+    # chunked protocol against xethub.hf.co directly. Probe upstream with a
+    # HEAD that follows *relative* redirects only (matching what
+    # huggingface_hub does), and stops at the first absolute 3xx — that is
+    # the response carrying x-xet-hash for renamed/canonical-redirected repos.
+    headers = {}
+    if authorization is not None:
+        headers["authorization"] = authorization
+    response = None
+    current_url = hf_url
+    try:
+        async with httpx.AsyncClient() as client:
+            for _ in range(5):
+                response = await client.request(
+                    method="HEAD",
+                    url=current_url,
+                    headers=headers,
+                    timeout=WORKER_API_TIMEOUT,
+                    follow_redirects=False,
+                )
+                if not (300 <= response.status_code < 400):
+                    break
+                location = response.headers.get("location")
+                if location is None:
+                    break
+                if urlparse(location).netloc:
+                    # Absolute redirect — this is where Xet metadata lives.
+                    break
+                # Use RFC 3986 reference resolution so the redirect's query
+                # string (or absence thereof) replaces the base's, instead of
+                # the half-baked path-only swap urlparse._replace would do.
+                current_url = urljoin(current_url, location)
+            else:
+                return None
+    except (httpx.HTTPError, ValueError):
+        return None
+    if response is None or "x-xet-hash" not in response.headers:
+        return None
+    response_headers: Dict[str, str] = {"accept-ranges": "bytes"}
+    for h in XET_RESPONSE_HEADERS:
+        if h in response.headers:
+            response_headers[h] = response.headers[h]
+    # huggingface_hub's _httpx_follow_relative_redirects_with_backoff raises
+    # KeyError on a 3xx response without a Location header. Upstream's Location
+    # is an absolute CAS bridge URL — the client won't follow it (only relative
+    # redirects are followed) but the header must still be present.
+    for h in ("etag", "content-length", "content-type", "location"):
+        if h in response.headers:
+            response_headers[h] = response.headers[h]
+    if commit is not None:
+        response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
+    elif "x-repo-commit" in response.headers:
+        response_headers["x-repo-commit"] = response.headers["x-repo-commit"]
+    return ProxyResult(
+        status_code=response.status_code,
+        headers=response_headers,
+        body=single_chunk_body(b""),
+    )
+
 
 async def _file_realtime_stream(
     app,
@@ -511,6 +595,16 @@ async def _file_realtime_stream(
         request_headers["host"] = urlparse(hf_url).netloc
 
     authorization = request.headers.get("authorization", None)
+
+    if not app.state.app_settings.config.offline:
+        xet_passthrough = await _detect_xet_passthrough(
+            hf_url=hf_url,
+            authorization=authorization,
+            commit=commit,
+        )
+        if xet_passthrough is not None:
+            return xet_passthrough
+
     if repo_type is not None and org is not None and repo is not None and file_path is not None and commit is not None:
         generator = await pathsinfo_generator(
             app,
