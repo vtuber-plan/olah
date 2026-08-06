@@ -6,6 +6,8 @@
 # https://opensource.org/licenses/MIT.
 
 import asyncio
+import hashlib
+import logging
 import lzma
 import mmap
 import os
@@ -13,20 +15,26 @@ import tempfile
 import string
 import struct
 import threading
+import time
 import gzip
 from typing import BinaryIO, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 import aiofiles
 import fastapi
 import fastapi.concurrency
 import portalocker
+from olah.constants import OLAH_CACHE_BLOCK_SIZE, OLAH_CACHE_GZIP_LEVEL
 from .bitset import Bitset
 
 CURRENT_OLAH_CACHE_VERSION = 9
-# Due to the download chunk settings: https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/constants.py#L37
-DEFAULT_BLOCK_SIZE = 50 * 1024 * 1024
+# 64 MiB — aligned with huggingface_hub / olares-ollama Range chunk size.
+DEFAULT_BLOCK_SIZE = OLAH_CACHE_BLOCK_SIZE
 MAX_BLOCK_NUM = 8192
 DEFAULT_COMPRESSION_ALGO = 1
+GZIP_MAGIC = b"\x1f\x8b"
+STALE_TMP_MAX_AGE_SEC = 3600
 """
 0: no compression
 1: gzip
@@ -142,6 +150,8 @@ class OlahCache(object):
         # Path
         self._meta_path = os.path.join(path, "meta.bin")
         self._data_path = os.path.join(path, "blocks/block_${block_index}.bin")
+        # Incremented when an in-flight download must reset block assembly state (upstream retry).
+        self._stream_reset_nonce: int = 0
 
         self.open(path, block_size=block_size)
 
@@ -162,9 +172,11 @@ class OlahCache(object):
                 with portalocker.Lock(self._meta_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as f:
                     f.seek(0)
                     self.header = OlahCacheHeader.read(f)
+            self._cleanup_stale_tmp_files()
         else:
             os.makedirs(self.path, exist_ok=True)
             os.makedirs(os.path.join(self.path, "blocks"), exist_ok=True)
+            self._cleanup_stale_tmp_files()
             with self._header_lock:
                 # Create new file
                 with portalocker.Lock(self._meta_path, "wb", timeout=60, flags=portalocker.LOCK_EX) as f:
@@ -177,6 +189,35 @@ class OlahCache(object):
                     self.header.write(f)
 
         self.is_open = True
+
+    def _cleanup_stale_tmp_files(self) -> None:
+        if self.path is None:
+            return
+        blocks_dir = os.path.join(self.path, "blocks")
+        if not os.path.isdir(blocks_dir):
+            return
+        cutoff = time.time() - STALE_TMP_MAX_AGE_SEC
+        for name in os.listdir(blocks_dir):
+            if not (name.endswith(".tmp") or name.startswith(".block_")):
+                continue
+            path = os.path.join(blocks_dir, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    logger.info("Removed stale cache temp file: %s", path)
+            except OSError:
+                pass
+
+    def _expected_decompressed_len(self, block_index: int) -> int:
+        file_size = self._get_file_size()
+        block_size = self._get_block_size()
+        start = block_index * block_size
+        if start >= file_size:
+            return 0
+        return min(block_size, file_size - start)
+
+    def _looks_like_gzip(self, data: bytes) -> bool:
+        return len(data) >= 2 and data[:2] == GZIP_MAGIC
 
     def close(self):
         if not self.is_open:
@@ -246,9 +287,87 @@ class OlahCache(object):
             raise Exception("This file has been close.")
         self._flush_header()
 
+    def _block_path(self, block_index: int) -> str:
+        return string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
+
+    def is_terminal_block(self, block_index: int) -> bool:
+        return block_index == self._get_block_number() - 1
+
+    def invalidate_blocks_in_range(self, start_pos: int, end_pos: int, reason: str) -> None:
+        if start_pos >= end_pos:
+            return
+        block_size = self._get_block_size()
+        start_block = start_pos // block_size
+        end_block = (end_pos - 1) // block_size
+        for block_index in range(start_block, end_block + 1):
+            self._invalidate_block(block_index, reason)
+
+    def request_stream_reset(self, start_pos: int, end_pos: int, reason: str) -> None:
+        self.invalidate_blocks_in_range(start_pos, end_pos, reason)
+        self._stream_reset_nonce += 1
+
+    def is_complete(self) -> bool:
+        if not self.is_open or self.header is None:
+            return False
+        for block_index in range(self._get_block_number()):
+            if not self.has_block(block_index):
+                return False
+        return True
+
+    def invalidate_all_blocks(self, reason: str) -> None:
+        if self.header is None:
+            return
+        for block_index in range(self._get_block_number()):
+            if self.has_block(block_index):
+                self._invalidate_block(block_index, reason)
+        self._stream_reset_nonce += 1
+
+    async def content_sha256(self) -> str:
+        if not self.is_open or self.header is None:
+            raise Exception("Cannot hash a closed cache file.")
+        digest = hashlib.sha256()
+        for block_index in range(self._get_block_number()):
+            if not self.has_block(block_index):
+                raise Exception(f"Cache block {block_index} is missing.")
+            raw_block = await self.read_block(block_index)
+            if raw_block is None:
+                raise Exception(f"Cache block {block_index} could not be read.")
+            expected_len = self._expected_decompressed_len(block_index)
+            digest.update(raw_block[:expected_len])
+        return digest.hexdigest()
+
     def has_block(self, block_index: int) -> bool:
-        block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
-        return os.path.exists(block_path) and os.path.getsize(block_path) > 0
+        block_path = self._block_path(block_index)
+        if not os.path.exists(block_path):
+            return False
+        size = os.path.getsize(block_path)
+        if size <= 0:
+            return False
+        if self.header is not None and self.header.compression_algo == 1 and size < len(GZIP_MAGIC):
+            return False
+        return True
+
+    def _invalidate_block(self, block_index: int, reason: str) -> None:
+        block_path = self._block_path(block_index)
+        lock_path = block_path + ".write.lock"
+        try:
+            with portalocker.Lock(lock_path, "w", timeout=10, flags=portalocker.LOCK_EX):
+                if os.path.exists(block_path):
+                    os.remove(block_path)
+                    logger.warning(
+                        "Invalidated corrupt cache block %d at %s: %s",
+                        block_index,
+                        block_path,
+                        reason,
+                    )
+        except portalocker.exceptions.LockException:
+            logger.warning(
+                "Could not lock block %d for invalidation (%s); removing best-effort",
+                block_index,
+                reason,
+            )
+            if os.path.exists(block_path):
+                os.remove(block_path)
 
     async def read_block(self, block_index: int) -> Optional[bytes]:
         if not self.is_open:
@@ -266,35 +385,54 @@ class OlahCache(object):
         if not self.has_block(block_index=block_index):
             return None
         
-        block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
+        block_path = self._block_path(block_index)
 
-        with portalocker.Lock(block_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as fh:
-            async with aiofiles.open(block_path, mode='rb') as f:
-                raw_block = await f.read(self._get_block_size())
-        
+        with portalocker.Lock(block_path, "rb", timeout=60, flags=portalocker.LOCK_SH):
+            async with aiofiles.open(block_path, mode="rb") as f:
+                raw_block = await f.read()
+
+        if (
+            self.header.compression_algo == 1
+            and (len(raw_block) < len(GZIP_MAGIC) or not self._looks_like_gzip(raw_block))
+        ):
+            self._invalidate_block(block_index, "missing or invalid gzip header")
+            return None
+
         def decompression(block_data: bytes, compression_algo: int):
-            # compression
             if compression_algo == 0:
                 return block_data
             elif compression_algo == 1:
-                block_data = gzip.decompress(block_data)
+                return gzip.decompress(block_data)
             elif compression_algo == 2:
                 lzma_dec = lzma.LZMADecompressor()
-                block_data = lzma_dec.decompress(block_data)
+                return lzma_dec.decompress(block_data)
             else:
                 raise Exception("Unsupported compression algorithm.")
-            return block_data
 
-        raw_block = await fastapi.concurrency.run_in_threadpool(
-            decompression,
-            raw_block,
-            self.header.compression_algo
-        )
+        try:
+            raw_block = await fastapi.concurrency.run_in_threadpool(
+                decompression,
+                raw_block,
+                self.header.compression_algo,
+            )
+        except (EOFError, OSError, lzma.LZMAError) as exc:
+            self._invalidate_block(block_index, str(exc))
+            return None
+
+        expected_len = self._expected_decompressed_len(block_index)
+        if expected_len > 0 and len(raw_block) != expected_len:
+            self._invalidate_block(
+                block_index,
+                f"decompressed length {len(raw_block)} != expected {expected_len}",
+            )
+            return None
 
         block = self._pad_block(raw_block)
         return block
 
-    async def write_block(self, block_index: int, block_bytes: bytes) -> None:
+    async def write_block(
+        self, block_index: int, block_bytes: bytes, overwrite: bool = False
+    ) -> None:
         if not self.is_open:
             raise Exception("This file has been closed.")
         
@@ -322,7 +460,8 @@ class OlahCache(object):
             if compression_algo == 0:
                 return block_data
             elif compression_algo == 1:
-                block_data = gzip.compress(block_data, compresslevel=4)
+                level = int(os.getenv("OLAH_CACHE_GZIP_LEVEL", str(OLAH_CACHE_GZIP_LEVEL)))
+                block_data = gzip.compress(block_data, compresslevel=level)
             elif compression_algo == 2:
                 lzma_enc = lzma.LZMACompressor()
                 block_data = lzma_enc.compress(block_data)
@@ -337,27 +476,65 @@ class OlahCache(object):
             self.header.compression_algo
         )
    
-        block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
+        block_path = self._block_path(block_index)
         block_dir = os.path.dirname(block_path)
+        lock_path = block_path + ".write.lock"
 
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=block_dir,
-            prefix=f".block_{block_index:0>8}_",
-            suffix=".tmp",
-            delete=False,
-        ) as tmp:
-            tmp_path = tmp.name
+        with portalocker.Lock(lock_path, "w", timeout=120, flags=portalocker.LOCK_EX):
+            if not overwrite and self.has_block(block_index):
+                return
+            if overwrite and self.has_block(block_index):
+                block_path_existing = self._block_path(block_index)
+                if os.path.exists(block_path_existing):
+                    os.remove(block_path_existing)
 
-        try:
-            async with aiofiles.open(tmp_path, mode="wb") as f:
-                await f.write(real_block_bytes)
-            os.replace(tmp_path, block_path)
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=block_dir,
+                prefix=f".block_{block_index:0>8}_",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp_path = tmp.name
+
+            try:
+                async with aiofiles.open(tmp_path, mode="wb") as f:
+                    await f.write(real_block_bytes)
+                    await f.flush()
+                await fastapi.concurrency.run_in_threadpool(self._fsync_path, tmp_path)
+                os.replace(tmp_path, block_path)
+                await fastapi.concurrency.run_in_threadpool(self._fsync_dir, block_dir)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
         self._flush_header()
+
+    @staticmethod
+    def _fsync_path(path: str) -> None:
+        try:
+            fd = os.open(path, os.O_RDWR)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            # Best-effort durability; some platforms/temp dirs may not support fsync.
+            pass
+
+    @staticmethod
+    def _fsync_dir(path: str) -> None:
+        try:
+            if hasattr(os, "O_DIRECTORY"):
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            else:
+                fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
 
     def _resize_file_size(self, file_size: int):
         """

@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from olah.errors import error_repo_not_found
 from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
-from olah.server_access import build_repo_ref, ensure_repo_visibility, parse_repo_ref, parse_resolve_repo_ref
+from olah.server_access import build_repo_ref, ensure_repo_access, ensure_repo_visibility, parse_repo_ref, parse_resolve_repo_ref
 from olah.server_mirror import load_local_mirror_payload
 from olah.server_responses import build_streaming_response
 from olah.server_upstream import resolve_requested_commit
@@ -54,7 +54,7 @@ async def file_head_common(
     request: Request,
 ) -> Response:
     repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
+    access_error = await ensure_repo_access(app, repo_ref)
     if access_error is not None:
         return access_error
 
@@ -133,7 +133,7 @@ async def file_get_common(
     request: Request,
 ) -> Response:
     repo_ref = build_repo_ref(repo_type, org, repo)
-    access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
+    access_error = await ensure_repo_access(app, repo_ref)
     if access_error is not None:
         return access_error
 

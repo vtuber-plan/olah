@@ -38,27 +38,24 @@ async def resolve_requested_commit(
     missing_commit_response: Literal["repo_not_found", "revision_not_found"] = "revision_not_found",
 ) -> Tuple[Optional[ResolvedCommit], Optional[Response]]:
     if not app.state.app_settings.config.offline:
+        # check_commit_hf is best-effort; get_commit_hf below is authoritative.
         if not repo_visible:
-            if not await check_commit_hf(
+            await check_commit_hf(
                 app,
                 repo.repo_type,
                 repo.org,
                 repo.repo,
                 commit=None,
                 authorization=authorization,
-            ):
-                return None, error_repo_not_found()
-        if not await check_commit_hf(
+            )
+        await check_commit_hf(
             app,
             repo.repo_type,
             repo.org,
             repo.repo,
             commit=requested_commit,
             authorization=authorization,
-        ):
-            if missing_commit_response == "repo_not_found":
-                return None, error_repo_not_found()
-            return None, error_revision_not_found(revision=requested_commit)
+        )
 
     resolved_commit = await get_commit_hf(
         app,
@@ -69,6 +66,8 @@ async def resolve_requested_commit(
         authorization=authorization,
     )
     if resolved_commit is None:
+        if missing_commit_response == "revision_not_found":
+            return None, error_revision_not_found(revision=requested_commit)
         return None, error_repo_not_found()
     return ResolvedCommit(requested=requested_commit, resolved=resolved_commit), None
 

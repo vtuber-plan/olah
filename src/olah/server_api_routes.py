@@ -364,6 +364,58 @@ async def meta_proxy_commit_compact(
     )
 
 
+@router.head("/api/{repo_type}/{org}/{repo}/tree/{commit}")
+@router.get("/api/{repo_type}/{org}/{repo}/tree/{commit}")
+async def tree_proxy_commit_root_expanded(
+    repo_type: str,
+    org: str,
+    repo: str,
+    commit: str,
+    request: Request,
+    recursive: bool = False,
+    expand: bool = False,
+):
+    return await tree_proxy_common(
+        request.app,
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=commit,
+        path="",
+        recursive=recursive,
+        expand=expand,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
+    )
+
+
+@router.head("/api/{repo_type}/{org_repo}/tree/{commit}")
+@router.get("/api/{repo_type}/{org_repo}/tree/{commit}")
+async def tree_proxy_commit_root_compact(
+    repo_type: str,
+    org_repo: str,
+    commit: str,
+    request: Request,
+    recursive: bool = False,
+    expand: bool = False,
+):
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
+        return error_repo_not_found()
+    return await tree_proxy_common(
+        request.app,
+        repo_type=repo_type,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
+        commit=commit,
+        path="",
+        recursive=recursive,
+        expand=expand,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
+    )
+
+
 @router.head("/api/{repo_type}/{org}/{repo}/tree/{commit}/{file_path:path}")
 @router.get("/api/{repo_type}/{org}/{repo}/tree/{commit}/{file_path:path}")
 async def tree_proxy_commit_expanded(

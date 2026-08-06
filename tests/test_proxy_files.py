@@ -93,6 +93,12 @@ def test_get_contiguous_ranges_splits_cached_and_remote_segments():
     ]
 
 
+def test_iter_block_bounded_ranges_splits_at_block_boundaries():
+    assert proxy_files.iter_block_bounded_ranges(0, 10, 4) == [(0, 4), (4, 8), (8, 10)]
+    assert proxy_files.iter_block_bounded_ranges(6, 14, 4) == [(6, 8), (8, 12), (12, 14)]
+    assert proxy_files.iter_block_bounded_ranges(0, 0, 4) == []
+
+
 @pytest.mark.asyncio
 async def test_file_realtime_stream_returns_invalid_data_error_on_bad_pathsinfo(monkeypatch, tmp_path):
     async def fake_pathsinfo_generator(*args, **kwargs):
@@ -477,8 +483,8 @@ async def test_file_realtime_stream_rejects_unsatisfiable_ranges(monkeypatch, tm
         save_path=str(tmp_path / "save"),
         head_path=str(tmp_path / "head"),
         url="https://mirror.example/file.bin",
-        request=_make_request("GET", headers={"range": "bytes=5-9", "host": "mirror.example"}),
-        method="GET",
+        request=_make_request("HEAD", headers={"range": "bytes=5-9", "host": "mirror.example"}),
+        method="HEAD",
         allow_cache=False,
         commit="abc123",
     )
@@ -645,6 +651,61 @@ async def test_get_file_range_from_remote_supports_chunked_responses_without_con
     ]
 
     assert b"".join(chunks) == payload
+
+
+@pytest.mark.asyncio
+async def test_get_file_range_from_remote_retries_without_double_yield(monkeypatch):
+    payload = b"retry-safe-bytes"
+    calls = {"count": 0}
+
+    class FakeResponse:
+        status_code = 206
+        headers = {"content-length": str(len(payload))}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_raw(self):
+            yield payload
+
+    class FakeClient:
+        def stream(self, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise httpx.TransportError("connection reset")
+            return FakeResponse()
+
+    class FakeCache:
+        file_size = len(payload)
+        _stream_reset_nonce = 0
+
+        def _get_file_size(self):
+            return self.file_size
+
+        def request_stream_reset(self, start_pos, end_pos, reason):
+            self._stream_reset_nonce += 1
+
+    cache = FakeCache()
+
+    monkeypatch.setenv("OLAH_REMOTE_RETRY_MAX", "2")
+
+    chunks = [
+        chunk
+        async for chunk in proxy_files._get_file_range_from_remote(
+            client=FakeClient(),
+            remote_info=proxy_files.RemoteInfo("GET", "https://huggingface.co/file.bin", {}),
+            cache_file=cache,
+            start_pos=0,
+            end_pos=len(payload),
+        )
+    ]
+
+    assert b"".join(chunks) == payload
+    assert calls["count"] == 2
+    assert cache._stream_reset_nonce == 1
 
 
 @pytest.mark.asyncio

@@ -150,6 +150,8 @@ def test_get_newest_commit_hf_falls_back_to_offline_on_connect_error(monkeypatch
 
 def test_check_commit_hf_returns_false_when_upstream_request_fails(monkeypatch, tmp_path):
     app = _make_app(tmp_path, offline=False)
+    repo_utils._CHECK_COMMIT_CACHE.clear()
+    repo_utils._CHECK_COMMIT_INFLIGHT.clear()
 
     class FakeAsyncClient:
         async def __aenter__(self):
@@ -161,8 +163,121 @@ def test_check_commit_hf_returns_false_when_upstream_request_fails(monkeypatch, 
         async def request(self, *args, **kwargs):
             raise httpx.ConnectError("offline")
 
-    monkeypatch.setattr(repo_utils.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(repo_utils, "create_api_client", lambda: FakeAsyncClient())
 
     ok = asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo", commit="main"))
 
     assert ok is False
+
+
+def test_check_commit_hf_coalesces_concurrent_calls(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    repo_utils._CHECK_COMMIT_CACHE.clear()
+    repo_utils._CHECK_COMMIT_INFLIGHT.clear()
+    calls = {"count": 0}
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, *args, **kwargs):
+            calls["count"] += 1
+            await asyncio.sleep(0.05)
+            return FakeResponse()
+
+    monkeypatch.setattr(repo_utils, "create_api_client", lambda: FakeAsyncClient())
+
+    async def run_many():
+        return await asyncio.gather(
+            *[
+                repo_utils.check_commit_hf(app, "models", "team", "demo", commit="main")
+                for _ in range(12)
+            ]
+        )
+
+    results = asyncio.run(run_many())
+
+    assert results == [True] * 12
+    assert calls["count"] == 1
+
+
+def test_get_commit_hf_coalesces_concurrent_calls(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    repo_utils._GET_COMMIT_CACHE.clear()
+    repo_utils._GET_COMMIT_INFLIGHT.clear()
+    calls = {"count": 0}
+
+    class FakeResponse:
+        status_code = 200
+        text = json.dumps({"sha": "resolved-sha"})
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *args, **kwargs):
+            calls["count"] += 1
+            await asyncio.sleep(0.05)
+            return FakeResponse()
+
+    monkeypatch.setattr(repo_utils, "create_api_client", lambda: FakeAsyncClient())
+
+    async def run_many():
+        return await asyncio.gather(
+            *[
+                repo_utils.get_commit_hf(app, "models", "openai", "gpt-oss-20b", "main")
+                for _ in range(12)
+            ]
+        )
+
+    results = asyncio.run(run_many())
+
+    assert results == ["resolved-sha"] * 12
+    assert calls["count"] == 1
+
+
+def test_get_commit_hf_uses_positive_cache(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    repo_utils._GET_COMMIT_CACHE.clear()
+    repo_utils._GET_COMMIT_INFLIGHT.clear()
+    calls = {"count": 0}
+
+    class FakeResponse:
+        status_code = 200
+        text = json.dumps({"sha": "resolved-sha"})
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *args, **kwargs):
+            calls["count"] += 1
+            return FakeResponse()
+
+    monkeypatch.setattr(repo_utils, "create_api_client", lambda: FakeAsyncClient())
+
+    async def run_twice():
+        first = await repo_utils.get_commit_hf(
+            app, "models", "openai", "gpt-oss-20b", "main"
+        )
+        second = await repo_utils.get_commit_hf(
+            app, "models", "openai", "gpt-oss-20b", "main"
+        )
+        return first, second
+
+    first, second = asyncio.run(run_twice())
+
+    assert first == second == "resolved-sha"
+    assert calls["count"] == 1

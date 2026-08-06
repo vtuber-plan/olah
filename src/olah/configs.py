@@ -98,6 +98,14 @@ class OlahConfig(object):
 
         self.mirrors_path: List[str] = []
 
+        # performance / stability tuning
+        self.cache_block_size: int = 64 * 1024 * 1024
+        self.cache_gzip_level: int = 1
+        self.stream_read_timeout: float = 300.0
+        self.stream_connect_timeout: float = 30.0
+        self.remote_retry_max: int = 5
+        self.http2: bool = False
+
         # accessibility
         self.offline = False
         self.proxy = OlahRuleList.from_list(DEFAULT_PROXY_RULES)
@@ -180,6 +188,19 @@ class OlahConfig(object):
                 self.mirror_lfs_netloc = self.default_mirror_netloc()
 
             self.mirrors_path = basic.get("mirrors-path", self.mirrors_path)
+
+        if "performance" in config:
+            perf = config["performance"]
+            block_size = perf.get("cache-block-size", self.cache_block_size)
+            if isinstance(block_size, str):
+                self.cache_block_size = convert_to_bytes(block_size)
+            elif isinstance(block_size, int):
+                self.cache_block_size = block_size
+            self.cache_gzip_level = perf.get("cache-gzip-level", self.cache_gzip_level)
+            self.stream_read_timeout = perf.get("stream-read-timeout", self.stream_read_timeout)
+            self.stream_connect_timeout = perf.get("stream-connect-timeout", self.stream_connect_timeout)
+            self.remote_retry_max = perf.get("remote-retry-max", self.remote_retry_max)
+            self.http2 = perf.get("http2", self.http2)
 
         if "accessibility" in config:
             accessibility = config["accessibility"]

@@ -59,3 +59,15 @@ allow = true
 [[accessibility.cache]]
 repo = "adept/fuyu-8b"
 allow = false
+
+[performance]
+# 64 MiB blocks — aligned with huggingface_hub / common Range clients
+cache-block-size = "64MB"
+# Faster gzip (level 1); use 4 for smaller disk at cost of CPU
+cache-gzip-level = 1
+# Idle timeout between upstream chunks while streaming large LFS files (seconds)
+stream-read-timeout = 300
+stream-connect-timeout = 30
+remote-retry-max = 5
+# Keep false when Olah sits behind nginx for long Range downloads
+http2 = false

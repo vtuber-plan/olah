@@ -153,6 +153,15 @@ async def check_disk_usage() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import os as _os
+
+    cfg = app.state.app_settings.config
+    _os.environ["OLAH_STREAM_READ_TIMEOUT"] = str(cfg.stream_read_timeout)
+    _os.environ["OLAH_STREAM_CONNECT_TIMEOUT"] = str(cfg.stream_connect_timeout)
+    _os.environ["OLAH_REMOTE_RETRY_MAX"] = str(cfg.remote_retry_max)
+    _os.environ["OLAH_HTTP2"] = "true" if cfg.http2 else "false"
+    _os.environ["OLAH_CACHE_GZIP_LEVEL"] = str(cfg.cache_gzip_level)
+    _os.environ["OLAH_CACHE_BLOCK_SIZE"] = str(cfg.cache_block_size)
     await check_hf_connection()
     await check_disk_usage()
     yield
