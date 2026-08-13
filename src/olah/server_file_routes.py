@@ -22,6 +22,7 @@ from olah.server_access import build_repo_ref, ensure_repo_visibility, parse_rep
 from olah.server_mirror import load_local_mirror_payload
 from olah.server_responses import build_streaming_response
 from olah.server_upstream import resolve_requested_commit
+from olah.utils.lfs_object_index import authorize_lfs_object, cache_allowed_for_lfs_object
 from olah.utils.repo_utils import get_org_repo
 
 
@@ -182,11 +183,26 @@ async def lfs_proxy_common(
     request: Request,
     method: Literal["HEAD", "GET"],
 ) -> Response:
+    # Authorize before doing anything else. LFS URLs are content-addressed and
+    # carry no repo identity, so access is gated on the content-hash registry
+    # (populated at resolve time) plus a real upstream visibility probe. This is
+    # also the gate that makes caching LFS blobs safe.
+    authorization = request.headers.get("authorization")
+    auth_status = await authorize_lfs_object(app, hash_file, authorization)
+    if auth_status is not None:
+        return Response(status_code=auth_status)
+
+    allow_cache = await cache_allowed_for_lfs_object(app, hash_file)
+
     try:
         if method == "HEAD":
-            generator = await lfs_head_generator(app, dir1, dir2, hash_repo, hash_file, request)
+            generator = await lfs_head_generator(
+                app, dir1, dir2, hash_repo, hash_file, request, allow_cache=allow_cache
+            )
         else:
-            generator = await lfs_get_generator(app, dir1, dir2, hash_repo, hash_file, request)
+            generator = await lfs_get_generator(
+                app, dir1, dir2, hash_repo, hash_file, request, allow_cache=allow_cache
+            )
         return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         return Response(status_code=504)

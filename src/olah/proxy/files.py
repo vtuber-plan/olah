@@ -14,7 +14,6 @@ from typing import AsyncIterator, Dict, List, Literal, Optional, Tuple
 from fastapi import Request
 import fastapi.concurrency
 import httpx
-import portalocker
 from urllib.parse import urlparse, urljoin
 
 from olah.constants import (
@@ -25,7 +24,13 @@ from olah.constants import (
     HUGGINGFACE_HEADER_X_LINKED_SIZE,
     ORIGINAL_LOC,
 )
-from olah.cache.olah_cache import OlahCache, compression_algo_from_name
+from olah.cache.olah_cache import (
+    DEFAULT_BLOCK_SIZE,
+    DEFAULT_CHUNK_SIZE,
+    CacheIntegrityError,
+    OlahCache,
+    compression_algo_from_name,
+)
 from olah.errors import error_entry_not_found, error_proxy_invalid_data, error_proxy_timeout
 from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.utils.cache_utils import read_cache_request, write_cache_request
@@ -42,17 +47,12 @@ from olah.utils.url_utils import (
 )
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.rule_utils import check_cache_rules_hf
+from olah.utils.lfs_object_index import register_lfs_object
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 from olah.utils.zip_utils import Decompressor, decompress_data
 from olah.proxy.result import ProxyResult, single_chunk_body
 
-
-# Sub-chunk size for streaming cached blocks to the client. olah reads cache
-# blocks whole (~50MB) but must not yield them whole: uvicorn serves a single
-# ~50MB chunk at roughly half the rate of a ~1MB chunk, so slicing each block
-# before yielding ~doubles single-stream cache-hit throughput.
-_CACHE_STREAM_CHUNK = 1 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -161,68 +161,6 @@ async def _write_block_safely(
         raise
 
 
-async def _get_file_range_from_cache(
-    cache_file: OlahCache, start_pos: int, end_pos: int
-):
-    start_block = start_pos // cache_file._get_block_size()
-    end_block = (end_pos - 1) // cache_file._get_block_size()
-    cur_pos = start_pos
-    for cur_block in range(start_block, end_block + 1):
-        _, block_start_pos, block_end_pos = get_block_info(
-            cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-        )
-        if not cache_file.has_block(cur_block):
-            raise Exception("Unknown exception: read block which has not been cached.")
-        raw_block = await cache_file.read_block(cur_block)
-        chunk = raw_block[
-            max(start_pos, block_start_pos)
-            - block_start_pos : min(end_pos, block_end_pos)
-            - block_start_pos
-        ]
-        yield chunk
-        cur_pos += len(chunk)
-
-    if cur_pos != end_pos:
-        raise Exception("The cache range from {} to {} is incomplete.")
-
-
-async def _stream_cache_range_uncompressed(
-    cache_file: OlahCache, start_pos: int, end_pos: int
-):
-    """Stream a byte range from an UNCOMPRESSED (algo=0) cache directly from the
-    block files in ~1MB pieces.
-
-    Unlike _get_file_range_from_cache (which reads each whole ~50MB block, then
-    slices), this reads only the requested bytes and yields them at the streaming
-    chunk size -- no whole-block read, no slice copy. Only valid for algo=0,
-    where a block file holds the raw file bytes verbatim.
-    """
-    block_size = cache_file._get_block_size()
-    file_size = cache_file._get_file_size()
-    start_block = start_pos // block_size
-    end_block = (end_pos - 1) // block_size
-    for cur_block in range(start_block, end_block + 1):
-        if not cache_file.has_block(cur_block):
-            raise Exception("Unknown exception: read block which has not been cached.")
-        block_start = cur_block * block_size
-        block_end = min((cur_block + 1) * block_size, file_size)
-        offset = max(start_pos, block_start) - block_start
-        remaining = min(end_pos, block_end) - max(start_pos, block_start)
-        if remaining <= 0:
-            continue
-        block_path = cache_file.get_block_path(cur_block)
-        with portalocker.Lock(block_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as fh:
-            await fastapi.concurrency.run_in_threadpool(fh.seek, offset)
-            while remaining > 0:
-                piece = await fastapi.concurrency.run_in_threadpool(
-                    fh.read, min(_CACHE_STREAM_CHUNK, remaining)
-                )
-                if not piece:
-                    break
-                yield piece
-                remaining -= len(piece)
-
-
 async def _get_file_range_from_remote(
     client: httpx.AsyncClient,
     remote_info: RemoteInfo,
@@ -286,18 +224,25 @@ async def _file_chunk_get(
     headers: Dict[str, str],
     allow_cache: bool,
     file_size: int,
+    expected_etag: Optional[str] = None,
 ):
     # Redirect Chunks
-    compression_algo = compression_algo_from_name(
-        app.state.app_settings.config.cache_compression
+    cfg = app.state.app_settings.config
+    compression_algo = compression_algo_from_name(cfg.cache_compression)
+    block_size = cfg.cache_block_size or DEFAULT_BLOCK_SIZE
+    chunk_size = cfg.cache_chunk_size or DEFAULT_CHUNK_SIZE
+    # Opening revalidates identity online: a non-None expected_etag that differs
+    # from the stored one wipes & recreates the cache. Offline callers pass None
+    # to trust the disk. The constructor handles create / reuse / wipe uniformly
+    # and sizes chunks.crc for new caches.
+    cache_file = OlahCache(
+        save_path,
+        file_size=file_size,
+        block_size=block_size,
+        chunk_size=chunk_size,
+        compression_algo=compression_algo,
+        expected_etag=expected_etag,
     )
-    if os.path.exists(save_path):
-        # Existing caches read their compression algorithm back from meta.bin, so
-        # the passed value only matters for newly created caches below.
-        cache_file = OlahCache(save_path, compression_algo=compression_algo)
-    else:
-        cache_file = OlahCache.create(save_path, compression_algo=compression_algo)
-        cache_file.resize(file_size=file_size)
     
     # Refresh access time
     touch_file_access_time(save_path)
@@ -376,28 +321,23 @@ async def _file_chunk_get(
                             f"The size of remote range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
                         )
                 else:
-                    # Cache hit: blocks are already on disk. No reassembly, no
-                    # cache writes. For uncompressed caches (algo=0) stream each
-                    # block file directly in ~1MB pieces (no whole-block read,
-                    # no slice copy); for compressed caches read+decompress whole
-                    # blocks then re-chunk. Either way uvicorn gets small chunks
-                    # (see _CACHE_STREAM_CHUNK).
+                    # Cache hit: blocks are already on disk -- no reassembly, no
+                    # cache writes. OlahCache.stream_range serves both uncompressed
+                    # (raw seek+read) and compressed (sub-chunk-indexed) blocks in
+                    # ~1MB pieces, verifying each chunk's CRC. A CRC mismatch
+                    # raises CacheIntegrityError (the block is invalidated so the
+                    # next request re-fetches); we let it abort this response
+                    # rather than serve unverified bytes.
                     cur_pos = range_start_pos
-                    if cache_file.header.compression_algo == 0:
-                        async for piece in _stream_cache_range_uncompressed(
-                            cache_file, range_start_pos, range_end_pos
+                    try:
+                        async for piece in cache_file.stream_range(
+                            range_start_pos, range_end_pos
                         ):
                             if piece:
                                 yield piece
                                 cur_pos += len(piece)
-                    else:
-                        async for chunk in _get_file_range_from_cache(
-                            cache_file, range_start_pos, range_end_pos
-                        ):
-                            if chunk:
-                                for i in range(0, len(chunk), _CACHE_STREAM_CHUNK):
-                                    yield chunk[i:i + _CACHE_STREAM_CHUNK]
-                                cur_pos += len(chunk)
+                    except CacheIntegrityError:
+                        raise
                     if cur_pos != range_end_pos:
                         raise Exception(
                             f"The size of cached range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
@@ -416,6 +356,7 @@ async def _stream_single_range(
     headers: Dict[str, str],
     allow_cache: bool,
     file_size: int,
+    expected_etag: Optional[str] = None,
     requested_range: Optional[Tuple[int, int]] = None,
 ) -> AsyncIterator[bytes]:
     range_headers = dict(headers)
@@ -435,6 +376,7 @@ async def _stream_single_range(
         headers=range_headers,
         allow_cache=allow_cache,
         file_size=file_size,
+        expected_etag=expected_etag,
     ):
         yield chunk
 
@@ -542,6 +484,7 @@ async def _file_realtime_stream(
     method="GET",
     allow_cache=True,
     commit: Optional[str] = None,
+    expected_etag: Optional[str] = None,
 ) -> ProxyResult:
     async def error_result(response) -> ProxyResult:
         return ProxyResult(
@@ -612,6 +555,11 @@ async def _file_realtime_stream(
         if "size" not in pathinfo:
             return await error_result(error_proxy_timeout())
         file_size = pathinfo["size"]
+        # Register LFS content identity so later LFS downloads (which carry only
+        # the content hash, not the repo) can be authorized against this repo.
+        lfs_info = pathinfo.get("lfs") if isinstance(pathinfo, dict) else None
+        if isinstance(lfs_info, dict) and lfs_info.get("oid"):
+            await register_lfs_object(app, repo_type, org, repo, lfs_info["oid"])
         etag = await _resource_etag(
             hf_url=hf_url,
             authorization=authorization,
@@ -636,8 +584,12 @@ async def _file_realtime_stream(
     # Commit info
     if commit is not None:
         response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
+    # An explicit expected_etag (e.g. the LFS content hash) overrides the
+    # upstream-derived etag for both the response and cache revalidation.
+    if expected_etag is not None:
+        etag = expected_etag
     response_headers["etag"] = etag
-    
+
     if etag is None:
         return await error_result(error_proxy_timeout())
 
@@ -664,6 +616,11 @@ async def _file_realtime_stream(
             _multipart_content_length(boundary, all_ranges, file_size)
         )
 
+    # Identity passed to the cache for online revalidation. Offline trusts the
+    # disk (None) so a transient upstream-derived pseudo-etag never destroys a
+    # good cache while offline.
+    expected_etag = None if app.state.app_settings.config.offline else etag
+
     async def body_iter() -> AsyncIterator[bytes]:
         async with httpx.AsyncClient() as client:
             if method.lower() == "get":
@@ -678,6 +635,7 @@ async def _file_realtime_stream(
                         headers=request_headers,
                         allow_cache=allow_cache,
                         file_size=file_size,
+                        expected_etag=expected_etag,
                     ):
                         yield each_chunk
                 elif len(all_ranges) == 1:
@@ -691,6 +649,7 @@ async def _file_realtime_stream(
                         headers=request_headers,
                         allow_cache=allow_cache,
                         file_size=file_size,
+                        expected_etag=expected_etag,
                         requested_range=all_ranges[0],
                     ):
                         yield each_chunk
@@ -707,6 +666,7 @@ async def _file_realtime_stream(
                             headers=request_headers,
                             allow_cache=allow_cache,
                             file_size=file_size,
+                            expected_etag=expected_etag,
                             requested_range=(start_pos, end_pos),
                         ):
                             yield each_chunk

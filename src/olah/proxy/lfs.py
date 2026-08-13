@@ -14,7 +14,13 @@ from olah.utils.file_utils import make_dirs
 
 
 async def lfs_head_generator(
-    app, dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request
+    app: FastAPI,
+    dir1: str,
+    dir2: str,
+    hash_repo: str,
+    hash_file: str,
+    request: Request,
+    allow_cache: bool,
 ):
     # save
     repos_path = app.state.app_settings.config.repos_path
@@ -27,11 +33,10 @@ async def lfs_head_generator(
     make_dirs(head_path)
     make_dirs(save_path)
 
-    # Raw LFS URLs do not carry repo identity, so cached hits cannot be safely
-    # revalidated against repo visibility on later requests.
-    allow_cache = False
-
-    # proxy
+    # LFS objects are content-addressed: hash_file IS the SHA-256 of the blob, so
+    # it is used both as the cache's identity (expected_etag) and the response
+    # etag. Authorization + cache permission are decided by lfs_proxy_common
+    # before dispatching here.
     return await _file_realtime_stream(
         app=app,
         save_path=save_path,
@@ -41,11 +46,18 @@ async def lfs_head_generator(
         method="HEAD",
         allow_cache=allow_cache,
         commit=None,
+        expected_etag=hash_file,
     )
 
 
 async def lfs_get_generator(
-    app, dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request
+    app: FastAPI,
+    dir1: str,
+    dir2: str,
+    hash_repo: str,
+    hash_file: str,
+    request: Request,
+    allow_cache: bool,
 ):
     # save
     repos_path = app.state.app_settings.config.repos_path
@@ -58,11 +70,6 @@ async def lfs_get_generator(
     make_dirs(head_path)
     make_dirs(save_path)
 
-    # Raw LFS URLs do not carry repo identity, so cached hits cannot be safely
-    # revalidated against repo visibility on later requests.
-    allow_cache = False
-
-    # proxy
     return await _file_realtime_stream(
         app=app,
         save_path=save_path,
@@ -72,4 +79,5 @@ async def lfs_get_generator(
         method="GET",
         allow_cache=allow_cache,
         commit=None,
+        expected_etag=hash_file,
     )
