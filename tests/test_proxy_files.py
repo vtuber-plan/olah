@@ -71,6 +71,8 @@ def _make_app(tmp_path, offline=False):
         hf_url_base=lambda: "https://huggingface.co",
         hf_lfs_url_base=lambda: "https://cdn-lfs.huggingface.co",
         cache_compression="none",
+        cache_block_size=None,
+        cache_chunk_size=None,
     )
     return SimpleNamespace(state=SimpleNamespace(app_settings=SimpleNamespace(config=config)))
 
@@ -384,6 +386,7 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
         hash_repo="repohash",
         hash_file="filehash",
         request=request,
+        allow_cache=True,
     )
     assert lfs_result.status_code == 200
 
@@ -392,7 +395,10 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
     assert captured[0]["allow_cache"] is True
     assert captured[1]["url"] == "http://mirror.example/team/demo/hash.bin"
     assert captured[1].get("repo_type") is None
-    assert captured[1]["allow_cache"] is False
+    assert captured[1]["allow_cache"] is True
+    # LFS downloads are content-addressed: the cache revalidates against the
+    # content hash (hash_file), which is also the response etag.
+    assert captured[1]["expected_etag"] == "filehash"
 
 
 @pytest.mark.asyncio
@@ -496,30 +502,21 @@ async def test_file_realtime_stream_rejects_unsatisfiable_ranges(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-async def test_get_file_range_from_cache_reads_sliced_bytes_across_blocks():
-    class FakeCache:
-        def _get_block_size(self):
-            return 4
+@pytest.mark.asyncio
+async def test_stream_range_reads_sliced_bytes_across_blocks(tmp_path):
+    from olah.cache.olah_cache import OlahCache
 
-        def _get_file_size(self):
-            return 8
+    cache = OlahCache.create(
+        str(tmp_path / "c"), file_size=8, block_size=4, chunk_size=2, compression_algo=0
+    )
+    await cache.write_block(0, b"ABCD")
+    await cache.write_block(1, b"EFGH")
+    out = b""
+    async for piece in cache.stream_range(1, 7):
+        out += piece
+    cache.close()
 
-        def has_block(self, idx):
-            return idx in {0, 1}
-
-        async def read_block(self, idx):
-            return [b"ABCD", b"EFGH"][idx]
-
-    chunks = [
-        chunk
-        async for chunk in proxy_files._get_file_range_from_cache(
-            FakeCache(),
-            start_pos=1,
-            end_pos=7,
-        )
-    ]
-
-    assert chunks == [b"BCD", b"EFG"]
+    assert out == b"BCDEFG"
 
 
 @pytest.mark.asyncio
