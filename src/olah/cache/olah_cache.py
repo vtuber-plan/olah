@@ -339,6 +339,12 @@ class OlahCache(object):
 
         # Paths
         self._meta_path = os.path.join(path, "meta.bin")
+        # Sidecar advisory-lock target for the meta lifecycle (open/revalidate/
+        # wipe/create/resize). Content is NEVER read or written -- the file exists
+        # only so portalocker has a stable inode to lock. Keeping it separate from
+        # meta.bin avoids the POSIX/NFS pitfall where closing any fd on an inode
+        # releases all locks the process holds on that inode.
+        self._meta_lock_path = os.path.join(path, "meta.lock")
         self._crc_path = os.path.join(path, "chunks.crc")
         self._blocks_dir = os.path.join(path, "blocks")
         self._data_path = os.path.join(self._blocks_dir, "block_${block_index}.bin")
@@ -390,40 +396,77 @@ class OlahCache(object):
         os.makedirs(self._blocks_dir, exist_ok=True)
 
         expected_etag_bytes = OlahCacheHeader._normalize_etag(expected_etag)
+        self._ensure_meta_lock()
 
+        def _read_and_validate() -> OlahCacheHeader:
+            """Read meta.bin fresh and validate identity. Returns the header or raises.
+
+            Online revalidation: a non-None ``expected_etag`` that differs means the
+            upstream content changed. Offline callers pass ``None`` to trust the disk
+            and never destroy a cache while offline.
+            """
+            with open(self._meta_path, "rb") as f:
+                candidate = OlahCacheHeader.read(f)
+            if candidate.version != CURRENT_OLAH_CACHE_VERSION:
+                raise Exception("Cache version mismatch; recreating.")
+            if expected_etag_bytes and candidate.etag != expected_etag_bytes:
+                raise Exception("Cache etag mismatch; recreating.")
+            return candidate
+
+        # Readers-writer lifecycle lock on the sidecar meta.lock:
+        #   * LOCK_SH to read+validate -- concurrent cache-hit opens don't serialize.
+        #   * LOCK_EX to wipe+create -- mutually exclusive with readers and other
+        #     creators, so no reader ever observes a half-formed cache.
+        # The SH->release->EX window is closed by a double-checked re-read under EX.
         reused = False
-        if os.path.exists(self._meta_path):
-            try:
-                with portalocker.Lock(self._meta_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as f:
-                    f.seek(0)
-                    candidate = OlahCacheHeader.read(f)
-                if candidate.version != CURRENT_OLAH_CACHE_VERSION:
-                    raise Exception("Cache version mismatch; recreating.")
-                # Online revalidation: a non-None expected_etag that differs means
-                # the upstream content changed. Offline callers pass None to trust
-                # the disk and never destroy a cache while offline.
-                if expected_etag_bytes and candidate.etag != expected_etag_bytes:
-                    raise Exception("Cache etag mismatch; recreating.")
-                self.header = candidate
-                reused = True
-            except Exception:
-                self._wipe()
-                reused = False
+        try:
+            with portalocker.Lock(self._meta_lock_path, "a+", flags=portalocker.LOCK_SH):
+                if os.path.exists(self._meta_path):
+                    try:
+                        self.header = _read_and_validate()
+                        reused = True
+                    except Exception:
+                        reused = False
+        except Exception:
+            reused = False
 
         if not reused:
-            self.header = OlahCacheHeader(
-                version=CURRENT_OLAH_CACHE_VERSION,
-                block_size=block_size,
-                file_size=file_size,
-                compression_algo=compression_algo,
-                chunk_size=chunk_size,
-                etag=expected_etag_bytes,
-            )
-            self._header_dirty = True
-            self._flush_header()
-            self._resize_crc_file()
+            with portalocker.Lock(self._meta_lock_path, "a+", flags=portalocker.LOCK_EX):
+                # Double-check under EX: another worker may have created a valid
+                # cache while we waited for the exclusive lock.
+                if os.path.exists(self._meta_path):
+                    try:
+                        self.header = _read_and_validate()
+                        reused = True
+                    except Exception:
+                        reused = False
+                if not reused:
+                    self._wipe()
+                    self.header = OlahCacheHeader(
+                        version=CURRENT_OLAH_CACHE_VERSION,
+                        block_size=block_size,
+                        file_size=file_size,
+                        compression_algo=compression_algo,
+                        chunk_size=chunk_size,
+                        etag=expected_etag_bytes,
+                    )
+                    self._header_dirty = True
+                    self._flush_header()
+                    self._resize_crc_file()
 
         self.is_open = True
+
+    def _ensure_meta_lock(self) -> None:
+        """Create the sidecar meta.lock if absent. Used only as a lock target.
+
+        ``"a+"`` creates the file when missing and never truncates an existing one,
+        so concurrent creators racing to create it are both fine (idempotent).
+        """
+        if os.path.exists(self._meta_lock_path):
+            return
+        with open(self._meta_lock_path, "a+"):
+            pass
+        self._fsync_dir(self.path)
 
     def close(self):
         if not self.is_open:
@@ -456,7 +499,13 @@ class OlahCache(object):
             self._header_dirty = False
 
     def _wipe(self):
-        """Remove meta.bin / chunks.crc / block files so the cache is recreated fresh."""
+        """Remove meta.bin / chunks.crc / block files so the cache is recreated fresh.
+
+        Never removes the sidecar ``meta.lock`` or any ``.dl.lock`` / ``.tmp``
+        files: lock files are coordination primitives held by other processes, and
+        yanking one out from under a holder breaks single-flight / lifecycle
+        mutual exclusion.
+        """
         if self.path is None:
             return
         for p in (self._meta_path, self._crc_path):
@@ -466,6 +515,8 @@ class OlahCache(object):
                 pass
         if os.path.isdir(self._blocks_dir):
             for name in os.listdir(self._blocks_dir):
+                if name.endswith(".dl.lock") or name.endswith(".tmp"):
+                    continue
                 try:
                     os.remove(os.path.join(self._blocks_dir, name))
                 except FileNotFoundError:
@@ -517,9 +568,13 @@ class OlahCache(object):
             raise Exception("This file has been closed.")
         if file_size == self._get_file_size():
             return
-        self._resize_header(file_size)
-        self._flush_header()
-        self._resize_crc_file()
+        # Serialize header mutation + crc resize against other workers so a
+        # concurrent resize cannot interleave a header write with a crc resize
+        # (which would leave chunks.crc sized for a different file_size).
+        with portalocker.Lock(self._meta_lock_path, "a+", flags=portalocker.LOCK_EX):
+            self._resize_header(file_size)
+            self._flush_header()
+            self._resize_crc_file()
 
     # --- block presence ----------------------------------------------------
 
@@ -715,7 +770,7 @@ class OlahCache(object):
         bs = self._get_block_size()
 
         def read_and_verify() -> bytes:
-            with portalocker.Lock(block_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as fh:
+            with portalocker.Lock(block_path, "rb", flags=portalocker.LOCK_SH) as fh:
                 if algo == 0:
                     payload = fh.read(real_len)
                 else:
@@ -791,7 +846,6 @@ class OlahCache(object):
             return
 
         bs = self._get_block_size()
-        algo = self.header.compression_algo
         start_block = start_pos // bs
         end_block = (end_pos - 1) // bs
 
@@ -799,7 +853,7 @@ class OlahCache(object):
             if not self.has_block(cur_block):
                 raise Exception("Unknown exception: read block which has not been cached.")
             try:
-                async for piece in self._stream_block_range(cur_block, start_pos, end_pos, algo):
+                async for piece in self._stream_block_range(cur_block, start_pos, end_pos):
                     if piece:
                         yield piece
             except CacheIntegrityError:
@@ -807,40 +861,64 @@ class OlahCache(object):
                 raise
 
     async def _stream_block_range(
-        self, block_index: int, range_start: int, range_end: int, algo: int
+        self, block_index: int, range_start: int, range_end: int
     ) -> AsyncIterator[bytes]:
         bs = self._get_block_size()
         block_start = block_index * bs
         block_end = min((block_index + 1) * bs, self._get_file_size())
-        real_len = block_end - block_start
         need_start = max(range_start, block_start)
         need_end = min(range_end, block_end)
+
+        # All blocking work for this block -- the shared block-file lock, the
+        # chunks.crc read, and the chunk reads + CRC verification -- runs in ONE
+        # threadpool hop so nothing blocks the event loop. Returns the verified
+        # bytes for [need_start, need_end) or raises CacheIntegrityError.
+        verified = await fastapi.concurrency.run_in_threadpool(
+            self._read_verify_block_range, block_index, need_start, need_end
+        )
+        # Yield in ~chunk_size pieces (pure memory slicing, no IO) to keep network
+        # writes bounded.
+        cs = self._get_chunk_size()
+        for off in range(0, len(verified), cs):
+            piece = verified[off:off + cs]
+            if piece:
+                yield piece
+
+    def _read_verify_block_range(
+        self, block_index: int, need_start: int, need_end: int
+    ) -> bytes:
+        """Read + CRC-verify the slice [need_start, need_end) of one block.
+
+        ``need_start``/``need_end`` are absolute file offsets already clamped to
+        this block. Raises ``CacheIntegrityError`` on any short read or CRC
+        mismatch. Synchronous by design -- called via ``run_in_threadpool``.
+        """
+        bs = self._get_block_size()
+        algo = self._get_compression_algo()
+        block_start = block_index * bs
+        block_end = min((block_index + 1) * bs, self._get_file_size())
+        real_len = block_end - block_start
         block_path = self.get_block_path(block_index)
 
         expected_crcs = self._read_chunk_crcs(block_index)
         if expected_crcs is None:
             raise CacheIntegrityError(f"Missing chunk CRCs for block {block_index}.")
 
-        with portalocker.Lock(block_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as fh:
+        out = bytearray()
+        with portalocker.Lock(block_path, "rb", flags=portalocker.LOCK_SH) as fh:
             sub_lens = data_base = None
             if algo != 0:
-                sub_lens, data_base = await fastapi.concurrency.run_in_threadpool(
-                    self._read_compressed_index, fh
-                )
+                sub_lens, data_base = self._read_compressed_index(fh)
             for chunk_idx, (coff, clen) in enumerate(self._iter_chunk_spans(block_index, real_len)):
                 gstart = block_start + coff
                 gend = gstart + clen
                 if gend <= need_start or gstart >= need_end:
                     continue
                 if algo == 0:
-                    data = await fastapi.concurrency.run_in_threadpool(
-                        self._read_uncompressed, fh, coff, clen
-                    )
+                    data = self._read_uncompressed(fh, coff, clen)
                 else:
                     off = data_base + sum(sub_lens[:chunk_idx])
-                    data = await fastapi.concurrency.run_in_threadpool(
-                        self._read_compressed_sub, fh, off, sub_lens[chunk_idx], algo
-                    )
+                    data = self._read_compressed_sub(fh, off, sub_lens[chunk_idx], algo)
                 if len(data) != clen:
                     raise CacheIntegrityError(
                         f"Short read in block {block_index} chunk {chunk_idx}."
@@ -853,7 +931,8 @@ class OlahCache(object):
                 hi = min(need_end, gend) - gstart
                 piece = data[lo:hi]
                 if piece:
-                    yield piece
+                    out += piece
+        return bytes(out)
 
     @staticmethod
     def _read_uncompressed(fh: BinaryIO, off: int, clen: int) -> bytes:
