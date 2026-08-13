@@ -9,11 +9,13 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Literal, Optional, Tuple
 from fastapi import Request
 import fastapi.concurrency
 import httpx
+import portalocker
 from urllib.parse import urlparse, urljoin
 
 from olah.constants import (
@@ -214,6 +216,181 @@ async def _get_file_range_from_remote(
         )
 
 
+# ---------------------------------------------------------------------------
+# Per-block single-flight download coordination
+# ---------------------------------------------------------------------------
+# Concurrent requests (across coroutines AND across uvicorn worker processes)
+# for the same uncached block share ONE upstream download. The leader wins a
+# non-blocking exclusive advisory lock on a per-block sidecar (``<block>.dl.lock``)
+# and publishes the block; followers wait for that lock, then serve from cache.
+# If the leader dies before publishing, the OS releases its lock and a follower
+# becomes the new leader (bounded retry).
+
+def _try_lock_ex(path: str):
+    """Acquire a non-blocking exclusive advisory lock on ``path``.
+
+    Returns the open file handle (caller passes it to ``_release_lock``), or
+    ``None`` if another process currently holds the lock. The lock file is
+    created on demand and used ONLY as a lock target.
+    """
+    fh = open(path, "a+")
+    try:
+        portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
+        return fh
+    except portalocker.LockException:
+        fh.close()
+        return None
+
+
+def _release_lock(fh) -> None:
+    """Release an advisory lock acquired via ``_try_lock_ex``."""
+    try:
+        portalocker.unlock(fh)
+    except Exception:
+        pass
+    finally:
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+
+def _wait_lock_sh(path: str, timeout: float) -> bool:
+    """Poll for a shared advisory lock (up to ``timeout`` seconds).
+
+    Returns ``True`` once the leader's exclusive lock is released (acquire +
+    immediately release), or ``False`` on timeout. Uses non-blocking probes so it
+    works uniformly across portalocker versions; the sleeps run inside a
+    threadpool so the event loop is never blocked.
+    """
+    deadline = time.time() + timeout
+    while True:
+        fh = open(path, "a+")
+        try:
+            portalocker.lock(fh, portalocker.LOCK_SH | portalocker.LOCK_NB)
+            _release_lock(fh)
+            return True
+        except portalocker.LockException:
+            fh.close()
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
+
+async def _download_full_block(
+    client: httpx.AsyncClient,
+    remote_info: RemoteInfo,
+    cache_file: OlahCache,
+    block_start: int,
+    block_end: int,
+) -> bytes:
+    """Download exactly ``[block_start, block_end)`` from upstream.
+
+    Thin collector over ``_get_file_range_from_remote`` (which already verifies
+    the received byte count). Returns the real (unpadded) block bytes.
+    """
+    out = bytearray()
+    async for chunk in _get_file_range_from_remote(
+        client, remote_info, cache_file, block_start, block_end
+    ):
+        if chunk:
+            out += chunk
+    return bytes(out)
+
+
+async def _read_block_real_payload(
+    cache_file: OlahCache, block_index: int, real_len: int
+) -> bytes:
+    """Read a cached block and return its first ``real_len`` (unpadded) bytes.
+
+    ``read_block`` verifies chunk CRCs but does NOT auto-invalidate on failure
+    (unlike ``stream_range``), so on ``CacheIntegrityError`` the block is dropped
+    here and the caller treats it as a miss.
+    """
+    try:
+        padded = await cache_file.read_block(block_index)
+    except CacheIntegrityError:
+        await cache_file._invalidate_block(block_index)
+        raise
+    return padded[:real_len]
+
+
+async def _fetch_block_single_flight(
+    *,
+    client: httpx.AsyncClient,
+    remote_info: RemoteInfo,
+    cache_file: OlahCache,
+    block_index: int,
+    block_start: int,
+    block_end: int,
+    allow_cache: bool,
+) -> bytes:
+    """Return the real (unpadded) payload of ``block_index``, single-flighted.
+
+    * Cached + CRC-valid -> serve from cache.
+    * Caching disabled -> download the range with no coordination.
+    * Otherwise coordinate via a per-block cross-process advisory lock: the
+      leader downloads + publishes (under ``asyncio.shield`` so a client
+      disconnect still lands the block); followers wait, then serve from cache.
+      A leader that dies before publishing is retried by a follower (bounded).
+    """
+    bs = cache_file._get_block_size()
+    real_len = block_end - block_start
+
+    # Fast path: serve from cache. A corrupt block is invalidated and re-fetched.
+    if cache_file.has_block(block_index):
+        try:
+            return await _read_block_real_payload(cache_file, block_index, real_len)
+        except CacheIntegrityError:
+            pass
+
+    if not allow_cache:
+        return await _download_full_block(
+            client, remote_info, cache_file, block_start, block_end
+        )
+
+    dl_lock_path = cache_file.get_block_path(block_index) + ".dl.lock"
+    max_attempts = 3
+    for _ in range(max_attempts):
+        # Try to BECOME the leader (non-blocking exclusive lock), off the event loop.
+        lock_fh = await fastapi.concurrency.run_in_threadpool(_try_lock_ex, dl_lock_path)
+        if lock_fh is not None:
+            try:
+                # Double-check under EX: a prior leader may have just published.
+                if cache_file.has_block(block_index):
+                    try:
+                        return await _read_block_real_payload(
+                            cache_file, block_index, real_len
+                        )
+                    except CacheIntegrityError:
+                        pass  # corrupt -> re-download below
+                raw_real = await _download_full_block(
+                    client, remote_info, cache_file, block_start, block_end
+                )
+                # write_block requires a full block_size buffer; pad the final block.
+                raw_block = (
+                    raw_real if real_len == bs else raw_real + b"\x00" * (bs - real_len)
+                )
+                # _write_block_safely shields the publish so a leader disconnect
+                # still lands the block (followers depend on it).
+                await _write_block_safely(cache_file, block_index, raw_block, allow_cache=True)
+                return raw_real
+            finally:
+                _release_lock(lock_fh)
+        # Someone else is the leader: wait for it to finish, then serve from cache.
+        await fastapi.concurrency.run_in_threadpool(_wait_lock_sh, dl_lock_path, 120)
+        if cache_file.has_block(block_index):
+            try:
+                return await _read_block_real_payload(cache_file, block_index, real_len)
+            except CacheIntegrityError:
+                pass  # corrupt or leader died mid-publish -> retry as leader
+        # Block still absent -> leader died before publishing. Loop and try to
+        # become the new leader.
+    raise Exception(
+        f"block {block_index} never became available after {max_attempts} single-flight attempts"
+    )
+
+
 async def _file_chunk_get(
     app,
     save_path: str,
@@ -235,7 +412,10 @@ async def _file_chunk_get(
     # from the stored one wipes & recreates the cache. Offline callers pass None
     # to trust the disk. The constructor handles create / reuse / wipe uniformly
     # and sizes chunks.crc for new caches.
-    cache_file = OlahCache(
+    # Opening a cache does mkdirs + advisory locking + (on create) fsync, all of
+    # which would block the event loop -- run it in the threadpool.
+    cache_file = await fastapi.concurrency.run_in_threadpool(
+        OlahCache,
         save_path,
         file_size=file_size,
         block_size=block_size,
@@ -243,7 +423,7 @@ async def _file_chunk_get(
         compression_algo=compression_algo,
         expected_etag=expected_etag,
     )
-    
+
     # Refresh access time
     touch_file_access_time(save_path)
     try:
@@ -255,8 +435,10 @@ async def _file_chunk_get(
             for (range_start_pos, range_end_pos), is_remote in ranges_and_cache_list:
                 # range_start_pos is zero-index and range_end_pos is exclusive
                 if is_remote:
-                    # Cache miss: stream from upstream, reassemble chunks into full
-                    # blocks, and persist them to the cache as they complete.
+                    # Cache miss: fetch each missing block individually under a
+                    # per-block single-flight lock so concurrent requests for the
+                    # same uncached block share ONE upstream download (the leader
+                    # downloads + publishes; followers wait then serve from cache).
                     if url is None:
                         # Cache-only mode (e.g. the Xet route serving a fully-cached
                         # object without re-resolving HF). A miss here means a block
@@ -265,69 +447,31 @@ async def _file_chunk_get(
                         raise Exception(
                             "cache miss in cache-only mode (no upstream URL available)"
                         )
-                    generator = _get_file_range_from_remote(
-                        client,
-                        RemoteInfo(method, url, headers),
-                        cache_file,
-                        range_start_pos,
-                        range_end_pos,
-                    )
-                    cur_pos = range_start_pos
-                    stream_cache = bytearray()
-                    last_block, last_block_start_pos, last_block_end_pos = get_block_info(
-                        cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-                    )
-                    cur_block = last_block
-                    try:
-                        async for chunk in generator:
-                            if len(chunk) != 0:
-                                yield bytes(chunk)
-                                stream_cache += chunk
-                                cur_pos += len(chunk)
-
-                            cur_block = cur_pos // cache_file._get_block_size()
-
-                            if cur_block == last_block:
-                                continue
-                            split_pos = last_block_end_pos - max(
-                                last_block_start_pos, range_start_pos
-                            )
-                            raw_block = stream_cache[:split_pos]
-                            stream_cache = stream_cache[split_pos:]
-                            if len(raw_block) == cache_file._get_block_size():
-                                await _write_block_safely(
-                                    cache_file,
-                                    last_block,
-                                    raw_block,
-                                    allow_cache,
-                                )
-                            last_block, last_block_start_pos, last_block_end_pos = get_block_info(
-                                cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-                            )
-                    finally:
-                        raw_block = bytes(stream_cache)
-                        if cur_pos == range_end_pos:
-                            final_block = last_block
-                            final_start = last_block_start_pos
-                            final_end = last_block_end_pos
-                            if final_start >= range_start_pos:
-                                expected_len = final_end - final_start
-                                if len(raw_block) == expected_len:
-                                    if expected_len < cache_file._get_block_size():
-                                        raw_block += b"\x00" * (
-                                            cache_file._get_block_size() - expected_len
-                                        )
-                                    await _write_block_safely(
-                                        cache_file,
-                                        final_block,
-                                        raw_block,
-                                        allow_cache,
-                                    )
-
-                    if cur_pos != range_end_pos:
-                        raise Exception(
-                            f"The size of remote range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
+                    bs = cache_file._get_block_size()
+                    fs = cache_file._get_file_size()
+                    remote_info = RemoteInfo(method, url, headers)
+                    first_block = range_start_pos // bs
+                    last_block = (range_end_pos - 1) // bs
+                    for blk in range(first_block, last_block + 1):
+                        block_start = blk * bs
+                        block_end = min((blk + 1) * bs, fs)
+                        block_bytes = await _fetch_block_single_flight(
+                            client=client,
+                            remote_info=remote_info,
+                            cache_file=cache_file,
+                            block_index=blk,
+                            block_start=block_start,
+                            block_end=block_end,
+                            allow_cache=allow_cache,
                         )
+                        # Yield only the slice of the block the client asked for
+                        # (a range strictly inside one block still fetches the
+                        # whole block, since caching is block-granular).
+                        lo = max(range_start_pos, block_start) - block_start
+                        hi = min(range_end_pos, block_end) - block_start
+                        piece = block_bytes[lo:hi]
+                        if piece:
+                            yield piece
                 else:
                     # Cache hit: blocks are already on disk -- no reassembly, no
                     # cache writes. OlahCache.stream_range serves both uncompressed
@@ -351,7 +495,7 @@ async def _file_chunk_get(
                             f"The size of cached range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
                         )
     finally:
-        cache_file.close()
+        await fastapi.concurrency.run_in_threadpool(cache_file.close)
 
 
 async def _stream_single_range(

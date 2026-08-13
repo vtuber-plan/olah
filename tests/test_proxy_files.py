@@ -35,6 +35,25 @@ def _load_proxy_files_module():
         portalocker_stub.Lock = _Lock
         portalocker_stub.LOCK_EX = 1
         portalocker_stub.LOCK_SH = 2
+        portalocker_stub.LOCK_NB = 4
+
+        # The per-block single-flight path uses the lower-level lock()/unlock()
+        # API plus LOCK_NB and LockException. The stub never contends, so a lock
+        # attempt always succeeds and never raises -- a single request is always
+        # the leader, which is all these (single-request) unit tests exercise.
+
+        class _LockException(Exception):
+            pass
+
+        def _lock(fh, flags, timeout=None):
+            return fh
+
+        def _unlock(fh):
+            return None
+
+        portalocker_stub.LockException = _LockException
+        portalocker_stub.lock = _lock
+        portalocker_stub.unlock = _unlock
         sys.modules["portalocker"] = portalocker_stub
 
     return importlib.import_module("olah.proxy.files")
@@ -719,6 +738,7 @@ async def test_file_chunk_get_persists_single_block_files(tmp_path):
     assert block_path.stat().st_size > 0
 
 
+@pytest.mark.asyncio
 async def test_file_chunk_get_streams_from_cache_without_touching_upstream(tmp_path):
     # Pre-populate a multi-block cache, then ensure _file_chunk_get serves it
     # entirely from cache (upstream never called) and yields exact bytes for both
@@ -730,7 +750,7 @@ async def test_file_chunk_get_streams_from_cache_without_touching_upstream(tmp_p
     payload = bytes((i * 7) % 256 for i in range(200))  # 4 blocks (last partial, 8 bytes)
     num_blocks = (len(payload) + block_size - 1) // block_size
 
-    cache = proxy_files.OlahCache.create(str(save_path), block_size=block_size, compression_algo=0)
+    cache = proxy_files.OlahCache.create(str(save_path), block_size=block_size, chunk_size=block_size, compression_algo=0)
     cache.resize(len(payload))
     for i in range(num_blocks):
         blk = payload[i * block_size:(i + 1) * block_size]
