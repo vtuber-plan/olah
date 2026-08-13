@@ -19,6 +19,7 @@ import os
 from typing import Optional, Tuple
 
 import httpx
+import fastapi.concurrency
 from fastapi import FastAPI, Request
 
 from olah.cache.olah_cache import OlahCache
@@ -136,11 +137,15 @@ async def xet_get_generator(
     # resolve HEAD on every request. Only re-resolve a fresh signed URL when a
     # block is actually missing.
     if size and os.path.exists(os.path.join(save_path, "meta.bin")):
-        peek = OlahCache(save_path, file_size=size, expected_etag=xet_hash)
-        try:
-            fully_cached = peek.is_fully_cached()
-        finally:
-            peek.close()
+        # Opening the cache + stat-ing every block is sync IO; run it off the loop.
+        def _peek_fully_cached() -> bool:
+            peek = OlahCache(save_path, file_size=size, expected_etag=xet_hash)
+            try:
+                return peek.is_fully_cached()
+            finally:
+                peek.close()
+
+        fully_cached = await fastapi.concurrency.run_in_threadpool(_peek_fully_cached)
         if fully_cached:
             return await _build_file_response(
                 app=app,
