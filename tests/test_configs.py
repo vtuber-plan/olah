@@ -71,6 +71,7 @@ def test_olah_config_reads_toml_and_normalizes_empty_ssl_fields(tmp_path):
     assert config.repos_path == "/srv/olah/repos"
     assert config.cache_size_limit == 2 * 1024**3
     assert config.cache_clean_strategy == "FIFO"
+    assert config.cache_compression == "none"
     assert config.hf_url_base() == "http://hf.internal"
     assert config.hf_lfs_url_base() == "http://lfs.internal"
     assert config.mirror_url_base() == "https://mirror.internal"
@@ -126,3 +127,26 @@ def test_is_specific_addr_only_accepts_real_single_host():
     assert config._is_specific_addr("0.0.0.0") is False
     assert config._is_specific_addr("::") is False
     assert config._is_specific_addr(["0.0.0.0", "::"]) is False
+
+
+def test_olah_config_defaults_cache_compression_to_none():
+    config = OlahConfig()
+
+    assert config.cache_compression == "none"
+
+
+def test_olah_config_reads_cache_compression_from_toml(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            [basic]
+            cache-compression = "lzma"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = OlahConfig(str(config_path))
+
+    assert config.cache_compression == "lzma"

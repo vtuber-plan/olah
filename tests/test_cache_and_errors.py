@@ -1,5 +1,6 @@
 import io
 import json
+import os
 
 import pytest
 
@@ -9,7 +10,14 @@ from olah.mirror.meta import RepoMeta
 
 pytest.importorskip("portalocker")
 
-from olah.cache.olah_cache import CURRENT_OLAH_CACHE_VERSION, MAX_BLOCK_NUM, OlahCache, OlahCacheHeader
+from olah.cache.olah_cache import (
+    COMPRESSION_NAME_TO_ALGO,
+    CURRENT_OLAH_CACHE_VERSION,
+    MAX_BLOCK_NUM,
+    OlahCache,
+    OlahCacheHeader,
+    compression_algo_from_name,
+)
 
 
 def test_bitset_can_set_clear_and_validate_bounds():
@@ -76,6 +84,104 @@ async def test_olah_cache_ignores_zero_length_block_placeholders(tmp_path):
     assert cache.has_block(0) is True
     assert empty_block.stat().st_size > 0
     cache.close()
+
+
+def test_compression_algo_from_name_maps_known_names():
+    assert compression_algo_from_name("none") == 0
+    assert compression_algo_from_name("gzip") == 1
+    assert compression_algo_from_name("lzma") == 2
+    assert COMPRESSION_NAME_TO_ALGO == {"none": 0, "gzip": 1, "lzma": 2}
+    with pytest.raises(ValueError):
+        compression_algo_from_name("brotli")
+
+
+def _full_block(prefix: bytes, block_size: int) -> bytes:
+    return prefix + b"\x00" * (block_size - len(prefix))
+
+
+@pytest.mark.asyncio
+async def test_olah_cache_round_trips_uncompressed_block(tmp_path):
+    block_size = 64
+    cache_dir = tmp_path / "cache"
+    cache = OlahCache.create(str(cache_dir), block_size=block_size, compression_algo=0)
+    cache.resize(block_size)
+    await cache.write_block(0, _full_block(b"abcd", block_size))
+    cache.close()
+
+    # Reopen the existing cache and read the block back. Exercises the
+    # single-open read path and confirms algo=0 stores/restores raw bytes.
+    cache = OlahCache(str(cache_dir))
+    assert cache.header.compression_algo == 0
+    block = await cache.read_block(0)
+    cache.close()
+
+    assert block[:4] == b"abcd"
+    assert len(block) == block_size
+
+
+@pytest.mark.asyncio
+async def test_olah_cache_round_trips_gzip_block(tmp_path):
+    # Backward-compat: gzip caches (the previous default) must still round-trip.
+    block_size = 64
+    cache_dir = tmp_path / "cache"
+    cache = OlahCache.create(str(cache_dir), block_size=block_size, compression_algo=1)
+    cache.resize(block_size)
+    await cache.write_block(0, _full_block(b"wxyz", block_size))
+    cache.close()
+
+    cache = OlahCache(str(cache_dir))
+    assert cache.header.compression_algo == 1
+    block = await cache.read_block(0)
+    cache.close()
+
+    assert block[:4] == b"wxyz"
+    assert len(block) == block_size
+
+
+@pytest.mark.asyncio
+async def test_olah_cache_gzip_round_trips_incompressible_block(tmp_path):
+    # Incompressible data (like model weights) compresses to slightly MORE than
+    # its original size because of gzip framing. read_block must read the whole
+    # block file rather than capping at block_size, otherwise the gzip stream is
+    # truncated and decompression raises EOFError.
+    block_size = 64
+    cache_dir = tmp_path / "cache"
+    cache = OlahCache.create(str(cache_dir), block_size=block_size, compression_algo=1)
+    cache.resize(block_size)
+    payload = os.urandom(block_size)
+    await cache.write_block(0, payload)
+    cache.close()
+
+    cache = OlahCache(str(cache_dir))
+    block = await cache.read_block(0)
+    cache.close()
+
+    assert block == payload
+
+
+@pytest.mark.asyncio
+async def test_olah_cache_read_only_hit_does_not_rewrite_meta_bin(tmp_path):
+    block_size = 64
+    cache_dir = tmp_path / "cache"
+    cache = OlahCache.create(str(cache_dir), block_size=block_size, compression_algo=0)
+    cache.resize(block_size)
+    await cache.write_block(0, _full_block(b"abcd", block_size))
+    cache.close()
+
+    meta_path = cache_dir / "meta.bin"
+    # Pin mtime to a fixed value: a read-only reopen must leave meta.bin
+    # untouched. Byte-equality alone would not catch a redundant identical
+    # rewrite; the mtime pin does, deterministically.
+    fixed_mtime = 1234567.0
+    os.utime(meta_path, (fixed_mtime, fixed_mtime))
+
+    # Read-only reopen: no resize, no write_block -> close must NOT flush.
+    cache = OlahCache(str(cache_dir))
+    block = await cache.read_block(0)
+    cache.close()
+
+    assert block[:4] == b"abcd"
+    assert os.path.getmtime(meta_path) == fixed_mtime
 
 
 def test_error_responses_return_expected_status_and_headers():

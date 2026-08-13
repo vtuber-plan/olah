@@ -37,6 +37,26 @@ DEFAULT_COMPRESSION_ALGO = 1
 6: ...
 """
 
+# Maps the user-facing config name (see OlahConfig.cache_compression) to the
+# numeric algorithm stored in each cache's meta.bin header. The values must
+# match the compression/decompression switches in this module (0/1/2).
+COMPRESSION_NAME_TO_ALGO: Dict[str, int] = {
+    "none": 0,
+    "gzip": 1,
+    "lzma": 2,
+}
+
+
+def compression_algo_from_name(name: str) -> int:
+    """Resolve a compression config name to its numeric algorithm id."""
+    if name not in COMPRESSION_NAME_TO_ALGO:
+        raise ValueError(
+            f"Unknown compression algorithm: {name}. "
+            f"Expected one of {list(COMPRESSION_NAME_TO_ALGO.keys())}."
+        )
+    return COMPRESSION_NAME_TO_ALGO[name]
+
+
 class OlahCacheHeader(object):
     MAGIC_NUMBER = "OLAH".encode("ascii")
     HEADER_FIX_SIZE = 36
@@ -131,25 +151,44 @@ class OlahCacheHeader(object):
 
 
 class OlahCache(object):
-    def __init__(self, path: str, block_size: int = DEFAULT_BLOCK_SIZE) -> None:
+    def __init__(
+        self,
+        path: str,
+        block_size: int = DEFAULT_BLOCK_SIZE,
+        compression_algo: int = DEFAULT_COMPRESSION_ALGO,
+    ) -> None:
         self.path: Optional[str] = path
         self.header: Optional[OlahCacheHeader] = None
         self.is_open: bool = False
 
+        # Whether meta.bin has in-memory changes not yet persisted to disk.
+        # Only _resize_header mutates header fields after creation, so plain
+        # reads and block writes never need to flush.
+        self._header_dirty: bool = False
+
         # Lock
         self._header_lock = threading.Lock()
-        
+
         # Path
         self._meta_path = os.path.join(path, "meta.bin")
         self._data_path = os.path.join(path, "blocks/block_${block_index}.bin")
 
-        self.open(path, block_size=block_size)
+        self.open(path, block_size=block_size, compression_algo=compression_algo)
 
     @staticmethod
-    def create(path: str, block_size: int = DEFAULT_BLOCK_SIZE):
-        return OlahCache(path, block_size=block_size)
+    def create(
+        path: str,
+        block_size: int = DEFAULT_BLOCK_SIZE,
+        compression_algo: int = DEFAULT_COMPRESSION_ALGO,
+    ):
+        return OlahCache(path, block_size=block_size, compression_algo=compression_algo)
 
-    def open(self, path: str, block_size: int = DEFAULT_BLOCK_SIZE):
+    def open(
+        self,
+        path: str,
+        block_size: int = DEFAULT_BLOCK_SIZE,
+        compression_algo: int = DEFAULT_COMPRESSION_ALGO,
+    ):
         if self.is_open:
             raise Exception("This file has been open.")
         if self.path is None:
@@ -173,6 +212,7 @@ class OlahCache(object):
                         version=CURRENT_OLAH_CACHE_VERSION,
                         block_size=block_size,
                         file_size=0,
+                        compression_algo=compression_algo,
                     )
                     self.header.write(f)
 
@@ -182,7 +222,8 @@ class OlahCache(object):
         if not self.is_open:
             raise Exception("This file has been close.")
 
-        self._flush_header()
+        if self._header_dirty:
+            self._flush_header()
         self.path = None
         self.header = None
 
@@ -197,6 +238,7 @@ class OlahCache(object):
             with portalocker.Lock(self._meta_path, "rb+", flags=portalocker.LOCK_EX) as f:
                 f.seek(0)
                 self.header.write(f)
+            self._header_dirty = False
 
     def _get_file_size(self) -> int:
         if self.header is None:
@@ -233,6 +275,7 @@ class OlahCache(object):
             self.header._block_number = block_num
             self.header._file_size = file_size
             self.header._valid_header()
+            self._header_dirty = True
 
     def _pad_block(self, raw_block: bytes) -> bytes:
         if len(raw_block) < self._get_block_size():
@@ -244,11 +287,15 @@ class OlahCache(object):
     def flush(self):
         if not self.is_open:
             raise Exception("This file has been close.")
-        self._flush_header()
+        if self._header_dirty:
+            self._flush_header()
 
     def has_block(self, block_index: int) -> bool:
         block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
         return os.path.exists(block_path) and os.path.getsize(block_path) > 0
+
+    def get_block_path(self, block_index: int) -> str:
+        return string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
 
     async def read_block(self, block_index: int) -> Optional[bytes]:
         if not self.is_open:
@@ -268,9 +315,14 @@ class OlahCache(object):
         
         block_path = string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
 
+        # Lock and read from the same handle instead of opening the block file
+        # twice (the lock handle was previously acquired but never read from).
+        # The blocking read is offloaded so the event loop is not stalled. Read
+        # the WHOLE file: a compressed block can be slightly larger than
+        # block_size (e.g. gzip framing on incompressible data), so capping at
+        # block_size would truncate the stream and break decompression.
         with portalocker.Lock(block_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as fh:
-            async with aiofiles.open(block_path, mode='rb') as f:
-                raw_block = await f.read(self._get_block_size())
+            raw_block = await fastapi.concurrency.run_in_threadpool(fh.read)
         
         def decompression(block_data: bytes, compression_algo: int):
             # compression
@@ -357,7 +409,8 @@ class OlahCache(object):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-        self._flush_header()
+        # Block presence is tracked by file existence (has_block) and writing a
+        # block never changes any header field, so there is nothing to flush.
 
     def _resize_file_size(self, file_size: int):
         """

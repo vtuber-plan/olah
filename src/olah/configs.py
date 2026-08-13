@@ -87,6 +87,7 @@ class OlahConfig(object):
         self.repos_path = "./repos"
         self.cache_size_limit: Optional[int] = None
         self.cache_clean_strategy: Literal["LRU", "FIFO", "LARGE_FIRST"] = "LRU"
+        self.cache_compression: Literal["none", "gzip", "lzma"] = "none"
 
         self.hf_scheme: str = "https"
         self.hf_netloc: str = "huggingface.co"
@@ -159,6 +160,7 @@ class OlahConfig(object):
             self.repos_path = basic.get("repos-path", self.repos_path)
             self.cache_size_limit = convert_to_bytes(basic.get("cache-size-limit", self.cache_size_limit))
             self.cache_clean_strategy = basic.get("cache-clean-strategy", self.cache_clean_strategy)
+            self.cache_compression = basic.get("cache-compression", self.cache_compression)
 
             self.hf_scheme = basic.get("hf-scheme", self.hf_scheme)
             self.hf_netloc = basic.get("hf-netloc", self.hf_netloc)

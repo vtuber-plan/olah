@@ -19,7 +19,11 @@ def _load_proxy_files_module():
 
         class _Lock:
             def __init__(self, *args, **kwargs):
-                self._fh = open(args[0], kwargs.get("mode", "a+b"))
+                # portalocker.Lock(filename, mode="r", ...): mode is positional[1]
+                # or a "mode" kwarg. Respect it so meta.bin rewrites land at the
+                # right offset (append mode would corrupt the header on reopen).
+                mode = kwargs.get("mode") or (args[1] if len(args) > 1 else "a+b")
+                self._fh = open(args[0], mode)
 
             def __enter__(self):
                 return self._fh
@@ -66,6 +70,7 @@ def _make_app(tmp_path, offline=False):
         repos_path=str(tmp_path / "repos"),
         hf_url_base=lambda: "https://huggingface.co",
         hf_lfs_url_base=lambda: "https://cdn-lfs.huggingface.co",
+        cache_compression="none",
     )
     return SimpleNamespace(state=SimpleNamespace(app_settings=SimpleNamespace(config=config)))
 
@@ -715,3 +720,37 @@ async def test_file_chunk_get_persists_single_block_files(tmp_path):
     block_path = save_path / "blocks" / "block_00000000.bin"
     assert block_path.exists()
     assert block_path.stat().st_size > 0
+
+
+async def test_file_chunk_get_streams_from_cache_without_touching_upstream(tmp_path):
+    # Pre-populate a multi-block cache, then ensure _file_chunk_get serves it
+    # entirely from cache (upstream never called) and yields exact bytes for both
+    # a full-file request and a sub-range spanning two blocks. This exercises the
+    # lean cache-hit branch added by the copy-removal optimization.
+    save_path = tmp_path / "repos" / "files" / "models" / "team" / "demo" / "resolve" / "main" / "blob.bin"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    block_size = 64
+    payload = bytes((i * 7) % 256 for i in range(200))  # 4 blocks (last partial, 8 bytes)
+    num_blocks = (len(payload) + block_size - 1) // block_size
+
+    cache = proxy_files.OlahCache.create(str(save_path), block_size=block_size, compression_algo=0)
+    cache.resize(len(payload))
+    for i in range(num_blocks):
+        blk = payload[i * block_size:(i + 1) * block_size]
+        blk = blk + b"\x00" * (block_size - len(blk))
+        await cache.write_block(i, blk)
+    cache.close()
+
+    class FailClient:
+        def stream(self, **kwargs):
+            raise AssertionError("cache hit must not reach upstream")
+
+    common = dict(app=_make_app(tmp_path), save_path=str(save_path), head_path=str(tmp_path / "head"),
+                  client=FailClient(), method="GET", url="https://x/team/demo/resolve/main/blob.bin",
+                  allow_cache=True, file_size=len(payload))
+
+    full = [c async for c in proxy_files._file_chunk_get(headers={}, **common)]
+    assert b"".join(full) == payload
+
+    sub = [c async for c in proxy_files._file_chunk_get(headers={"range": "bytes=70-150"}, **common)]
+    assert b"".join(sub) == payload[70:151]

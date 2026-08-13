@@ -169,6 +169,26 @@ class AppSettings(BaseSettings):
     config: OlahConfig = OlahConfig()
 
 
+def _apply_config_from_env() -> None:
+    """Populate app.state for worker processes.
+
+    Single-process mode sets app.state.app_settings in init() (CLI args). But
+    multi-worker mode (uvicorn --workers>1 or gunicorn) spawns workers that
+    import this module fresh and never run cli()/init(); each worker rebuilds
+    its config from the OLAH_CONFIG file path the master exported to the env.
+    """
+    cfg_path = os.environ.get("OLAH_CONFIG")
+    if cfg_path is None or getattr(app.state, "app_settings", None) is not None:
+        return
+    global logger
+    logger = build_logger("olah", "olah.log", logger_dir=os.environ.get("OLAH_LOG_PATH", "./logs"))
+    app.state.logger = logger
+    app.state.app_settings = AppSettings(config=OlahConfig(cfg_path))
+
+
+_apply_config_from_env()
+
+
 @app.exception_handler(404)
 async def custom_404_handler(_, __):
     return error_page_not_found()
@@ -192,7 +212,9 @@ def init():
     parser.add_argument("--repos-path", type=str, default="./repos", help="The folder to save cached repositories")
     parser.add_argument("--cache-size-limit", type=str, default="", help="The limit size of cache. (Example values: '100MB', '2GB', '500KB')")
     parser.add_argument("--cache-clean-strategy", type=str, default="LRU", help="The clean strategy of cache. ('LRU', 'FIFO', 'LARGE_FIRST')")
+    parser.add_argument("--cache-compression", type=str, default="none", help="Compression algorithm for cache blocks. ('none', 'gzip', 'lzma')")
     parser.add_argument("--log-path", type=str, default="./logs", help="The folder to save logs")
+    parser.add_argument("--workers", type=int, default=1, help="Number of worker processes. Default 1 (single process). Values >1 enable multi-process scaling for production throughput and require --config (each worker re-reads it).")
     args = parser.parse_args()
 
     logger = build_logger("olah", "olah.log", logger_dir=args.log_path)
@@ -241,6 +263,8 @@ def init():
             config.cache_size_limit = convert_to_bytes(args.cache_size_limit)
         if not is_default_value(args, "cache_clean_strategy"):
             config.cache_clean_strategy = args.cache_clean_strategy
+        if not is_default_value(args, "cache_compression"):
+            config.cache_compression = args.cache_compression
 
         config.host = normalize_server_host(config.host)
 
@@ -292,6 +316,8 @@ def init():
         args.cache_size_limit = config.cache_size_limit
     if is_default_value(args, "cache_clean_strategy"):
         args.cache_clean_strategy = config.cache_clean_strategy
+    if is_default_value(args, "cache_compression"):
+        args.cache_compression = config.cache_compression
 
     args.host = normalize_server_host(args.host)
     config.host = args.host
@@ -316,15 +342,34 @@ Incorrect settings may result in unintended file deletion and loss!!! !!!
 def run_server(args):
     import uvicorn
 
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="info",
-        reload=False,
-        ssl_keyfile=args.ssl_key,
-        ssl_certfile=args.ssl_cert,
-    )
+    if args.workers > 1:
+        # Multi-worker: uvicorn spawns worker processes that re-import this
+        # module, so config must come from a file (passed via OLAH_CONFIG) rather
+        # than CLI args. The cache dir is multi-process safe (portalocker locks).
+        if not args.config:
+            raise ValueError("--workers > 1 requires --config <toml>; each worker re-reads it.")
+        os.environ["OLAH_CONFIG"] = args.config
+        os.environ.setdefault("OLAH_LOG_PATH", args.log_path)
+        uvicorn.run(
+            "olah.server:app",
+            host=args.host,
+            port=args.port,
+            workers=args.workers,
+            log_level="info",
+            reload=False,
+            ssl_keyfile=args.ssl_key,
+            ssl_certfile=args.ssl_cert,
+        )
+    else:
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level="info",
+            reload=False,
+            ssl_keyfile=args.ssl_key,
+            ssl_certfile=args.ssl_cert,
+        )
 
 
 def _run_cli():

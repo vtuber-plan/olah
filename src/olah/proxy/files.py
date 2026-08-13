@@ -12,7 +12,9 @@ import os
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Literal, Optional, Tuple
 from fastapi import Request
+import fastapi.concurrency
 import httpx
+import portalocker
 from urllib.parse import urlparse, urljoin
 
 from olah.constants import (
@@ -23,7 +25,7 @@ from olah.constants import (
     HUGGINGFACE_HEADER_X_LINKED_SIZE,
     ORIGINAL_LOC,
 )
-from olah.cache.olah_cache import OlahCache
+from olah.cache.olah_cache import OlahCache, compression_algo_from_name
 from olah.errors import error_entry_not_found, error_proxy_invalid_data, error_proxy_timeout
 from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.utils.cache_utils import read_cache_request, write_cache_request
@@ -44,6 +46,13 @@ from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 from olah.utils.zip_utils import Decompressor, decompress_data
 from olah.proxy.result import ProxyResult, single_chunk_body
+
+
+# Sub-chunk size for streaming cached blocks to the client. olah reads cache
+# blocks whole (~50MB) but must not yield them whole: uvicorn serves a single
+# ~50MB chunk at roughly half the rate of a ~1MB chunk, so slicing each block
+# before yielding ~doubles single-stream cache-hit throughput.
+_CACHE_STREAM_CHUNK = 1 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -177,6 +186,43 @@ async def _get_file_range_from_cache(
         raise Exception("The cache range from {} to {} is incomplete.")
 
 
+async def _stream_cache_range_uncompressed(
+    cache_file: OlahCache, start_pos: int, end_pos: int
+):
+    """Stream a byte range from an UNCOMPRESSED (algo=0) cache directly from the
+    block files in ~1MB pieces.
+
+    Unlike _get_file_range_from_cache (which reads each whole ~50MB block, then
+    slices), this reads only the requested bytes and yields them at the streaming
+    chunk size -- no whole-block read, no slice copy. Only valid for algo=0,
+    where a block file holds the raw file bytes verbatim.
+    """
+    block_size = cache_file._get_block_size()
+    file_size = cache_file._get_file_size()
+    start_block = start_pos // block_size
+    end_block = (end_pos - 1) // block_size
+    for cur_block in range(start_block, end_block + 1):
+        if not cache_file.has_block(cur_block):
+            raise Exception("Unknown exception: read block which has not been cached.")
+        block_start = cur_block * block_size
+        block_end = min((cur_block + 1) * block_size, file_size)
+        offset = max(start_pos, block_start) - block_start
+        remaining = min(end_pos, block_end) - max(start_pos, block_start)
+        if remaining <= 0:
+            continue
+        block_path = cache_file.get_block_path(cur_block)
+        with portalocker.Lock(block_path, "rb", timeout=60, flags=portalocker.LOCK_SH) as fh:
+            await fastapi.concurrency.run_in_threadpool(fh.seek, offset)
+            while remaining > 0:
+                piece = await fastapi.concurrency.run_in_threadpool(
+                    fh.read, min(_CACHE_STREAM_CHUNK, remaining)
+                )
+                if not piece:
+                    break
+                yield piece
+                remaining -= len(piece)
+
+
 async def _get_file_range_from_remote(
     client: httpx.AsyncClient,
     remote_info: RemoteInfo,
@@ -242,10 +288,15 @@ async def _file_chunk_get(
     file_size: int,
 ):
     # Redirect Chunks
+    compression_algo = compression_algo_from_name(
+        app.state.app_settings.config.cache_compression
+    )
     if os.path.exists(save_path):
-        cache_file = OlahCache(save_path)
+        # Existing caches read their compression algorithm back from meta.bin, so
+        # the passed value only matters for newly created caches below.
+        cache_file = OlahCache(save_path, compression_algo=compression_algo)
     else:
-        cache_file = OlahCache.create(save_path)
+        cache_file = OlahCache.create(save_path, compression_algo=compression_algo)
         cache_file.resize(file_size=file_size)
     
     # Refresh access time
@@ -259,6 +310,8 @@ async def _file_chunk_get(
             for (range_start_pos, range_end_pos), is_remote in ranges_and_cache_list:
                 # range_start_pos is zero-index and range_end_pos is exclusive
                 if is_remote:
+                    # Cache miss: stream from upstream, reassemble chunks into full
+                    # blocks, and persist them to the cache as they complete.
                     generator = _get_file_range_from_remote(
                         client,
                         RemoteInfo(method, url, headers),
@@ -266,71 +319,86 @@ async def _file_chunk_get(
                         range_start_pos,
                         range_end_pos,
                     )
-                else:
-                    generator = _get_file_range_from_cache(
-                        cache_file,
-                        range_start_pos,
-                        range_end_pos,
+                    cur_pos = range_start_pos
+                    stream_cache = bytearray()
+                    last_block, last_block_start_pos, last_block_end_pos = get_block_info(
+                        cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
                     )
+                    cur_block = last_block
+                    try:
+                        async for chunk in generator:
+                            if len(chunk) != 0:
+                                yield bytes(chunk)
+                                stream_cache += chunk
+                                cur_pos += len(chunk)
 
-                cur_pos = range_start_pos
-                stream_cache = bytearray()
-                last_block, last_block_start_pos, last_block_end_pos = get_block_info(
-                    cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-                )
-                cur_block = last_block
-                try:
-                    async for chunk in generator:
-                        if len(chunk) != 0:
-                            yield bytes(chunk)
-                            stream_cache += chunk
-                            cur_pos += len(chunk)
+                            cur_block = cur_pos // cache_file._get_block_size()
 
-                        cur_block = cur_pos // cache_file._get_block_size()
-
-                        if cur_block == last_block:
-                            continue
-                        split_pos = last_block_end_pos - max(
-                            last_block_start_pos, range_start_pos
-                        )
-                        raw_block = stream_cache[:split_pos]
-                        stream_cache = stream_cache[split_pos:]
-                        if len(raw_block) == cache_file._get_block_size():
-                            await _write_block_safely(
-                                cache_file,
-                                last_block,
-                                raw_block,
-                                allow_cache,
+                            if cur_block == last_block:
+                                continue
+                            split_pos = last_block_end_pos - max(
+                                last_block_start_pos, range_start_pos
                             )
-                        last_block, last_block_start_pos, last_block_end_pos = get_block_info(
-                            cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-                        )
-                finally:
-                    raw_block = bytes(stream_cache)
-                    if cur_pos == range_end_pos:
-                        final_block = last_block
-                        final_start = last_block_start_pos
-                        final_end = last_block_end_pos
-                        if final_start >= range_start_pos:
-                            expected_len = final_end - final_start
-                            if len(raw_block) == expected_len:
-                                if expected_len < cache_file._get_block_size():
-                                    raw_block += b"\x00" * (
-                                        cache_file._get_block_size() - expected_len
-                                    )
+                            raw_block = stream_cache[:split_pos]
+                            stream_cache = stream_cache[split_pos:]
+                            if len(raw_block) == cache_file._get_block_size():
                                 await _write_block_safely(
                                     cache_file,
-                                    final_block,
+                                    last_block,
                                     raw_block,
                                     allow_cache,
                                 )
+                            last_block, last_block_start_pos, last_block_end_pos = get_block_info(
+                                cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
+                            )
+                    finally:
+                        raw_block = bytes(stream_cache)
+                        if cur_pos == range_end_pos:
+                            final_block = last_block
+                            final_start = last_block_start_pos
+                            final_end = last_block_end_pos
+                            if final_start >= range_start_pos:
+                                expected_len = final_end - final_start
+                                if len(raw_block) == expected_len:
+                                    if expected_len < cache_file._get_block_size():
+                                        raw_block += b"\x00" * (
+                                            cache_file._get_block_size() - expected_len
+                                        )
+                                    await _write_block_safely(
+                                        cache_file,
+                                        final_block,
+                                        raw_block,
+                                        allow_cache,
+                                    )
 
-                if cur_pos != range_end_pos:
-                    if is_remote:
+                    if cur_pos != range_end_pos:
                         raise Exception(
                             f"The size of remote range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
                         )
+                else:
+                    # Cache hit: blocks are already on disk. No reassembly, no
+                    # cache writes. For uncompressed caches (algo=0) stream each
+                    # block file directly in ~1MB pieces (no whole-block read,
+                    # no slice copy); for compressed caches read+decompress whole
+                    # blocks then re-chunk. Either way uvicorn gets small chunks
+                    # (see _CACHE_STREAM_CHUNK).
+                    cur_pos = range_start_pos
+                    if cache_file.header.compression_algo == 0:
+                        async for piece in _stream_cache_range_uncompressed(
+                            cache_file, range_start_pos, range_end_pos
+                        ):
+                            if piece:
+                                yield piece
+                                cur_pos += len(piece)
                     else:
+                        async for chunk in _get_file_range_from_cache(
+                            cache_file, range_start_pos, range_end_pos
+                        ):
+                            if chunk:
+                                for i in range(0, len(chunk), _CACHE_STREAM_CHUNK):
+                                    yield chunk[i:i + _CACHE_STREAM_CHUNK]
+                                cur_pos += len(chunk)
+                    if cur_pos != range_end_pos:
                         raise Exception(
                             f"The size of cached range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
                         )
