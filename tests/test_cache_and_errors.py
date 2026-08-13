@@ -310,3 +310,23 @@ def test_repo_meta_to_dict_exposes_current_field_values():
     assert meta.to_dict()["_id"] == "internal-id"
     assert meta.to_dict()["tags"] == ["featured"]
     assert meta.to_dict()["likes"] == 7
+
+
+@pytest.mark.asyncio
+async def test_olah_cache_is_fully_cached(tmp_path):
+    cache_dir = tmp_path / "cache"
+    cache = OlahCache.create(
+        str(cache_dir), file_size=_BS * 2, block_size=_BS, chunk_size=_CS, compression_algo=0
+    )
+    # No blocks yet -> not fully cached; zero-size is also not "fully cached".
+    assert cache.is_fully_cached() is False
+    await cache.write_block(0, _full_block(b"abcd", _BS))
+    assert cache.is_fully_cached() is False  # block 1 still missing
+    await cache.write_block(1, _full_block(b"efgh", _BS))
+    assert cache.is_fully_cached() is True
+    cache.close()
+
+    # Reopen: still detected as fully cached from disk state.
+    cache = OlahCache(str(cache_dir))
+    assert cache.is_fully_cached() is True
+    cache.close()

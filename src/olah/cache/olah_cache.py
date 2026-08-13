@@ -527,6 +527,20 @@ class OlahCache(object):
         block_path = self.get_block_path(block_index)
         return os.path.exists(block_path) and os.path.getsize(block_path) > 0
 
+    def is_fully_cached(self) -> bool:
+        """True if every block of the file is present on disk.
+
+        Used to decide whether a request can be served from the cache alone
+        (no upstream re-resolve / fetch). A zero-size file is treated as NOT
+        fully cached so callers fall through to the resolve path.
+        """
+        if self.header is None:
+            return False
+        n = self._get_block_number()
+        if n == 0:
+            return False
+        return all(self.has_block(b) for b in range(n))
+
     def get_block_path(self, block_index: int) -> str:
         return string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
 

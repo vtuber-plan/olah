@@ -220,7 +220,7 @@ async def _file_chunk_get(
     head_path: str,
     client: httpx.AsyncClient,
     method: str,
-    url: str,
+    url: Optional[str],
     headers: Dict[str, str],
     allow_cache: bool,
     file_size: int,
@@ -257,6 +257,14 @@ async def _file_chunk_get(
                 if is_remote:
                     # Cache miss: stream from upstream, reassemble chunks into full
                     # blocks, and persist them to the cache as they complete.
+                    if url is None:
+                        # Cache-only mode (e.g. the Xet route serving a fully-cached
+                        # object without re-resolving HF). A miss here means a block
+                        # was evicted/corrupted between the pre-check and now; abort
+                        # so the client retries and the route re-evaluates coverage.
+                        raise Exception(
+                            "cache miss in cache-only mode (no upstream URL available)"
+                        )
                     generator = _get_file_range_from_remote(
                         client,
                         RemoteInfo(method, url, headers),
@@ -352,7 +360,7 @@ async def _stream_single_range(
     head_path: str,
     client: httpx.AsyncClient,
     method: str,
-    url: str,
+    url: Optional[str],
     headers: Dict[str, str],
     allow_cache: bool,
     file_size: int,
@@ -690,7 +698,7 @@ async def _build_file_response(
     head_path: str,
     request_headers: Dict[str, str],
     method: str,
-    upstream_url: str,
+    upstream_url: Optional[str],
     file_size: int,
     etag: Optional[str],
     allow_cache: bool,

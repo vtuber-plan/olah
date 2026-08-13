@@ -482,3 +482,74 @@ cache-redirect-model = true
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+@pytest.mark.asyncio
+async def test_e2e_xet_cache_first_and_offline(tmp_path, fetch_counter, monkeypatch):
+    """#2 fix: once the Xet object is fully cached, the route serves from cache
+    with NO resolve HEAD (works offline); a miss still re-resolves as before."""
+    from olah.proxy import xet as xet_module
+
+    repos_path = str(tmp_path / "repos")
+    config = OlahConfig()
+    config.repos_path = repos_path
+    config.offline = False
+    config.cache_block_size = 1 * 1024 * 1024
+    config.cache_chunk_size = 256 * 1024
+    config.cache_compression = "none"
+    config.hf_netloc = "huggingface.co"
+    config.hf_lfs_netloc = "cdn-lfs.huggingface.co"
+    config.mirror_netloc = "localhost:8090"
+    config.mirror_lfs_netloc = "localhost:8090"
+    app.state.app_settings = AppSettings(config=config)
+
+    hf_url = "https://huggingface.co/Qwen/Qwen3-4B/resolve/main/tokenizer.json"
+    resolve_path = "/Qwen/Qwen3-4B/resolve/main/tokenizer.json"
+
+    loc = httpx.get(hf_url, follow_redirects=False, timeout=30).headers.get("location", "")
+    import re
+    m = re.search(r"/xet-bridge-us/([^/]+)/([^/?]+)", loc)
+    assert m
+    xet_route = f"/xet-bridge-us/{m.group(1)}/{m.group(2)}"
+
+    # Count HF re-resolves (the per-request HEAD we want to eliminate on hits).
+    resolve_count = {"n": 0}
+    real_resolve = xet_module._xet_resolve_url
+
+    async def counting_resolve(*a, **k):
+        resolve_count["n"] += 1
+        return await real_resolve(*a, **k)
+
+    monkeypatch.setattr(xet_module, "_xet_resolve_url", counting_resolve)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8090", timeout=300) as client:
+        gt = await _ground_truth(hf_url)
+
+        # Register the object via a resolve.
+        rr = await client.get(resolve_path, headers={"range": "bytes=0-1023"})
+        assert rr.status_code == 206
+
+        # MISS (full file) -> resolve once, fetch, cache all blocks.
+        resolve_count["n"] = 0
+        fetch_counter["n"] = 0
+        full = await client.get(xet_route)
+        assert full.status_code == 200 and full.content == gt
+        assert resolve_count["n"] == 1, "MISS should re-resolve exactly once"
+        assert fetch_counter["n"] > 0, "MISS should fetch from upstream"
+
+        # HIT (fully cached) -> NO resolve HEAD, NO byte-fetch.
+        resolve_count["n"] = 0
+        fetch_counter["n"] = 0
+        full2 = await client.get(xet_route)
+        assert full2.status_code == 200 and full2.content == gt
+        assert resolve_count["n"] == 0, "HIT must NOT re-resolve HF"
+        assert fetch_counter["n"] == 0, "HIT must NOT byte-fetch"
+
+        # Offline: cache-first still serves (no HF needed).
+        app.state.app_settings.config.offline = True
+        resolve_count["n"] = 0
+        fetch_counter["n"] = 0
+        full3 = await client.get(xet_route)
+        assert full3.status_code == 200 and full3.content == gt, "offline cache hit must serve"
+        assert resolve_count["n"] == 0

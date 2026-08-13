@@ -21,6 +21,7 @@ from typing import Optional, Tuple
 import httpx
 from fastapi import FastAPI, Request
 
+from olah.cache.olah_cache import OlahCache
 from olah.constants import WORKER_API_TIMEOUT
 from olah.proxy.files import _build_file_response
 from olah.proxy.result import ProxyResult, single_chunk_body
@@ -119,24 +120,6 @@ async def xet_get_generator(
             headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
         return ProxyResult(status_code=200, headers=headers, body=single_chunk_body(b""))
 
-    # GET: re-resolve a fresh signed URL, then stream + cache via the shared path.
-    signed_url, resolved_size = await _xet_resolve_url(
-        app, repo_type, org, repo, file_path, commit, authorization
-    )
-    if not signed_url or resolved_size is None:
-        return ProxyResult(
-            status_code=504,
-            headers={"x-error-message": "Proxy Timeout"},
-            body=single_chunk_body(b""),
-        )
-    file_size = resolved_size if resolved_size is not None else size
-    if file_size is None:
-        return ProxyResult(
-            status_code=504,
-            headers={"x-error-message": "Proxy Timeout"},
-            body=single_chunk_body(b""),
-        )
-
     repos_path = app.state.app_settings.config.repos_path
     save_path = os.path.join(repos_path, "lfs", "files", "xet", xet_hash)
     head_path = os.path.join(repos_path, "lfs", "heads", "xet", xet_hash)
@@ -147,6 +130,43 @@ async def xet_get_generator(
     # The signed CDN URL is self-authorizing; drop the bearer token so the CDN
     # doesn't reject an unexpected Authorization header.
     request_headers.pop("authorization", None)
+
+    # Cache-first: if the object is already fully cached, serve directly from
+    # disk with NO call to HF. This makes cache hits work offline and avoids a
+    # resolve HEAD on every request. Only re-resolve a fresh signed URL when a
+    # block is actually missing.
+    if size and os.path.exists(os.path.join(save_path, "meta.bin")):
+        peek = OlahCache(save_path, file_size=size, expected_etag=xet_hash)
+        try:
+            fully_cached = peek.is_fully_cached()
+        finally:
+            peek.close()
+        if fully_cached:
+            return await _build_file_response(
+                app=app,
+                save_path=save_path,
+                head_path=head_path,
+                request_headers=request_headers,
+                method=method,
+                upstream_url=None,
+                file_size=size,
+                etag=xet_hash,
+                allow_cache=False,
+                commit=commit,
+            )
+
+    # Cache miss (or unknown size): re-resolve a fresh signed URL, then fetch +
+    # cache the missing blocks via the shared path.
+    signed_url, resolved_size = await _xet_resolve_url(
+        app, repo_type, org, repo, file_path, commit, authorization
+    )
+    file_size = resolved_size if resolved_size is not None else size
+    if not signed_url or file_size is None:
+        return ProxyResult(
+            status_code=504,
+            headers={"x-error-message": "Proxy Timeout"},
+            body=single_chunk_body(b""),
+        )
 
     return await _build_file_response(
         app=app,
