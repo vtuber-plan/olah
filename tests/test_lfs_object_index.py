@@ -7,9 +7,12 @@ pytest.importorskip("portalocker")
 import olah.utils.lfs_object_index as idx
 from olah.utils.lfs_object_index import (
     authorize_lfs_object,
+    authorize_xet_object,
     cache_allowed_for_lfs_object,
     get_lfs_object_repos,
+    get_xet_metadata,
     register_lfs_object,
+    register_xet_object,
 )
 
 
@@ -84,3 +87,36 @@ async def test_cache_allowed_follows_rules(monkeypatch, tmp_path):
 
     # Unknown object -> not cached.
     assert await cache_allowed_for_lfs_object(app, "unknown") is False
+
+
+@pytest.mark.asyncio
+async def test_xet_register_metadata_and_authorize(monkeypatch, tmp_path):
+    app = _app(tmp_path)
+    xet = "b" * 64
+    lfs_oid = "a" * 64
+    await register_xet_object(app, "models", "Qwen", "Qwen3-4B", "tokenizer.json", "deadbeef", lfs_oid, xet, 11422654)
+
+    refs, size, oid = await get_xet_metadata(app, xet)
+    assert size == 11422654
+    assert oid == lfs_oid
+    assert refs and refs[0][:3] == ("models", "Qwen", "Qwen3-4B")
+    assert refs[0][3] == "tokenizer.json"
+
+    # Unknown xet hash -> empty refs.
+    assert await get_xet_metadata(app, "c" * 64) == ([], None, None)
+
+    # Authorized when a candidate repo is visible.
+    async def visible(app, rt, org, repo, auth):
+        return repo == "Qwen3-4B"
+    monkeypatch.setattr(idx, "_visibility_cached", visible)
+    assert await authorize_xet_object(app, xet, "tok") is None
+
+    # Denied when no candidate is visible.
+    async def denied(app, rt, org, repo, auth):
+        return False
+    monkeypatch.setattr(idx, "_visibility_cached", denied)
+    assert await authorize_xet_object(app, xet, "tok") == 403
+
+    # Offline always proceeds.
+    app.state.app_settings.config.offline = True
+    assert await authorize_xet_object(app, xet, None) is None

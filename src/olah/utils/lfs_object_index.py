@@ -176,3 +176,112 @@ async def cache_allowed_for_lfs_object(app, content_hash: str) -> bool:
         if await check_cache_rules_hf(app, repo_type, org, repo):
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Xet objects
+# ---------------------------------------------------------------------------
+# Xet direct links (/xet-bridge-{region}/{repo_hash}/{xet_hash}) carry only the
+# content hash, never the repo/file. To re-resolve a fresh signed download URL
+# on a cache miss (the signed URL expires) we must know (repo, file, commit), so
+# the xet index stores full refs alongside the size and the matching lfs oid.
+
+def _xet_index_path(repos_path: str, xet_hash: str) -> str:
+    return os.path.join(
+        repos_path, "lfs", "xet_index", xet_hash[:2], xet_hash + ".json"
+    )
+
+
+async def register_xet_object(
+    app,
+    repo_type: str,
+    org: Optional[str],
+    repo: str,
+    file_path: str,
+    commit: Optional[str],
+    lfs_oid: str,
+    xet_hash: str,
+    size: int,
+) -> None:
+    """Record a Xet object: xet_hash -> (repo, file, commit) + size + lfs_oid.
+
+    Best-effort and idempotent. Populated at resolve time so the Xet content
+    route can authorize and re-resolve later.
+    """
+    if not xet_hash:
+        return
+    try:
+        repos_path = app.state.app_settings.config.repos_path
+        path = _xet_index_path(repos_path, xet_hash)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with portalocker.Lock(path + ".lock", "w", timeout=10, flags=portalocker.LOCK_EX):
+            entry = {"xet_hash": xet_hash, "lfs_oid": lfs_oid, "size": size, "refs": []}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        entry = loaded
+                except (json.JSONDecodeError, OSError):
+                    entry = {"xet_hash": xet_hash, "lfs_oid": lfs_oid, "size": size, "refs": []}
+            entry.setdefault("lfs_oid", lfs_oid)
+            entry.setdefault("size", size)
+            refs = entry.setdefault("refs", [])
+            ref = [repo_type, org, repo, file_path, commit]
+            if ref not in refs:
+                refs.append(ref)
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(entry, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+async def get_xet_metadata(app, xet_hash: str):
+    """Return ``(refs, size, lfs_oid)`` for ``xet_hash``.
+
+    ``refs`` is a list of ``(repo_type, org, repo, file_path, commit)`` tuples
+    (or ``[]`` if unknown). Used by the Xet route for authorization + re-resolve.
+    """
+    if not xet_hash:
+        return [], None, None
+    try:
+        repos_path = app.state.app_settings.config.repos_path
+        path = _xet_index_path(repos_path, xet_hash)
+        if not os.path.exists(path):
+            return [], None, None
+        with open(path, "r", encoding="utf-8") as f:
+            entry = json.load(f)
+        refs = []
+        for r in entry.get("refs", []):
+            if isinstance(r, list) and len(r) >= 3:
+                # (repo_type, org, repo, [file_path], [commit])
+                refs.append(tuple(r[:5]) if len(r) >= 5 else (r[0], r[1], r[2], None, None))
+        return refs, entry.get("size"), entry.get("lfs_oid")
+    except Exception:
+        return [], None, None
+
+
+async def authorize_xet_object(
+    app, xet_hash: str, authorization: Optional[str]
+) -> Optional[int]:
+    """Authorize a Xet request. Returns ``None`` to proceed or ``403`` to deny.
+
+    Offline trusts the local cache. A registered object whose candidate repos
+    all fail visibility is denied (fail-closed). Callers should 404 first if
+    ``get_xet_metadata`` returns no refs (unknown objects cannot be re-resolved).
+    """
+    if app.state.app_settings.config.offline:
+        return None
+    refs, _size, _oid = await get_xet_metadata(app, xet_hash)
+    if not refs:
+        # Unknown -> the route returns 404 (cannot re-resolve without a ref).
+        return None
+    for (repo_type, org, repo, _file, _commit) in refs:
+        if await _visibility_cached(app, repo_type, org, repo, authorization):
+            return None
+    return 403
+

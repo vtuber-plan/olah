@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from olah.errors import error_repo_not_found
 from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
+from olah.proxy.xet import xet_get_generator
 from olah.server_access import build_repo_ref, ensure_repo_visibility, parse_repo_ref, parse_resolve_repo_ref
 from olah.server_mirror import load_local_mirror_payload
 from olah.server_responses import build_streaming_response
@@ -27,6 +28,17 @@ from olah.utils.repo_utils import get_org_repo
 
 
 router = APIRouter()
+
+
+# Xet direct-link route. Registered before the generic 3-segment param routes
+# (/{repo_type}/{org_repo}/{hash_file}) so the literal "xet-bridge-us" segment
+# matches first. Add more regions (e.g. xet-bridge-eu) as needed.
+@router.head("/xet-bridge-us/{repo_hash}/{xet_hash}")
+@router.get("/xet-bridge-us/{repo_hash}/{xet_hash}")
+async def xet_object(repo_hash: str, xet_hash: str, request: Request):
+    method = request.method
+    generator = await xet_get_generator(request.app, xet_hash, request, method)
+    return await build_streaming_response(generator)
 
 
 class _NullLogger:

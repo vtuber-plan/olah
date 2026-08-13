@@ -92,6 +92,11 @@ class OlahConfig(object):
         # block_size must be a multiple of chunk_size; both are validated on use.
         self.cache_block_size: Optional[int] = None
         self.cache_chunk_size: Optional[int] = None
+        # When true, resolve returns a 302 to olah's own content route (Xet
+        # /xet-bridge-...) instead of proxying the bytes, so client range
+        # requests hit olah's cache directly. Default off (proxy model); flip
+        # on only after validating client compatibility.
+        self.cache_redirect_model: bool = False
 
         self.hf_scheme: str = "https"
         self.hf_netloc: str = "huggingface.co"
@@ -167,6 +172,7 @@ class OlahConfig(object):
             self.cache_compression = basic.get("cache-compression", self.cache_compression)
             self.cache_block_size = convert_to_bytes(basic.get("cache-block-size", self.cache_block_size))
             self.cache_chunk_size = convert_to_bytes(basic.get("cache-chunk-size", self.cache_chunk_size))
+            self.cache_redirect_model = basic.get("cache-redirect-model", self.cache_redirect_model)
 
             self.hf_scheme = basic.get("hf-scheme", self.hf_scheme)
             self.hf_netloc = basic.get("hf-netloc", self.hf_netloc)

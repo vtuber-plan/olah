@@ -279,3 +279,206 @@ async def test_e2e_real_lfs_file_qwen3(tmp_path, fetch_counter):
             "registered public Qwen3-4B object should authorize (visibility probe -> 200)"
         )
 
+
+@pytest.mark.asyncio
+async def test_e2e_xet_direct_route_qwen3(tmp_path, fetch_counter):
+    """Phase 2: the dedicated Xet direct-link route caches + serves a real Xet file.
+
+    Resolves tokenizer.json through olah (which registers the xet object), then hits
+    the stable /xet-bridge-us/{repo_hash}/{xet_hash} route: first request re-resolves a
+    fresh signed URL and caches (MISS), second serves from cache (HIT, zero byte-fetch).
+    """
+    repos_path = str(tmp_path / "repos")
+    config = OlahConfig()
+    config.repos_path = repos_path
+    config.offline = False
+    config.cache_block_size = 1 * 1024 * 1024
+    config.cache_chunk_size = 256 * 1024
+    config.cache_compression = "none"
+    config.hf_netloc = "huggingface.co"
+    config.hf_lfs_netloc = "cdn-lfs.huggingface.co"
+    config.mirror_netloc = "localhost:8090"
+    config.mirror_lfs_netloc = "localhost:8090"
+    app.state.app_settings = AppSettings(config=config)
+
+    hf_url = "https://huggingface.co/Qwen/Qwen3-4B/resolve/main/tokenizer.json"
+    resolve_path = "/Qwen/Qwen3-4B/resolve/main/tokenizer.json"
+
+    # Capture repo_hash + xet_hash from the real HF redirect.
+    loc = httpx.get(hf_url, follow_redirects=False, timeout=30).headers.get("location", "")
+    # loc = https://us.aws.cdn.hf.co/xet-bridge-us/{repo_hash}/{xet_hash}?...
+    import re
+    m = re.search(r"/xet-bridge-us/([^/]+)/([^/?]+)", loc)
+    assert m, f"could not parse xet-bridge URL from {loc[:120]}"
+    repo_hash, xet_hash = m.group(1), m.group(2)
+    xet_route = f"/xet-bridge-us/{repo_hash}/{xet_hash}"
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8090", timeout=300) as client:
+        gt = await _ground_truth(hf_url)
+        end = 2 * 1024 * 1024
+
+        # 1. Resolve via olah (small range) -> pathsinfo registers the xet object.
+        fetch_counter["n"] = 0
+        rr = await client.get(resolve_path, headers={"range": f"bytes=0-1023"})
+        assert rr.status_code == 206, (rr.status_code, rr.text[:200])
+
+        from olah.utils.lfs_object_index import get_xet_metadata
+        refs, size, oid = await get_xet_metadata(app, xet_hash)
+        assert refs, "xet object not registered by the resolve flow"
+        assert size == len(gt), (size, len(gt))
+
+        # 2. Xet route MISS: re-resolve signed URL, fetch + cache, serve correct bytes.
+        fetch_counter["n"] = 0
+        x1 = await client.get(xet_route, headers={"range": f"bytes=0-{end - 1}"})
+        assert x1.status_code == 206, (x1.status_code, x1.text[:200])
+        assert x1.content == gt[0:end], "xet MISS bytes != ground truth slice"
+        assert fetch_counter["n"] > 0, "xet MISS should fetch from upstream"
+
+        # 3. Xet route HIT: bytes from cache, no upstream byte-fetch.
+        fetch_counter["n"] = 0
+        x2 = await client.get(xet_route, headers={"range": f"bytes=0-{end - 1}"})
+        assert x2.status_code == 206
+        assert x2.content == gt[0:end], "xet HIT bytes != ground truth slice"
+        assert fetch_counter["n"] == 0, "xet HIT must not byte-fetch from upstream"
+
+        # 4. Unknown xet hash -> 404 (cannot re-resolve without a registered ref).
+        unk = await client.get(f"/xet-bridge-us/{repo_hash}/{'0' * 64}", headers={"range": "bytes=0-15"})
+        assert unk.status_code == 404, unk.status_code
+
+
+
+
+@pytest.mark.asyncio
+async def test_e2e_redirect_model_qwen3(tmp_path, fetch_counter):
+    """Phase 3 (redirect model, cache_redirect_model=True): resolve returns a 302
+    to olah's Xet content route, which the client follows; metadata HEAD and byte
+    GET both land on the content route (cached MISS -> HIT)."""
+    repos_path = str(tmp_path / "repos")
+    config = OlahConfig()
+    config.repos_path = repos_path
+    config.offline = False
+    config.cache_block_size = 1 * 1024 * 1024
+    config.cache_chunk_size = 256 * 1024
+    config.cache_compression = "none"
+    config.cache_redirect_model = True
+    config.hf_netloc = "huggingface.co"
+    config.hf_lfs_netloc = "cdn-lfs.huggingface.co"
+    config.mirror_netloc = "localhost:8090"
+    config.mirror_lfs_netloc = "localhost:8090"
+    app.state.app_settings = AppSettings(config=config)
+
+    hf_url = "https://huggingface.co/Qwen/Qwen3-4B/resolve/main/tokenizer.json"
+    resolve_path = "/Qwen/Qwen3-4B/resolve/main/tokenizer.json"
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8090", timeout=300) as client:
+        gt = await _ground_truth(hf_url)
+        end = 2 * 1024 * 1024
+
+        # resolve returns 302 (do not follow) -> Location points at the Xet route.
+        r302 = await client.get(resolve_path, follow_redirects=False)
+        assert r302.status_code == 302, (r302.status_code, r302.text[:120])
+        assert r302.headers["location"].startswith("/xet-bridge-us/"), r302.headers["location"]
+        # Native Xet must stay disabled (no x-xet-hash leaked to the client).
+        assert "x-xet-hash" not in {k.lower() for k in r302.headers}
+
+        # Following the redirect: HEAD lands on the Xet route -> metadata only.
+        h = await client.head(resolve_path, follow_redirects=True)
+        assert h.status_code == 200, (h.status_code, h.text[:120])
+        assert int(h.headers["content-length"]) == len(gt)
+
+        # GET (follow redirect) -> Xet route serves correct bytes (MISS).
+        fetch_counter["n"] = 0
+        g1 = await client.get(resolve_path, headers={"range": f"bytes=0-{end - 1}"}, follow_redirects=True)
+        assert g1.status_code == 206, (g1.status_code, g1.text[:120])
+        assert g1.content == gt[0:end], "redirect GET MISS bytes != ground truth"
+        assert fetch_counter["n"] > 0, "redirect GET MISS should fetch from upstream"
+
+        # Second GET (follow redirect) -> Xet route HIT (no byte-fetch).
+        fetch_counter["n"] = 0
+        g2 = await client.get(resolve_path, headers={"range": f"bytes=0-{end - 1}"}, follow_redirects=True)
+        assert g2.content == gt[0:end]
+        assert fetch_counter["n"] == 0, "redirect GET HIT must not byte-fetch from upstream"
+
+
+@pytest.mark.asyncio
+async def test_e2e_redirect_model_hf_hub_download(tmp_path):
+    """Gold-standard Phase 3 compatibility: run olah as a real server with
+    cache_redirect_model=True, point huggingface_hub at it (HF_ENDPOINT), and
+    download tokenizer.json end-to-end. Confirms hf_hub's HEAD->302->content-route
+    flow works and the bytes hash to the known content SHA-256."""
+    import hashlib
+    import socket
+    import subprocess
+    import time
+    import sys
+
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    cfg_path = server_dir / "olah.toml"
+    repos_path = tmp_path / "repos"
+    repos_path.mkdir()
+    cfg_path.write_text(
+        f"""
+[basic]
+host = "127.0.0.1"
+port = 0
+repos-path = "{repos_path}"
+cache-block-size = "1MB"
+cache-chunk-size = "256KB"
+cache-compression = "none"
+cache-redirect-model = true
+"""
+    )
+
+    # Pick a free port.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    env = dict(os.environ)
+    env["HF_HUB_DISABLE_XET"] = "1"  # force HTTP (olah strips xet metadata anyway)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "olah.server", "--config", str(cfg_path),
+         "--host", "127.0.0.1", "--port", str(port)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+    )
+    try:
+        # Wait for readiness.
+        ready = False
+        for _ in range(60):
+            try:
+                httpx.get(f"http://127.0.0.1:{port}/", timeout=1.0)
+                ready = True
+                break
+            except Exception:
+                time.sleep(0.5)
+        assert ready, "olah server did not become ready"
+
+        import huggingface_hub
+
+        cache_dir = tmp_path / "hf_cache"
+        # Point hf_hub at olah and download tokenizer.json (11 MB).
+        filepath = huggingface_hub.hf_hub_download(
+            repo_id="Qwen/Qwen3-4B",
+            filename="tokenizer.json",
+            cache_dir=str(cache_dir),
+            endpoint=f"http://127.0.0.1:{port}",
+        )
+        data = open(filepath, "rb").read()
+        digest = hashlib.sha256(data).hexdigest()
+        # The content SHA-256 (lfs oid) of Qwen3-4B tokenizer.json.
+        assert digest == QWEN3_TOKENIZER_OID, f"downloaded sha256 {digest} != expected"
+
+        # olah cached it under the Xet route's content-addressed dir.
+        import glob
+        xet_caches = glob.glob(str(repos_path / "lfs" / "files" / "xet" / "*" / "meta.bin"))
+        assert xet_caches, "olah did not cache the Xet object"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()

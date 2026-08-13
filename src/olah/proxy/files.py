@@ -47,7 +47,7 @@ from olah.utils.url_utils import (
 )
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.rule_utils import check_cache_rules_hf
-from olah.utils.lfs_object_index import register_lfs_object
+from olah.utils.lfs_object_index import register_lfs_object, register_xet_object
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 from olah.utils.zip_utils import Decompressor, decompress_data
@@ -471,6 +471,83 @@ async def _remote_file_metadata(
         return None
     return RemoteFileMetadata(file_size=file_size, etag=response.headers.get("etag"))
 
+
+def _strip_quotes(value: Optional[str]) -> Optional[str]:
+    if value and len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+async def _try_redirect_to_content_route(
+    app,
+    hf_url: str,
+    authorization: Optional[str],
+    repo_type: Optional[str],
+    org: Optional[str],
+    repo: Optional[str],
+    file_path: Optional[str],
+    commit: Optional[str],
+) -> Optional[ProxyResult]:
+    """Redirect-model hook: for Xet files, return a 302 to olah's Xet content route.
+
+    Returns ``None`` to fall through to normal proxying (redirect model off, no
+    repo context, not a redirect, classic/plain file, or upstream error). The 302
+    deliberately omits ``x-xet-hash`` so hf_hub does not engage native Xet and
+    instead downloads over HTTP from olah's content route.
+    """
+    import re
+
+    cfg = app.state.app_settings.config
+    if not getattr(cfg, "cache_redirect_model", False):
+        return None
+    if not (repo_type and repo and file_path and commit):
+        return None
+
+    headers = {}
+    if authorization:
+        headers["authorization"] = authorization
+    try:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            resp = await client.head(hf_url, headers=headers, timeout=WORKER_API_TIMEOUT)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code not in (301, 302, 303, 307, 308):
+        return None
+
+    location = resp.headers.get("location", "")
+    xet_hash = resp.headers.get("x-xet-hash")
+    oid = _strip_quotes(resp.headers.get("x-linked-etag"))
+    try:
+        size = int(resp.headers.get("x-linked-size") or resp.headers.get("content-length"))
+    except (TypeError, ValueError):
+        size = None
+
+    if xet_hash and oid:
+        await register_xet_object(
+            app, repo_type, org, repo, file_path, commit, oid, xet_hash, size or 0
+        )
+        await register_lfs_object(app, repo_type, org, repo, oid)
+        m = re.search(r"/xet-bridge-[a-z]+/([^/]+)/([^/?]+)", location)
+        repo_hash = m.group(1) if m else "_"
+        response_headers = {
+            "location": f"/xet-bridge-us/{repo_hash}/{xet_hash}",
+            "etag": f'"{xet_hash}"',
+            "accept-ranges": "bytes",
+        }
+        if size is not None:
+            response_headers["content-length"] = str(size)
+            response_headers["x-linked-size"] = str(size)
+        if oid:
+            response_headers["x-linked-etag"] = f'"{oid}"'
+        if commit:
+            response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
+        return ProxyResult(
+            status_code=302, headers=response_headers, body=single_chunk_body(b"")
+        )
+
+    # Classic LFS / plain redirect: not routed here yet -> proxy.
+    return None
+
 async def _file_realtime_stream(
     app,
     save_path: str,
@@ -522,6 +599,14 @@ async def _file_realtime_stream(
         request_headers["host"] = urlparse(hf_url).netloc
 
     authorization = request.headers.get("authorization", None)
+    # Redirect model (opt-in): for Xet files, hand the client a 302 to olah's own
+    # Xet content route instead of proxying the bytes, so range requests hit the
+    # cache directly. Falls through to proxying for non-Xet / when off / on error.
+    redirect = await _try_redirect_to_content_route(
+        app, hf_url, authorization, repo_type, org, repo, file_path, commit
+    )
+    if redirect is not None:
+        return redirect
     if repo_type is not None and org is not None and repo is not None and file_path is not None and commit is not None:
         generator = await pathsinfo_generator(
             app,
@@ -558,13 +643,26 @@ async def _file_realtime_stream(
         # Register LFS content identity so later LFS downloads (which carry only
         # the content hash, not the repo) can be authorized against this repo.
         lfs_info = pathinfo.get("lfs") if isinstance(pathinfo, dict) else None
-        if isinstance(lfs_info, dict) and lfs_info.get("oid"):
-            await register_lfs_object(app, repo_type, org, repo, lfs_info["oid"])
-        etag = await _resource_etag(
-            hf_url=hf_url,
-            authorization=authorization,
-            offline=app.state.app_settings.config.offline,
-        )
+        lfs_oid = lfs_info.get("oid") if isinstance(lfs_info, dict) else None
+        xet_hash = pathinfo.get("xetHash") if isinstance(pathinfo, dict) else None
+        if lfs_oid:
+            await register_lfs_object(app, repo_type, org, repo, lfs_oid)
+            if xet_hash:
+                await register_xet_object(
+                    app, repo_type, org, repo, file_path, commit, lfs_oid, xet_hash, file_size
+                )
+        # Content-addressed cache identity: for LFS/Xet files use the content
+        # SHA-256 (lfs oid) -- integrity-verifiable and stable across commits --
+        # instead of a URL-derived pseudo-etag. Fall back to _resource_etag for
+        # plain (non-LFS) files.
+        if lfs_oid:
+            etag = f'"{lfs_oid}"'
+        else:
+            etag = await _resource_etag(
+                hf_url=hf_url,
+                authorization=authorization,
+                offline=app.state.app_settings.config.offline,
+            )
     else:
         metadata = await _remote_file_metadata(
             app=app,
@@ -577,21 +675,48 @@ async def _file_realtime_stream(
         file_size = metadata.file_size
         etag = metadata.etag
 
-    response_headers = {}
-    range_header = request_headers.get("range")
-    _, all_ranges, _ = get_request_ranges(file_size, range_header)
-    response_headers["accept-ranges"] = "bytes"
-    # Commit info
-    if commit is not None:
-        response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
-    # An explicit expected_etag (e.g. the LFS content hash) overrides the
+    # An explicit expected_etag (e.g. the LFS/Xet content hash) overrides the
     # upstream-derived etag for both the response and cache revalidation.
     if expected_etag is not None:
         etag = expected_etag
+    return await _build_file_response(
+        app, save_path, head_path, request_headers, method, hf_url, file_size, etag, allow_cache, commit
+    )
+
+
+async def _build_file_response(
+    app,
+    save_path: str,
+    head_path: str,
+    request_headers: Dict[str, str],
+    method: str,
+    upstream_url: str,
+    file_size: int,
+    etag: Optional[str],
+    allow_cache: bool,
+    commit: Optional[str],
+) -> ProxyResult:
+    """Build the ranged response (headers + streaming body) for a file served
+    from ``upstream_url`` and cached at ``save_path``.
+
+    Shared by the resolve proxy (``upstream_url`` = HF resolve URL) and the Xet
+    content route (``upstream_url`` = a freshly re-resolved signed xet URL). The
+    cache identity is ``etag`` (content-addressed for LFS/Xet files).
+    """
+    response_headers: Dict[str, str] = {}
+    range_header = request_headers.get("range")
+    _, all_ranges, _ = get_request_ranges(file_size, range_header)
+    response_headers["accept-ranges"] = "bytes"
+    if commit is not None:
+        response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
     response_headers["etag"] = etag
 
     if etag is None:
-        return await error_result(error_proxy_timeout())
+        return ProxyResult(
+            status_code=504,
+            headers={"x-error-message": "Proxy Timeout"},
+            body=single_chunk_body(b""),
+        )
 
     if range_header is None:
         status_code = 200
@@ -619,7 +744,7 @@ async def _file_realtime_stream(
     # Identity passed to the cache for online revalidation. Offline trusts the
     # disk (None) so a transient upstream-derived pseudo-etag never destroys a
     # good cache while offline.
-    expected_etag = None if app.state.app_settings.config.offline else etag
+    cache_expected_etag = None if app.state.app_settings.config.offline else etag
 
     async def body_iter() -> AsyncIterator[bytes]:
         async with httpx.AsyncClient() as client:
@@ -631,11 +756,11 @@ async def _file_realtime_stream(
                         head_path=head_path,
                         client=client,
                         method=method,
-                        url=hf_url,
+                        url=upstream_url,
                         headers=request_headers,
                         allow_cache=allow_cache,
                         file_size=file_size,
-                        expected_etag=expected_etag,
+                        expected_etag=cache_expected_etag,
                     ):
                         yield each_chunk
                 elif len(all_ranges) == 1:
@@ -645,11 +770,11 @@ async def _file_realtime_stream(
                         head_path=head_path,
                         client=client,
                         method=method,
-                        url=hf_url,
+                        url=upstream_url,
                         headers=request_headers,
                         allow_cache=allow_cache,
                         file_size=file_size,
-                        expected_etag=expected_etag,
+                        expected_etag=cache_expected_etag,
                         requested_range=all_ranges[0],
                     ):
                         yield each_chunk
@@ -662,11 +787,11 @@ async def _file_realtime_stream(
                             head_path=head_path,
                             client=client,
                             method=method,
-                            url=hf_url,
+                            url=upstream_url,
                             headers=request_headers,
                             allow_cache=allow_cache,
                             file_size=file_size,
-                            expected_etag=expected_etag,
+                            expected_etag=cache_expected_etag,
                             requested_range=(start_pos, end_pos),
                         ):
                             yield each_chunk
@@ -679,7 +804,7 @@ async def _file_realtime_stream(
                     head_path=head_path,
                     client=client,
                     method=method,
-                    url=hf_url,
+                    url=upstream_url,
                     headers=request_headers,
                     allow_cache=allow_cache,
                     file_size=0,
