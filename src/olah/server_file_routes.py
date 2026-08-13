@@ -30,15 +30,25 @@ from olah.utils.repo_utils import get_org_repo
 router = APIRouter()
 
 
-# Xet direct-link route. Registered before the generic 3-segment param routes
-# (/{repo_type}/{org_repo}/{hash_file}) so the literal "xet-bridge-us" segment
-# matches first. Add more regions (e.g. xet-bridge-eu) as needed.
-@router.head("/xet-bridge-us/{repo_hash}/{xet_hash}")
-@router.get("/xet-bridge-us/{repo_hash}/{xet_hash}")
+# Xet direct-link routes. The first segment is a literal region
+# (xet-bridge-<region>) so it does NOT collide with the generic
+# /{repo_type}/{org_repo}/{hash_file} 3-segment param route. Registered first so
+# the literal region matches before the param route. HF currently serves Xet only
+# from "us"; the handler ignores region + repo_hash (it is content-addressed by
+# xet_hash and re-resolves its own signed URL), so add a region token here (e.g.
+# "eu") the moment HF launches another xet-bridge host.
 async def xet_object(repo_hash: str, xet_hash: str, request: Request):
     method = request.method
     generator = await xet_get_generator(request.app, xet_hash, request, method)
     return await build_streaming_response(generator)
+
+
+for _region in ("us",):
+    router.add_api_route(
+        f"/xet-bridge-{_region}/{{repo_hash}}/{{xet_hash}}",
+        xet_object,
+        methods=["GET", "HEAD"],
+    )
 
 
 class _NullLogger:
