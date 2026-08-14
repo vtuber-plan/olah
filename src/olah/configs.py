@@ -97,6 +97,15 @@ class OlahConfig(object):
         # requests hit olah's cache directly. Default off (proxy model); flip
         # on only after validating client compatibility.
         self.cache_redirect_model: bool = False
+        # Xet pass-through: mirror upstream Xet metadata (x-xet-hash, the
+        # Link: rel="xet-auth" token route) back to the client so hf_xet
+        # downloads large files directly from xethub.hf.co. hf_hub refuses
+        # plain-HTTP downloads above its hardcoded size cap, so pass-through is
+        # the only way such files reach vanilla clients. Only files >=
+        # xet-passthrough-min-size pass through; smaller Xet files keep flowing
+        # through olah's cache. Default off.
+        self.xet_passthrough: bool = False
+        self.xet_passthrough_min_size: int = 50 * 1024**3
 
         self.hf_scheme: str = "https"
         self.hf_netloc: str = "huggingface.co"
@@ -173,6 +182,12 @@ class OlahConfig(object):
             self.cache_block_size = convert_to_bytes(basic.get("cache-block-size", self.cache_block_size))
             self.cache_chunk_size = convert_to_bytes(basic.get("cache-chunk-size", self.cache_chunk_size))
             self.cache_redirect_model = basic.get("cache-redirect-model", self.cache_redirect_model)
+            self.xet_passthrough = basic.get("xet-passthrough", self.xet_passthrough)
+            xet_min_size = convert_to_bytes(
+                basic.get("xet-passthrough-min-size", self.xet_passthrough_min_size)
+            )
+            if xet_min_size is not None:
+                self.xet_passthrough_min_size = xet_min_size
 
             self.hf_scheme = basic.get("hf-scheme", self.hf_scheme)
             self.hf_netloc = basic.get("hf-netloc", self.hf_netloc)

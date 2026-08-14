@@ -145,46 +145,191 @@ async def test_remote_file_metadata_no_xet_headers_for_plain_files(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _detect_xet_passthrough
+# _probe_xet_resolve (the shared upstream HEAD)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_detect_xet_passthrough_returns_none_when_no_xet_hash(monkeypatch):
-    fake_response = SimpleNamespace(
-        status_code=302,
-        headers={"location": "https://cdn-lfs.huggingface.co/.../small.bin", "content-length": "100"},
-    )
-    _patch_async_client(monkeypatch, proxy_files, response=fake_response)
-
-    result = await proxy_files._detect_xet_passthrough(
-        hf_url="https://huggingface.co/x/y/resolve/main/small.bin",
-        authorization=None,
-        commit="main",
-    )
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_detect_xet_passthrough_returns_none_on_http_error(monkeypatch):
+async def test_probe_xet_resolve_returns_none_on_http_error(monkeypatch):
     _patch_async_client(monkeypatch, proxy_files, raises=httpx.ConnectError("refused"))
 
-    result = await proxy_files._detect_xet_passthrough(
+    response = await proxy_files._probe_xet_resolve(
         hf_url="http://localhost:1/file",
         authorization=None,
-        commit=None,
     )
-    assert result is None
+    assert response is None
 
 
 @pytest.mark.asyncio
-async def test_detect_xet_passthrough_mirrors_upstream_xet_headers(monkeypatch):
+async def test_probe_xet_resolve_forwards_authorization(monkeypatch):
     captured = []
-    fake_response = SimpleNamespace(
+    fake_response = SimpleNamespace(status_code=200, headers={})
+    _patch_async_client(monkeypatch, proxy_files, response=fake_response, captured=captured)
+
+    response = await proxy_files._probe_xet_resolve(
+        hf_url="https://huggingface.co/x/y/resolve/main/file",
+        authorization="Bearer token",
+    )
+
+    assert response is fake_response
+    assert captured[0]["headers"].get("authorization") == "Bearer token"
+    assert captured[0]["follow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_probe_xet_resolve_follows_relative_redirect(monkeypatch):
+    # When upstream returns a relative 307 (e.g. canonical-name redirect),
+    # the probe must follow it to find the response that actually carries
+    # x-xet-hash. Otherwise renamed repos quietly fall back to the
+    # legacy "file too large" path.
+    visited = []
+
+    class _FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            visited.append(url)
+            if url.endswith("/old-name/repo/resolve/main/file.bin"):
+                return SimpleNamespace(
+                    status_code=307,
+                    headers={"location": "/new-name/repo/resolve/main/file.bin"},
+                )
+            return SimpleNamespace(
+                status_code=302,
+                headers={
+                    "x-xet-hash": "abc",
+                    "location": "https://cas-bridge.xethub.hf.co/x?signed=1",
+                },
+            )
+
+    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", _FakeAsyncClient)
+
+    response = await proxy_files._probe_xet_resolve(
+        hf_url="https://huggingface.co/old-name/repo/resolve/main/file.bin",
+        authorization=None,
+    )
+
+    assert response is not None
+    assert response.headers["x-xet-hash"] == "abc"
+    assert visited == [
+        "https://huggingface.co/old-name/repo/resolve/main/file.bin",
+        "https://huggingface.co/new-name/repo/resolve/main/file.bin",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_probe_xet_resolve_stops_at_absolute_redirect(monkeypatch):
+    # An absolute 3xx is the *Xet* redirect itself — stop there, do not follow.
+    class _FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        call_count = 0
+
+        async def request(self, method, url, **kwargs):
+            type(self).call_count += 1
+            if type(self).call_count > 1:
+                raise AssertionError("absolute redirect must not be followed")
+            return SimpleNamespace(
+                status_code=302,
+                headers={
+                    "x-xet-hash": "h",
+                    "location": "https://cas-bridge.xethub.hf.co/abs?signed=1",
+                },
+            )
+
+    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", _FakeAsyncClient)
+
+    response = await proxy_files._probe_xet_resolve(
+        hf_url="https://huggingface.co/x/y/resolve/main/big.bin",
+        authorization=None,
+    )
+    assert response is not None
+    assert response.headers["x-xet-hash"] == "h"
+
+
+@pytest.mark.asyncio
+async def test_probe_xet_resolve_resolves_redirects_via_rfc3986(monkeypatch):
+    # A relative redirect must replace the base URL's query string, not
+    # carry it over. urlparse._replace would be wrong here; urljoin is right.
+    visited = []
+
+    class _FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            visited.append(url)
+            if "?old=1" in url:
+                return SimpleNamespace(
+                    status_code=307,
+                    headers={"location": "/new/path"},
+                )
+            return SimpleNamespace(
+                status_code=302,
+                headers={"x-xet-hash": "h", "location": "https://cas/x"},
+            )
+
+    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", _FakeAsyncClient)
+
+    response = await proxy_files._probe_xet_resolve(
+        hf_url="https://huggingface.co/old/path?old=1",
+        authorization=None,
+    )
+
+    assert response is not None
+    assert visited == [
+        "https://huggingface.co/old/path?old=1",
+        "https://huggingface.co/new/path",  # query string dropped, not carried
+    ]
+
+
+@pytest.mark.asyncio
+async def test_probe_xet_resolve_caps_redirect_loop(monkeypatch):
+    # A pathological infinite redirect loop must not hang the probe.
+    class _FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            return SimpleNamespace(
+                status_code=307,
+                headers={"location": "/loop"},
+            )
+
+    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", _FakeAsyncClient)
+
+    response = await proxy_files._probe_xet_resolve(
+        hf_url="https://huggingface.co/loop",
+        authorization=None,
+    )
+    assert response is None
+
+
+# ---------------------------------------------------------------------------
+# _xet_passthrough_result (pure decision from a probed response)
+# ---------------------------------------------------------------------------
+
+
+def _xet_response(size=str(100 * 1024**3)):
+    return SimpleNamespace(
         status_code=302,
         headers={
             "x-xet-hash": "bdcc...0f6d",
-            "x-linked-size": "53121272560",
+            "x-linked-size": size,
             "x-linked-etag": '"caa3..."',
             "etag": '"caa3..."',
             "link": '<https://huggingface.co/api/models/x/y/xet-read-token/abc>; rel="xet-auth"',
@@ -192,19 +337,28 @@ async def test_detect_xet_passthrough_mirrors_upstream_xet_headers(monkeypatch):
             "location": "https://cas-bridge.xethub.hf.co/xet-bridge-us/abc?signed=1",
         },
     )
-    _patch_async_client(monkeypatch, proxy_files, response=fake_response, captured=captured)
 
-    result = await proxy_files._detect_xet_passthrough(
-        hf_url="https://huggingface.co/x/y/resolve/abc/big.bin",
-        authorization="Bearer token",
-        commit=None,
+
+def test_passthrough_result_none_when_no_xet_hash():
+    plain = SimpleNamespace(
+        status_code=302,
+        headers={"location": "https://cdn-lfs.huggingface.co/.../small.bin", "content-length": "100"},
     )
+    assert proxy_files._xet_passthrough_result(plain, "main", 0) is None
+
+
+def test_passthrough_result_none_when_probe_failed():
+    assert proxy_files._xet_passthrough_result(None, "main", 0) is None
+
+
+def test_passthrough_result_mirrors_upstream_xet_headers():
+    result = proxy_files._xet_passthrough_result(_xet_response(), None, 0)
 
     assert result is not None
     assert result.status_code == 302
     headers = result.headers
     assert headers["x-xet-hash"] == "bdcc...0f6d"
-    assert headers["x-linked-size"] == "53121272560"
+    assert headers["x-linked-size"] == str(100 * 1024**3)
     assert headers["x-linked-etag"] == '"caa3..."'
     assert "link" in headers
     assert headers["accept-ranges"] == "bytes"
@@ -215,60 +369,66 @@ async def test_detect_xet_passthrough_mirrors_upstream_xet_headers(monkeypatch):
     # body is empty and x-linked-size is the *target file* size, not the body.
     # Lying about it would mislead any client that follows the 302.
     assert "content-length" not in headers
-    # Authorization must be forwarded upstream.
-    assert captured[0]["headers"].get("authorization") == "Bearer token"
-    assert captured[0]["follow_redirects"] is False
-    # Body is empty — the client uses headers to switch to the Xet protocol.
-    body_chunks = [chunk async for chunk in result.body]
-    assert body_chunks == [b""]
 
 
 @pytest.mark.asyncio
-async def test_detect_xet_passthrough_uses_explicit_commit_over_upstream(monkeypatch):
-    fake_response = SimpleNamespace(
+async def test_passthrough_result_body_is_single_empty_chunk():
+    result = proxy_files._xet_passthrough_result(_xet_response(), None, 0)
+    assert [chunk async for chunk in result.body] == [b""]
+
+
+def test_passthrough_result_uses_explicit_commit_over_upstream():
+    response = SimpleNamespace(
         status_code=302,
         headers={"x-xet-hash": "h", "x-repo-commit": "upstream-commit"},
     )
-    _patch_async_client(monkeypatch, proxy_files, response=fake_response)
-
-    result = await proxy_files._detect_xet_passthrough(
-        hf_url="https://huggingface.co/x/y/resolve/main/file",
-        authorization=None,
-        commit="explicit-commit",
-    )
+    result = proxy_files._xet_passthrough_result(response, "explicit-commit", 0)
     assert result is not None
     # When the caller passes a commit, it should win over the upstream value.
     assert result.headers["x-repo-commit"] == "explicit-commit"
 
 
-# ---------------------------------------------------------------------------
-# _file_realtime_stream short-circuit on Xet
-# ---------------------------------------------------------------------------
+def test_passthrough_result_gates_on_min_size():
+    # 100 GiB file with a 50 GiB threshold: passes through.
+    assert proxy_files._xet_passthrough_result(_xet_response(), None, 50 * 1024**3) is not None
+    # Same file with a threshold above its size: stays on the cache path.
+    assert proxy_files._xet_passthrough_result(_xet_response(), None, 200 * 1024**3) is None
+    # Exactly at the threshold passes through (>= semantics).
+    assert proxy_files._xet_passthrough_result(_xet_response(), None, 100 * 1024**3) is not None
 
 
-@pytest.mark.asyncio
-async def test_file_realtime_stream_short_circuits_on_xet(monkeypatch, tmp_path):
-    pathsinfo_called = []
-
-    async def fake_pathsinfo_generator(*args, **kwargs):
-        pathsinfo_called.append(True)
-        raise AssertionError("pathsinfo_generator must not run for Xet files")
-
-    monkeypatch.setattr(proxy_files, "pathsinfo_generator", fake_pathsinfo_generator)
-
-    sentinel = proxy_files.ProxyResult(
+def test_passthrough_result_size_unknown_still_passes_through():
+    # No x-linked-size / content-length at all: assume the client needs the
+    # native Xet path rather than risking hf_hub's "file too large" later.
+    response = SimpleNamespace(
         status_code=302,
         headers={"x-xet-hash": "h"},
-        body=proxy_files.single_chunk_body(b""),
     )
+    assert proxy_files._xet_passthrough_result(response, None, 50 * 1024**3) is not None
 
-    async def fake_detect(hf_url, authorization, commit):
-        return sentinel
 
-    monkeypatch.setattr(proxy_files, "_detect_xet_passthrough", fake_detect)
+# ---------------------------------------------------------------------------
+# _file_realtime_stream gating (opt-in, threshold, single probe)
+# ---------------------------------------------------------------------------
 
-    result = await proxy_files._file_realtime_stream(
-        app=_fake_app(tmp_path=tmp_path, offline=False),
+
+def _fake_app_xet(tmp_path, *, offline=False, xet_passthrough=True, redirect_model=False, min_size=0):
+    config = SimpleNamespace(
+        offline=offline,
+        xet_passthrough=xet_passthrough,
+        xet_passthrough_min_size=min_size,
+        cache_redirect_model=redirect_model,
+        hf_netloc="huggingface.co",
+        hf_lfs_netloc="cdn-lfs.huggingface.co",
+        repos_path=str(tmp_path / "repos"),
+        hf_url_base=lambda: "https://huggingface.co",
+        hf_lfs_url_base=lambda: "https://cdn-lfs.huggingface.co",
+    )
+    return SimpleNamespace(state=SimpleNamespace(app_settings=SimpleNamespace(config=config)))
+
+
+def _stream_kwargs(tmp_path, **extra):
+    kwargs = dict(
         repo_type="models",
         org="x",
         repo="y",
@@ -280,20 +440,40 @@ async def test_file_realtime_stream_short_circuits_on_xet(monkeypatch, tmp_path)
         allow_cache=True,
         commit="main",
     )
-
-    assert result is sentinel
-    assert pathsinfo_called == []
+    kwargs.update(extra)
+    return kwargs
 
 
 @pytest.mark.asyncio
-async def test_file_realtime_stream_skips_xet_probe_when_offline(monkeypatch, tmp_path):
-    detect_called = []
+async def test_file_realtime_stream_short_circuits_on_xet_when_enabled(monkeypatch, tmp_path):
+    async def fail_pathsinfo(*args, **kwargs):
+        raise AssertionError("pathsinfo_generator must not run for passed-through Xet files")
 
-    async def fake_detect(*args, **kwargs):
-        detect_called.append(True)
-        return None
+    async def fake_probe(hf_url, authorization):
+        return _xet_response()
 
-    monkeypatch.setattr(proxy_files, "_detect_xet_passthrough", fake_detect)
+    monkeypatch.setattr(proxy_files, "pathsinfo_generator", fail_pathsinfo)
+    monkeypatch.setattr(proxy_files, "_probe_xet_resolve", fake_probe)
+
+    result = await proxy_files._file_realtime_stream(
+        app=_fake_app_xet(tmp_path, xet_passthrough=True, min_size=0),
+        **_stream_kwargs(tmp_path),
+    )
+
+    assert result is not None
+    assert result.status_code == 302
+    assert result.headers["x-xet-hash"] == "bdcc...0f6d"
+
+
+@pytest.mark.asyncio
+async def test_file_realtime_stream_skips_probe_when_passthrough_disabled(monkeypatch, tmp_path):
+    # Default config (both features off): no upstream probe at all — the
+    # resolve hot path pays zero extra HEADs.
+    probe_calls = []
+
+    async def fail_probe(*args, **kwargs):
+        probe_calls.append(True)
+        raise AssertionError("no probe may run when both Xet routes are off")
 
     async def fake_pathsinfo_generator(*args, **kwargs):
         return proxy_files.ProxyResult(
@@ -305,25 +485,123 @@ async def test_file_realtime_stream_skips_xet_probe_when_offline(monkeypatch, tm
     async def fake_etag(*args, **kwargs):
         return '"some-etag"'
 
+    monkeypatch.setattr(proxy_files, "_probe_xet_resolve", fail_probe)
     monkeypatch.setattr(proxy_files, "pathsinfo_generator", fake_pathsinfo_generator)
     monkeypatch.setattr(proxy_files, "_resource_etag", fake_etag)
 
-    # Offline mode should bypass the upstream xet probe entirely.
     await proxy_files._file_realtime_stream(
-        app=_fake_app(tmp_path=tmp_path, offline=True),
-        repo_type="models",
-        org="x",
-        repo="y",
-        file_path="file.txt",
-        save_path=str(tmp_path / "save"),
-        url="https://huggingface.co/x/y/resolve/main/file.txt",
-        request=_make_request(method="HEAD"),
-        method="HEAD",
-        allow_cache=True,
-        commit="main",
+        app=_fake_app_xet(tmp_path, offline=False, xet_passthrough=False, redirect_model=False),
+        **_stream_kwargs(tmp_path, file_path="file.txt", url="https://huggingface.co/x/y/resolve/main/file.txt"),
     )
 
-    assert detect_called == []
+    assert probe_calls == []
+
+
+@pytest.mark.asyncio
+async def test_file_realtime_stream_skips_probe_when_offline(monkeypatch, tmp_path):
+    # Offline mode must bypass the upstream probe entirely.
+    probe_calls = []
+
+    async def fail_probe(*args, **kwargs):
+        probe_calls.append(True)
+        raise AssertionError("no probe may run offline")
+
+    async def fake_pathsinfo_generator(*args, **kwargs):
+        return proxy_files.ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=proxy_files.single_chunk_body('[{"size": 5}]'),
+        )
+
+    async def fake_etag(*args, **kwargs):
+        return '"some-etag"'
+
+    monkeypatch.setattr(proxy_files, "_probe_xet_resolve", fail_probe)
+    monkeypatch.setattr(proxy_files, "pathsinfo_generator", fake_pathsinfo_generator)
+    monkeypatch.setattr(proxy_files, "_resource_etag", fake_etag)
+
+    await proxy_files._file_realtime_stream(
+        app=_fake_app_xet(tmp_path, offline=True),
+        **_stream_kwargs(tmp_path, file_path="file.txt", method="HEAD", request=_make_request(method="HEAD")),
+    )
+
+    assert probe_calls == []
+
+
+@pytest.mark.asyncio
+async def test_file_realtime_stream_small_xet_file_falls_through_to_cache(monkeypatch, tmp_path):
+    # Pass-through enabled, but the Xet file is below the threshold: it must
+    # NOT be handed to hf_xet — it keeps flowing through olah's normal
+    # (cacheable) path.
+    async def fake_probe(hf_url, authorization):
+        return _xet_response(size=str(1024))  # 1 KB Xet file
+
+    async def fake_pathsinfo_generator(*args, **kwargs):
+        return proxy_files.ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=proxy_files.single_chunk_body('[{"path": "big.bin", "size": 1024}]'),
+        )
+
+    async def fake_etag(*args, **kwargs):
+        return '"some-etag"'
+
+    async def fake_chunk_get(**kwargs):
+        yield b"tiny"
+
+    monkeypatch.setattr(proxy_files, "_probe_xet_resolve", fake_probe)
+    monkeypatch.setattr(proxy_files, "pathsinfo_generator", fake_pathsinfo_generator)
+    monkeypatch.setattr(proxy_files, "_resource_etag", fake_etag)
+    monkeypatch.setattr(proxy_files, "_file_chunk_get", fake_chunk_get)
+
+    result = await proxy_files._file_realtime_stream(
+        app=_fake_app_xet(tmp_path, xet_passthrough=True, min_size=50 * 1024**3),
+        **_stream_kwargs(tmp_path),
+    )
+
+    # Falls through to the normal cacheable flow, not a 302 Xet response.
+    assert result.status_code == 200
+    assert "x-xet-hash" not in result.headers
+
+
+@pytest.mark.asyncio
+async def test_file_realtime_stream_probes_upstream_only_once(monkeypatch, tmp_path):
+    # Both routes enabled: exactly ONE upstream HEAD serves both decisions.
+    probe_calls = []
+
+    async def fake_probe(hf_url, authorization):
+        probe_calls.append(hf_url)
+        # A classic LFS redirect: neither route engages, both consume the probe.
+        return SimpleNamespace(
+            status_code=302,
+            headers={"location": "https://cdn-lfs.huggingface.co/rep/oid"},
+        )
+
+    async def fake_pathsinfo_generator(*args, **kwargs):
+        return proxy_files.ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=proxy_files.single_chunk_body('[{"path": "f.bin", "size": 4}]'),
+        )
+
+    async def fake_etag(*args, **kwargs):
+        return '"some-etag"'
+
+    async def fake_chunk_get(**kwargs):
+        yield b"data"
+
+    monkeypatch.setattr(proxy_files, "_probe_xet_resolve", fake_probe)
+    monkeypatch.setattr(proxy_files, "pathsinfo_generator", fake_pathsinfo_generator)
+    monkeypatch.setattr(proxy_files, "_resource_etag", fake_etag)
+    monkeypatch.setattr(proxy_files, "_file_chunk_get", fake_chunk_get)
+
+    result = await proxy_files._file_realtime_stream(
+        app=_fake_app_xet(tmp_path, xet_passthrough=True, min_size=0, redirect_model=True),
+        **_stream_kwargs(tmp_path),
+    )
+
+    assert len(probe_calls) == 1
+    assert result.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -434,155 +712,3 @@ async def test_xet_read_token_passthrough_enforces_repo_access(monkeypatch):
 
     assert response.status_code == 403
     assert upstream_called == []  # no upstream call was made
-
-
-# ---------------------------------------------------------------------------
-# Relative-redirect following in _detect_xet_passthrough
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_detect_xet_passthrough_follows_relative_redirect(monkeypatch):
-    # When upstream returns a relative 307 (e.g. canonical-name redirect),
-    # the probe must follow it to find the response that actually carries
-    # x-xet-hash. Otherwise renamed repos quietly fall back to the
-    # legacy "file too large" path.
-    visited = []
-
-    class _FakeAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def request(self, method, url, **kwargs):
-            visited.append(url)
-            if url.endswith("/old-name/repo/resolve/main/file.bin"):
-                return SimpleNamespace(
-                    status_code=307,
-                    headers={"location": "/new-name/repo/resolve/main/file.bin"},
-                )
-            return SimpleNamespace(
-                status_code=302,
-                headers={
-                    "x-xet-hash": "abc",
-                    "location": "https://cas-bridge.xethub.hf.co/x?signed=1",
-                },
-            )
-
-    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", _FakeAsyncClient)
-
-    result = await proxy_files._detect_xet_passthrough(
-        hf_url="https://huggingface.co/old-name/repo/resolve/main/file.bin",
-        authorization=None,
-        commit=None,
-    )
-
-    assert result is not None
-    assert result.headers["x-xet-hash"] == "abc"
-    assert visited == [
-        "https://huggingface.co/old-name/repo/resolve/main/file.bin",
-        "https://huggingface.co/new-name/repo/resolve/main/file.bin",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_detect_xet_passthrough_stops_at_absolute_redirect(monkeypatch):
-    # An absolute 3xx is the *Xet* redirect itself — stop there, do not follow.
-    class _FakeAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        call_count = 0
-
-        async def request(self, method, url, **kwargs):
-            type(self).call_count += 1
-            if type(self).call_count > 1:
-                raise AssertionError("absolute redirect must not be followed")
-            return SimpleNamespace(
-                status_code=302,
-                headers={
-                    "x-xet-hash": "h",
-                    "location": "https://cas-bridge.xethub.hf.co/abs?signed=1",
-                },
-            )
-
-    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", _FakeAsyncClient)
-
-    result = await proxy_files._detect_xet_passthrough(
-        hf_url="https://huggingface.co/x/y/resolve/main/big.bin",
-        authorization=None,
-        commit=None,
-    )
-    assert result is not None
-    assert result.headers["x-xet-hash"] == "h"
-
-
-@pytest.mark.asyncio
-async def test_detect_xet_passthrough_resolves_redirects_via_rfc3986(monkeypatch):
-    # A relative redirect must replace the base URL's query string, not
-    # carry it over. urlparse._replace would be wrong here; urljoin is right.
-    visited = []
-
-    class _FakeAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def request(self, method, url, **kwargs):
-            visited.append(url)
-            if "?old=1" in url:
-                return SimpleNamespace(
-                    status_code=307,
-                    headers={"location": "/new/path"},
-                )
-            return SimpleNamespace(
-                status_code=302,
-                headers={"x-xet-hash": "h", "location": "https://cas/x"},
-            )
-
-    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", _FakeAsyncClient)
-
-    result = await proxy_files._detect_xet_passthrough(
-        hf_url="https://huggingface.co/old/path?old=1",
-        authorization=None,
-        commit=None,
-    )
-
-    assert result is not None
-    assert visited == [
-        "https://huggingface.co/old/path?old=1",
-        "https://huggingface.co/new/path",  # query string dropped, not carried
-    ]
-
-
-@pytest.mark.asyncio
-async def test_detect_xet_passthrough_caps_redirect_loop(monkeypatch):
-    # A pathological infinite redirect loop must not hang the probe.
-    class _FakeAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def request(self, method, url, **kwargs):
-            return SimpleNamespace(
-                status_code=307,
-                headers={"location": "/loop"},
-            )
-
-    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", _FakeAsyncClient)
-
-    result = await proxy_files._detect_xet_passthrough(
-        hf_url="https://huggingface.co/loop",
-        authorization=None,
-        commit=None,
-    )
-    assert result is None

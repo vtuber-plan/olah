@@ -706,8 +706,7 @@ def _strip_quotes(value: Optional[str]) -> Optional[str]:
 
 async def _try_redirect_to_content_route(
     app,
-    hf_url: str,
-    authorization: Optional[str],
+    resp: Optional[httpx.Response],
     repo_type: Optional[str],
     org: Optional[str],
     repo: Optional[str],
@@ -716,26 +715,19 @@ async def _try_redirect_to_content_route(
 ) -> Optional[ProxyResult]:
     """Redirect-model hook: for Xet files, return a 302 to olah's Xet content route.
 
-    Returns ``None`` to fall through to normal proxying (redirect model off, no
-    repo context, not a redirect, classic/plain file, or upstream error). The 302
-    deliberately omits ``x-xet-hash`` so hf_hub does not engage native Xet and
-    instead downloads over HTTP from olah's content route.
+    ``resp`` is the already-probed upstream response from
+    ``_probe_xet_resolve`` (shared with the pass-through decision, so a
+    request pays at most one upstream HEAD). Returns ``None`` to fall through
+    to normal proxying (no repo context, not a redirect, classic/plain file,
+    or upstream error). The 302 deliberately omits ``x-xet-hash`` so hf_hub
+    does not engage native Xet and instead downloads over HTTP from olah's
+    content route.
     """
     import re
 
-    cfg = app.state.app_settings.config
-    if not getattr(cfg, "cache_redirect_model", False):
-        return None
     if not (repo_type and repo and file_path and commit):
         return None
-
-    headers = {}
-    if authorization:
-        headers["authorization"] = authorization
-    try:
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            resp = await client.head(hf_url, headers=headers, timeout=WORKER_API_TIMEOUT)
-    except httpx.HTTPError:
+    if resp is None:
         return None
     if resp.status_code not in (301, 302, 303, 307, 308):
         return None
@@ -774,16 +766,19 @@ async def _try_redirect_to_content_route(
     # Classic LFS / plain redirect: not routed here yet -> proxy.
     return None
 
-async def _detect_xet_passthrough(
+async def _probe_xet_resolve(
     hf_url: str,
     authorization: Optional[str],
-    commit: Optional[str],
-) -> Optional[ProxyResult]:
-    # Xet files cannot stream through olah: the client must speak the Xet
-    # chunked protocol against xethub.hf.co directly. Probe upstream with a
-    # HEAD that follows *relative* redirects only (matching what
-    # huggingface_hub does), and stops at the first absolute 3xx — that is
-    # the response carrying x-xet-hash for renamed/canonical-redirected repos.
+) -> Optional[httpx.Response]:
+    """HEAD the resolve URL following *relative* redirects only.
+
+    This mirrors what ``huggingface_hub`` does (its own follower only chases
+    same-host redirects) and stops at the first absolute 3xx — that response
+    carries the Xet metadata (``x-xet-hash``) for renamed/canonical-redirected
+    repos. Returns ``None`` on transport error or a redirect loop. The result
+    is shared by the pass-through and redirect-model decisions so a request
+    pays at most one upstream HEAD.
+    """
     headers = {}
     if authorization is not None:
         headers["authorization"] = authorization
@@ -815,7 +810,35 @@ async def _detect_xet_passthrough(
                 return None
     except (httpx.HTTPError, ValueError):
         return None
+    return response
+
+
+def _xet_passthrough_result(
+    response: Optional[httpx.Response],
+    commit: Optional[str],
+    min_size: int,
+) -> Optional[ProxyResult]:
+    """Decide Xet pass-through from a probed upstream response (pure).
+
+    Xet files above ``min_size`` cannot stream through olah: hf_hub refuses
+    plain-HTTP downloads over its hardcoded size cap, so the client's hf_xet
+    must speak the Xet chunked protocol against xethub.hf.co directly. When
+    the response is Xet and big enough, mirror the upstream Xet headers so the
+    client engages its native Xet path. Small Xet files return ``None`` and
+    keep flowing through olah's cache.
+    """
     if response is None or "x-xet-hash" not in response.headers:
+        return None
+    try:
+        size = int(
+            response.headers.get("x-linked-size")
+            or response.headers.get("content-length")
+        )
+    except (TypeError, ValueError):
+        # Size unknown: assume the client needs the native path rather than
+        # risking hf_hub's "file too large" error later in the download.
+        size = None
+    if size is not None and size < min_size:
         return None
     response_headers: Dict[str, str] = {"accept-ranges": "bytes"}
     for h in XET_RESPONSE_HEADERS:
@@ -889,26 +912,36 @@ async def _file_realtime_stream(
         request_headers["host"] = urlparse(hf_url).netloc
 
     authorization = request.headers.get("authorization", None)
-    # Xet pass-through: Xet files cannot stream through olah's byte cache
-    # (the client speaks the Xet chunked protocol against xethub.hf.co
-    # directly), so hand back the upstream Xet metadata verbatim.
-    if not app.state.app_settings.config.offline:
-        xet_passthrough = await _detect_xet_passthrough(
-            hf_url=hf_url,
-            authorization=authorization,
-            commit=commit,
-        )
-        if xet_passthrough is not None:
-            return xet_passthrough
-
-    # Redirect model (opt-in): for Xet files, hand the client a 302 to olah's own
-    # Xet content route instead of proxying the bytes, so range requests hit the
-    # cache directly. Falls through to proxying for non-Xet / when off / on error.
-    redirect = await _try_redirect_to_content_route(
-        app, hf_url, authorization, repo_type, org, repo, file_path, commit
+    # Xet handling, both routes opt-in and sharing ONE upstream HEAD:
+    #
+    #   pass-through (xet-passthrough): mirror upstream Xet metadata for files
+    #   >= xet-passthrough-min-size so the client's hf_xet downloads them
+    #   directly from xethub.hf.co — hf_hub refuses plain-HTTP downloads over
+    #   its hardcoded size cap, so those files cannot flow through the cache.
+    #
+    #   redirect model (cache-redirect-model): 302 Xet files to olah's own
+    #   content route so range requests hit the cache directly.
+    #
+    # With both features off (the default) no probe is made at all.
+    cfg = app.state.app_settings.config
+    xet_passthrough_on = (
+        not cfg.offline and getattr(cfg, "xet_passthrough", False)
     )
-    if redirect is not None:
-        return redirect
+    redirect_model_on = getattr(cfg, "cache_redirect_model", False)
+    if xet_passthrough_on or redirect_model_on:
+        probe = await _probe_xet_resolve(hf_url=hf_url, authorization=authorization)
+        if xet_passthrough_on:
+            passthrough = _xet_passthrough_result(
+                probe, commit, getattr(cfg, "xet_passthrough_min_size", 0)
+            )
+            if passthrough is not None:
+                return passthrough
+        if redirect_model_on:
+            redirect = await _try_redirect_to_content_route(
+                app, probe, repo_type, org, repo, file_path, commit
+            )
+            if redirect is not None:
+                return redirect
     # Canonical repos (org=None, e.g. "bert-base-uncased") are ordinary HF
     # repos; paths-info handles them the same as org/<repo> names.
     if repo_type is not None and repo is not None and file_path is not None and commit is not None:
