@@ -320,19 +320,24 @@ Incorrect settings may result in unintended file deletion and loss!!! !!!
 def run_server(args):
     import uvicorn
 
-    if args.workers > 1:
+    # ``workers``/``config``/``log_path`` may be absent on hand-built argument
+    # namespaces (tests, programmatic callers); the argparse defaults are
+    # single-process, no config file, ./logs.
+    workers = getattr(args, "workers", 1)
+    if workers > 1:
         # Multi-worker: uvicorn spawns worker processes that re-import this
         # module, so config must come from a file (passed via OLAH_CONFIG) rather
         # than CLI args. The cache dir is multi-process safe (portalocker locks).
-        if not args.config:
+        config_path = getattr(args, "config", "")
+        if not config_path:
             raise ValueError("--workers > 1 requires --config <toml>; each worker re-reads it.")
-        os.environ["OLAH_CONFIG"] = args.config
-        os.environ.setdefault("OLAH_LOG_PATH", args.log_path)
+        os.environ["OLAH_CONFIG"] = config_path
+        os.environ.setdefault("OLAH_LOG_PATH", getattr(args, "log_path", "./logs"))
         uvicorn.run(
             "olah.server:app",
             host=args.host,
             port=args.port,
-            workers=args.workers,
+            workers=workers,
             log_level="info",
             reload=False,
             ssl_keyfile=args.ssl_key,
