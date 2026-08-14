@@ -193,7 +193,6 @@ async def test_single_flight_dedups_concurrent_block_downloads(tmp_path):
             proxy_files._file_chunk_get(
                 app=app,
                 save_path=str(save_path),
-                head_path=str(tmp_path / "head"),
                 client=client,
                 method="GET",
                 url="https://huggingface.co/team/demo/resolve/main/blob.bin",
@@ -241,7 +240,6 @@ async def test_single_flight_recovers_when_leader_dies(tmp_path):
             proxy_files._file_chunk_get(
                 app=app,
                 save_path=str(save_path),
-                head_path=str(tmp_path / "head"),
                 client=client,
                 method="GET",
                 url="https://huggingface.co/team/demo/resolve/main/blob.bin",
