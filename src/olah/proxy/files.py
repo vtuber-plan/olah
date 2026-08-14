@@ -12,7 +12,7 @@ import os
 import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Literal, Optional, Tuple
-from fastapi import Request
+from fastapi import Request, Response
 import fastapi.concurrency
 import httpx
 import portalocker
@@ -640,10 +640,16 @@ async def _remote_file_metadata(
     hf_url: str,
     authorization: Optional[str],
     offline: bool,
-) -> Optional[RemoteFileMetadata]:
+) -> Tuple[Optional[RemoteFileMetadata], Optional[int]]:
+    """Fetch file metadata from the remote. Returns (metadata, upstream status).
+
+    The status code is ``None`` when no upstream response was received (network
+    error). Callers pass 4xx statuses through so clients see the upstream error
+    instead of an opaque 504.
+    """
     if offline:
         etag = await _resource_etag(hf_url=hf_url, authorization=authorization, offline=True)
-        return RemoteFileMetadata(file_size=0, etag=etag)
+        return RemoteFileMetadata(file_size=0, etag=etag), None
 
     headers = {}
     if authorization is not None:
@@ -658,18 +664,21 @@ async def _remote_file_metadata(
                 follow_redirects=True,
             )
     except (httpx.HTTPError, ValueError):
-        return None
+        return None, None
     if response.status_code >= 400:
-        return None
+        return None, response.status_code
 
     content_length = response.headers.get("content-length")
     if content_length is None:
-        return None
+        return None, response.status_code
     try:
         file_size = int(content_length)
     except ValueError:
-        return None
-    return RemoteFileMetadata(file_size=file_size, etag=response.headers.get("etag"))
+        return None, response.status_code
+    return (
+        RemoteFileMetadata(file_size=file_size, etag=response.headers.get("etag")),
+        response.status_code,
+    )
 
 
 def _strip_quotes(value: Optional[str]) -> Optional[str]:
@@ -806,7 +815,9 @@ async def _file_realtime_stream(
     )
     if redirect is not None:
         return redirect
-    if repo_type is not None and org is not None and repo is not None and file_path is not None and commit is not None:
+    # Canonical repos (org=None, e.g. "bert-base-uncased") are ordinary HF
+    # repos; paths-info handles them the same as org/<repo> names.
+    if repo_type is not None and repo is not None and file_path is not None and commit is not None:
         generator = await pathsinfo_generator(
             app,
             repo_type,
@@ -863,13 +874,19 @@ async def _file_realtime_stream(
                 offline=app.state.app_settings.config.offline,
             )
     else:
-        metadata = await _remote_file_metadata(
+        metadata, upstream_status = await _remote_file_metadata(
             app=app,
             hf_url=hf_url,
             authorization=authorization,
             offline=app.state.app_settings.config.offline,
         )
         if metadata is None:
+            # Pass the upstream verdict through: a missing/unauthorized file is
+            # the client's problem, not a proxy timeout.
+            if upstream_status == 404:
+                return await error_result(error_entry_not_found())
+            if upstream_status in (401, 403):
+                return await error_result(Response(status_code=upstream_status))
             return await error_result(error_proxy_timeout())
         file_size = metadata.file_size
         etag = metadata.etag
