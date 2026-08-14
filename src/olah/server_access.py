@@ -4,7 +4,7 @@ from typing import Literal, Optional
 from fastapi.responses import Response
 
 from olah.constants import REPO_TYPES_MAPPING
-from olah.errors import error_page_not_found, error_repo_not_found
+from olah.errors import error_page_not_found, error_proxy_timeout, error_repo_not_found
 from olah.utils.repo_utils import get_org_repo, parse_org_repo
 from olah.utils.repo_utils import check_commit_hf
 from olah.utils.rule_utils import check_proxy_rules_hf
@@ -54,13 +54,16 @@ async def ensure_repo_visibility(app, repo: RepoRef, authorization: Optional[str
         return access_error
     if app.state.app_settings.config.offline:
         return None
-    if not await check_commit_hf(
+    repo_exists = await check_commit_hf(
         app,
         repo.repo_type,
         repo.org,
         repo.repo,
         commit=None,
         authorization=authorization,
-    ):
+    )
+    if repo_exists is None:
+        return error_proxy_timeout()
+    if not repo_exists:
         return error_repo_not_found()
     return None
