@@ -7,6 +7,11 @@ repos-path = "./repos"
 cache-size-limit = ""
 cache-clean-strategy = "LRU"
 cache-compression = "none"
+# Xet pass-through: let the client's hf_xet download Xet files >= the
+# threshold directly from xethub.hf.co (hf_hub cannot fetch them over
+# plain HTTP). Smaller Xet files still flow through the cache.
+xet-passthrough = false
+xet-passthrough-min-size = "50GB"
 hf-scheme = "https"
 hf-netloc = "huggingface.co"
 hf-lfs-netloc = "cdn-lfs.huggingface.co"
