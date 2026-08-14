@@ -7,25 +7,106 @@
 
 import datetime
 import gzip
+import logging
 import os
 import glob
 import tenacity
-from typing import Dict, Literal, Optional, Tuple, Union
+from typing import Dict, Literal, Optional, Tuple
 import json
+import zlib
 from urllib.parse import urljoin
 import httpx
 from olah.constants import WORKER_API_TIMEOUT
 from olah.utils.cache_utils import read_cache_request
 
+logger = logging.getLogger(__name__)
 
-def _load_cached_json_payload(request_cache: Dict[str, Union[bytes, Dict[str, str], int]]) -> Dict:
+
+def _content_encoding_is_gzip(headers: object) -> bool:
+    """Return True if the cached response headers advertise gzip content-encoding.
+
+    Header names are matched case-insensitively and the value is split on commas
+    so that compound encodings such as ``"gzip, br"`` and variants like
+    ``"x-gzip"`` are recognised.
+    """
+    if not isinstance(headers, dict):
+        return False
+    for key, value in headers.items():
+        if str(key).lower() == "content-encoding":
+            tokens = [token.strip().lower() for token in str(value).split(",")]
+            return any(token in ("gzip", "x-gzip") for token in tokens)
+    return False
+
+
+def _load_cached_json_payload(request_cache: Dict) -> Dict:
+    """Decode and JSON-parse the body of a cached API response.
+
+    Cached bodies are stored verbatim as captured upstream via ``aiter_raw()``;
+    when the upstream response was gzip-compressed the raw bytes are still gzip.
+    Decompression is triggered when either the cached ``content-encoding`` header
+    advertises gzip *or* the body begins with the gzip magic bytes
+    (``\\x1f\\x8b``). The magic-byte fallback self-heals older caches whose
+    headers were not recorded as gzip.
+    """
     content = request_cache["content"]
     headers = request_cache.get("headers", {})
-    if isinstance(headers, dict) and headers.get("content-encoding") == "gzip":
-        content = gzip.decompress(content)
-    if isinstance(content, bytes):
-        content = content.decode("utf-8")
+
+    looks_like_gzip = _content_encoding_is_gzip(headers) or (
+        isinstance(content, (bytes, bytearray))
+        and bytes(content[:2]) == b"\x1f\x8b"
+    )
+    if looks_like_gzip:
+        try:
+            content = gzip.decompress(content)
+        except (OSError, EOFError, zlib.error):
+            # Truncated or corrupt gzip stream: fall back to the raw bytes and
+            # let the decode / json step below surface a clearer error.
+            pass
+
+    if isinstance(content, (bytes, bytearray)):
+        content = bytes(content).decode("utf-8")
     return json.loads(content)
+
+
+def _load_meta_head_object(file_path: str) -> Optional[Dict]:
+    """Load a ``meta_head.json`` revision metadata file.
+
+    The file may be stored in either of two schemas:
+
+    * a plain mirror ``RepoMeta`` document (``{"sha": ..., "lastModified": ...}``)
+    * a proxy HTTP cache envelope written by ``write_cache_request``
+      (``{"status_code", "headers"}`` with the body in a sibling ``.body``
+      sidecar; legacy envelopes also accepted with the body inline as hex
+      ``content``). HEAD caches carry an empty body and therefore contribute no
+      revision info.
+
+    Returns the inner revision object, or ``None`` if the file cannot be parsed
+    as revision metadata.
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw = json.loads(f.read())
+    except (OSError, ValueError):
+        return None
+
+    body_path = file_path + ".body"
+    is_envelope = isinstance(raw, dict) and (
+        "status_code" in raw or os.path.exists(body_path)
+    )
+    if is_envelope:
+        # Proxy cache envelope written by write_cache_request: the body lives in
+        # a sibling .body sidecar (new) or inline as hex (legacy).
+        try:
+            if os.path.exists(body_path):
+                with open(body_path, "rb") as bf:
+                    content = bf.read()
+            else:
+                content = bytes.fromhex(raw.get("content", ""))
+            request_cache = {"content": content, "headers": raw.get("headers", {})}
+            return _load_cached_json_payload(request_cache)
+        except (ValueError, OSError, EOFError, zlib.error):
+            return None
+    return raw if isinstance(raw, dict) else None
 
 
 def get_org_repo(org: Optional[str], repo: str) -> str:
@@ -165,10 +246,18 @@ async def get_newest_commit_hf_offline(
 
     time_revisions = []
     for file in files:
-        with open(file, "r", encoding="utf-8") as f:
-            obj = json.loads(f.read())
-            datetime_object = datetime.datetime.fromisoformat(obj["lastModified"])
-            time_revisions.append((datetime_object, obj["sha"]))
+        meta = _load_meta_head_object(file)
+        if not isinstance(meta, dict):
+            continue
+        sha = meta.get("sha")
+        last_modified = meta.get("lastModified")
+        if not sha or not last_modified:
+            continue
+        try:
+            datetime_object = datetime.datetime.fromisoformat(last_modified)
+        except ValueError:
+            continue
+        time_revisions.append((datetime_object, sha))
 
     time_revisions = sorted(time_revisions)
     if len(time_revisions) == 0:
@@ -241,12 +330,16 @@ async def get_commit_hf_offline(
     """
     repos_path = app.state.app_settings.config.repos_path
     save_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
-    if os.path.exists(save_path):
+    if not os.path.exists(save_path):
+        return None
+    try:
         request_cache = await read_cache_request(save_path)
         request_cache_json = _load_cached_json_payload(request_cache)
-        return request_cache_json["sha"]
-    else:
+    except (ValueError, OSError, zlib.error):
+        # Corrupt or unreadable cache: treat as a cache miss so the caller can
+        # surface "commit not found" instead of crashing with a 500.
         return None
+    return request_cache_json.get("sha")
 
 
 async def get_commit_hf(
@@ -297,7 +390,12 @@ async def get_commit_hf(
         return await get_commit_hf_offline(app, repo_type, org, repo, commit)
 
 
-@tenacity.retry(stop=tenacity.stop_after_attempt(3))
+@tenacity.retry(
+    stop=tenacity.stop_after_attempt(3),
+    wait=tenacity.wait_exponential(multiplier=0.5, max=2),
+    retry=tenacity.retry_if_result(lambda result: result is None),
+    retry_error_callback=lambda retry_state: None,
+)
 async def check_commit_hf(
     app,
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
@@ -305,7 +403,7 @@ async def check_commit_hf(
     repo: str,
     commit: Optional[str] = None,
     authorization: Optional[str] = None,
-) -> bool:
+) -> Optional[bool]:
     """
     Checks the commit status of a repository in the Hugging Face ecosystem.
 
@@ -318,7 +416,9 @@ async def check_commit_hf(
         authorization: The authorization token (optional).
 
     Returns:
-        A boolean indicating if the commit is valid (status code 200 or 307) or not.
+        True if the commit is valid (status code 200 or 307), False if the
+        upstream rejected it (other non-5xx status), or None if the upstream
+        could not be reached (transport error or 5xx response).
 
     """
     org_repo = get_org_repo(org, repo)
@@ -344,6 +444,9 @@ async def check_commit_hf(
                 timeout=WORKER_API_TIMEOUT,
             )
             status_code = response.status_code
-    except httpx.HTTPError:
-        return False
+    except httpx.HTTPError as e:
+        logger.warning("Upstream request failed while checking %s: %r", url, e)
+        return None
+    if status_code >= 500:
+        return None
     return status_code in [200, 307]

@@ -3,7 +3,7 @@ from typing import Callable, Literal, Optional, Tuple
 
 from fastapi.responses import Response
 
-from olah.errors import error_repo_not_found, error_revision_not_found
+from olah.errors import error_proxy_timeout, error_repo_not_found, error_revision_not_found
 from olah.proxy.result import ProxyResult
 from olah.server_access import RepoRef
 from olah.utils.repo_utils import check_commit_hf, get_commit_hf, get_newest_commit_hf
@@ -39,23 +39,29 @@ async def resolve_requested_commit(
 ) -> Tuple[Optional[ResolvedCommit], Optional[Response]]:
     if not app.state.app_settings.config.offline:
         if not repo_visible:
-            if not await check_commit_hf(
+            repo_exists = await check_commit_hf(
                 app,
                 repo.repo_type,
                 repo.org,
                 repo.repo,
                 commit=None,
                 authorization=authorization,
-            ):
+            )
+            if repo_exists is None:
+                return None, error_proxy_timeout()
+            if not repo_exists:
                 return None, error_repo_not_found()
-        if not await check_commit_hf(
+        commit_exists = await check_commit_hf(
             app,
             repo.repo_type,
             repo.org,
             repo.repo,
             commit=requested_commit,
             authorization=authorization,
-        ):
+        )
+        if commit_exists is None:
+            return None, error_proxy_timeout()
+        if not commit_exists:
             if missing_commit_response == "repo_not_found":
                 return None, error_repo_not_found()
             return None, error_revision_not_found(revision=requested_commit)
@@ -69,7 +75,9 @@ async def resolve_requested_commit(
         authorization=authorization,
     )
     if resolved_commit is None:
-        return None, error_repo_not_found()
+        if app.state.app_settings.config.offline:
+            return None, error_repo_not_found()
+        return None, error_proxy_timeout()
     return ResolvedCommit(requested=requested_commit, resolved=resolved_commit), None
 
 

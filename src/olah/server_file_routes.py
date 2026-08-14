@@ -18,14 +18,37 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from olah.errors import error_repo_not_found
 from olah.proxy.files import cdn_file_get_generator, file_get_generator
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
+from olah.proxy.xet import xet_get_generator
 from olah.server_access import build_repo_ref, ensure_repo_visibility, parse_repo_ref, parse_resolve_repo_ref
 from olah.server_mirror import load_local_mirror_payload
 from olah.server_responses import build_streaming_response
 from olah.server_upstream import resolve_requested_commit
+from olah.utils.lfs_object_index import authorize_lfs_object, cache_allowed_for_lfs_object
 from olah.utils.repo_utils import get_org_repo
 
 
 router = APIRouter()
+
+
+# Xet direct-link routes. The first segment is a literal region
+# (xet-bridge-<region>) so it does NOT collide with the generic
+# /{repo_type}/{org_repo}/{hash_file} 3-segment param route. Registered first so
+# the literal region matches before the param route. HF currently serves Xet only
+# from "us"; the handler ignores region + repo_hash (it is content-addressed by
+# xet_hash and re-resolves its own signed URL), so add a region token here (e.g.
+# "eu") the moment HF launches another xet-bridge host.
+async def xet_object(repo_hash: str, xet_hash: str, request: Request):
+    method = request.method
+    generator = await xet_get_generator(request.app, xet_hash, request, method)
+    return await build_streaming_response(generator)
+
+
+for _region in ("us",):
+    router.add_api_route(
+        f"/xet-bridge-{_region}/{{repo_hash}}/{{xet_hash}}",
+        xet_object,
+        methods=["GET", "HEAD"],
+    )
 
 
 class _NullLogger:
@@ -182,11 +205,26 @@ async def lfs_proxy_common(
     request: Request,
     method: Literal["HEAD", "GET"],
 ) -> Response:
+    # Authorize before doing anything else. LFS URLs are content-addressed and
+    # carry no repo identity, so access is gated on the content-hash registry
+    # (populated at resolve time) plus a real upstream visibility probe. This is
+    # also the gate that makes caching LFS blobs safe.
+    authorization = request.headers.get("authorization")
+    auth_status = await authorize_lfs_object(app, hash_file, authorization)
+    if auth_status is not None:
+        return Response(status_code=auth_status)
+
+    allow_cache = await cache_allowed_for_lfs_object(app, hash_file)
+
     try:
         if method == "HEAD":
-            generator = await lfs_head_generator(app, dir1, dir2, hash_repo, hash_file, request)
+            generator = await lfs_head_generator(
+                app, dir1, dir2, hash_repo, hash_file, request, allow_cache=allow_cache
+            )
         else:
-            generator = await lfs_get_generator(app, dir1, dir2, hash_repo, hash_file, request)
+            generator = await lfs_get_generator(
+                app, dir1, dir2, hash_repo, hash_file, request, allow_cache=allow_cache
+            )
         return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
         return Response(status_code=504)

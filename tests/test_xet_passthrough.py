@@ -106,7 +106,7 @@ async def test_remote_file_metadata_captures_xet_headers(monkeypatch):
     )
     _patch_async_client(monkeypatch, proxy_files, response=fake_response)
 
-    metadata = await proxy_files._remote_file_metadata(
+    metadata, status = await proxy_files._remote_file_metadata(
         app=_fake_app(),
         hf_url="https://huggingface.co/x/y/resolve/main/big.bin",
         authorization=None,
@@ -114,6 +114,7 @@ async def test_remote_file_metadata_captures_xet_headers(monkeypatch):
     )
 
     assert metadata is not None
+    assert status == 302
     assert metadata.file_size == 53121272560  # falls back to x-linked-size
     assert metadata.etag == '"deadbeef"'  # falls back to x-linked-etag
     assert metadata.xet_headers is not None
@@ -129,7 +130,7 @@ async def test_remote_file_metadata_no_xet_headers_for_plain_files(monkeypatch):
     )
     _patch_async_client(monkeypatch, proxy_files, response=fake_response)
 
-    metadata = await proxy_files._remote_file_metadata(
+    metadata, status = await proxy_files._remote_file_metadata(
         app=_fake_app(),
         hf_url="https://huggingface.co/x/y/resolve/main/small.txt",
         authorization=None,
@@ -137,6 +138,7 @@ async def test_remote_file_metadata_no_xet_headers_for_plain_files(monkeypatch):
     )
 
     assert metadata is not None
+    assert status == 200
     assert metadata.file_size == 42
     assert metadata.etag == '"plain-etag"'
     assert metadata.xet_headers is None
@@ -272,7 +274,6 @@ async def test_file_realtime_stream_short_circuits_on_xet(monkeypatch, tmp_path)
         repo="y",
         file_path="big.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://huggingface.co/x/y/resolve/main/big.bin",
         request=_make_request(),
         method="GET",
@@ -315,7 +316,6 @@ async def test_file_realtime_stream_skips_xet_probe_when_offline(monkeypatch, tm
         repo="y",
         file_path="file.txt",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://huggingface.co/x/y/resolve/main/file.txt",
         request=_make_request(method="HEAD"),
         method="HEAD",

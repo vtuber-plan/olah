@@ -6,14 +6,14 @@
 # https://opensource.org/licenses/MIT.
 
 import argparse
-import datetime
 import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Sequence, Tuple, Union
+from typing import Sequence, Union
 
 import httpx
+import fastapi.concurrency
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 from fastapi_utils.tasks import repeat_every
@@ -35,10 +35,7 @@ from olah.server_routes import (
 from olah.utils.disk_utils import (
     convert_bytes_to_human_readable,
     convert_to_bytes,
-    get_folder_size,
-    sort_files_by_access_time,
-    sort_files_by_modify_time,
-    sort_files_by_size,
+    evict_cache_to_limit,
 )
 from olah.utils.logging import build_logger
 
@@ -115,40 +112,21 @@ async def check_disk_usage() -> None:
         return
 
     limit_size = app.state.app_settings.config.cache_size_limit
-    current_size = get_folder_size(app.state.app_settings.config.repos_path)
+    strategy = app.state.app_settings.config.cache_clean_strategy
+    repos_path = app.state.app_settings.config.repos_path
 
-    limit_size_h = convert_bytes_to_human_readable(limit_size)
-    current_size_h = convert_bytes_to_human_readable(current_size)
-
-    if current_size < limit_size:
-        return
-    print(f"Cache size exceeded! Limit: {limit_size_h}, Current: {current_size_h}.")
-    print("Cleaning...")
-    files_path = os.path.join(app.state.app_settings.config.repos_path, "files")
-    lfs_path = os.path.join(app.state.app_settings.config.repos_path, "lfs")
-
-    files: Sequence[Tuple[str, Union[int, datetime.datetime]]] = []
-    if app.state.app_settings.config.cache_clean_strategy == "LRU":
-        files = sort_files_by_access_time(files_path) + sort_files_by_access_time(lfs_path)
-        files = sorted(files, key=lambda x: x[1])
-    elif app.state.app_settings.config.cache_clean_strategy == "FIFO":
-        files = sort_files_by_modify_time(files_path) + sort_files_by_modify_time(lfs_path)
-        files = sorted(files, key=lambda x: x[1])
-    elif app.state.app_settings.config.cache_clean_strategy == "LARGE_FIRST":
-        files = sort_files_by_size(files_path) + sort_files_by_size(lfs_path)
-        files = sorted(files, key=lambda x: x[1], reverse=True)
-
-    for filepath, _ in files:
-        if current_size < limit_size:
-            break
-        filesize = os.path.getsize(filepath)
-        os.remove(filepath)
-        current_size -= filesize
-        print(f"Remove file: {filepath}. File Size: {convert_bytes_to_human_readable(filesize)}")
-
-    current_size = get_folder_size(app.state.app_settings.config.repos_path)
-    current_size_h = convert_bytes_to_human_readable(current_size)
-    print(f"Cleaning finished. Limit: {limit_size_h}, Current: {current_size_h}.")
+    # The whole scan + evict is synchronous (os.walk + shutil.rmtree); run it off
+    # the event loop so a TB-scale cache tree doesn't stall request handling. The
+    # collector does ONE walk for both total size and eviction candidates, evicts
+    # whole cache entries (never individual block files), and skips any entry
+    # whose meta.lock is held (in active open/create/resize).
+    after_size = await fastapi.concurrency.run_in_threadpool(
+        evict_cache_to_limit, repos_path, limit_size, strategy
+    )
+    print(
+        f"Cache cleanup: Limit={convert_bytes_to_human_readable(limit_size)}, "
+        f"Current={convert_bytes_to_human_readable(after_size)}, Strategy={strategy}."
+    )
 
 
 @asynccontextmanager
@@ -167,6 +145,26 @@ app.include_router(router)
 
 class AppSettings(BaseSettings):
     config: OlahConfig = OlahConfig()
+
+
+def _apply_config_from_env() -> None:
+    """Populate app.state for worker processes.
+
+    Single-process mode sets app.state.app_settings in init() (CLI args). But
+    multi-worker mode (uvicorn --workers>1 or gunicorn) spawns workers that
+    import this module fresh and never run cli()/init(); each worker rebuilds
+    its config from the OLAH_CONFIG file path the master exported to the env.
+    """
+    cfg_path = os.environ.get("OLAH_CONFIG")
+    if cfg_path is None or getattr(app.state, "app_settings", None) is not None:
+        return
+    global logger
+    logger = build_logger("olah", "olah.log", logger_dir=os.environ.get("OLAH_LOG_PATH", "./logs"))
+    app.state.logger = logger
+    app.state.app_settings = AppSettings(config=OlahConfig(cfg_path))
+
+
+_apply_config_from_env()
 
 
 @app.exception_handler(404)
@@ -192,7 +190,9 @@ def init():
     parser.add_argument("--repos-path", type=str, default="./repos", help="The folder to save cached repositories")
     parser.add_argument("--cache-size-limit", type=str, default="", help="The limit size of cache. (Example values: '100MB', '2GB', '500KB')")
     parser.add_argument("--cache-clean-strategy", type=str, default="LRU", help="The clean strategy of cache. ('LRU', 'FIFO', 'LARGE_FIRST')")
+    parser.add_argument("--cache-compression", type=str, default="none", help="Compression algorithm for cache blocks. ('none', 'gzip', 'lzma')")
     parser.add_argument("--log-path", type=str, default="./logs", help="The folder to save logs")
+    parser.add_argument("--workers", type=int, default=1, help="Number of worker processes. Default 1 (single process). Values >1 enable multi-process scaling for production throughput and require --config (each worker re-reads it).")
     args = parser.parse_args()
 
     logger = build_logger("olah", "olah.log", logger_dir=args.log_path)
@@ -241,6 +241,8 @@ def init():
             config.cache_size_limit = convert_to_bytes(args.cache_size_limit)
         if not is_default_value(args, "cache_clean_strategy"):
             config.cache_clean_strategy = args.cache_clean_strategy
+        if not is_default_value(args, "cache_compression"):
+            config.cache_compression = args.cache_compression
 
         config.host = normalize_server_host(config.host)
 
@@ -292,6 +294,8 @@ def init():
         args.cache_size_limit = config.cache_size_limit
     if is_default_value(args, "cache_clean_strategy"):
         args.cache_clean_strategy = config.cache_clean_strategy
+    if is_default_value(args, "cache_compression"):
+        args.cache_compression = config.cache_compression
 
     args.host = normalize_server_host(args.host)
     config.host = args.host
@@ -316,15 +320,39 @@ Incorrect settings may result in unintended file deletion and loss!!! !!!
 def run_server(args):
     import uvicorn
 
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="info",
-        reload=False,
-        ssl_keyfile=args.ssl_key,
-        ssl_certfile=args.ssl_cert,
-    )
+    # ``workers``/``config``/``log_path`` may be absent on hand-built argument
+    # namespaces (tests, programmatic callers); the argparse defaults are
+    # single-process, no config file, ./logs.
+    workers = getattr(args, "workers", 1)
+    if workers > 1:
+        # Multi-worker: uvicorn spawns worker processes that re-import this
+        # module, so config must come from a file (passed via OLAH_CONFIG) rather
+        # than CLI args. The cache dir is multi-process safe (portalocker locks).
+        config_path = getattr(args, "config", "")
+        if not config_path:
+            raise ValueError("--workers > 1 requires --config <toml>; each worker re-reads it.")
+        os.environ["OLAH_CONFIG"] = config_path
+        os.environ.setdefault("OLAH_LOG_PATH", getattr(args, "log_path", "./logs"))
+        uvicorn.run(
+            "olah.server:app",
+            host=args.host,
+            port=args.port,
+            workers=workers,
+            log_level="info",
+            reload=False,
+            ssl_keyfile=args.ssl_key,
+            ssl_certfile=args.ssl_cert,
+        )
+    else:
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level="info",
+            reload=False,
+            ssl_keyfile=args.ssl_key,
+            ssl_certfile=args.ssl_cert,
+        )
 
 
 def _run_cli():

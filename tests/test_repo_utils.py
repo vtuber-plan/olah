@@ -92,6 +92,103 @@ def test_get_commit_hf_offline_reads_gzip_cached_request(tmp_path):
     assert commit == "cached-sha"
 
 
+def test_get_commit_hf_offline_decodes_gzip_with_mixed_case_header(tmp_path):
+    """A capitalised Content-Encoding header must still trigger decompression."""
+    app = _make_app(tmp_path, offline=True)
+    save_path = tmp_path / "api" / "models" / "team" / "demo" / "revision" / "main" / "meta_get.json"
+    save_path.parent.mkdir(parents=True)
+    asyncio.run(
+        cache_utils.write_cache_request(
+            str(save_path),
+            status_code=200,
+            headers={"Content-Encoding": "gzip"},
+            content=gzip.compress(json.dumps({"sha": "mixed-case-sha"}).encode("utf-8")),
+        )
+    )
+
+    commit = asyncio.run(repo_utils.get_commit_hf_offline(app, "models", "team", "demo", "main"))
+
+    assert commit == "mixed-case-sha"
+
+
+def test_get_commit_hf_offline_self_heals_gzip_without_encoding_header(tmp_path):
+    """A gzip body with no recorded content-encoding is recovered via magic bytes."""
+    app = _make_app(tmp_path, offline=True)
+    save_path = tmp_path / "api" / "models" / "team" / "demo" / "revision" / "main" / "meta_get.json"
+    save_path.parent.mkdir(parents=True)
+    asyncio.run(
+        cache_utils.write_cache_request(
+            str(save_path),
+            status_code=200,
+            headers={"content-type": "application/json"},
+            content=gzip.compress(json.dumps({"sha": "magic-sha"}).encode("utf-8")),
+        )
+    )
+
+    commit = asyncio.run(repo_utils.get_commit_hf_offline(app, "models", "team", "demo", "main"))
+
+    assert commit == "magic-sha"
+
+
+def test_get_commit_hf_offline_returns_none_for_corrupt_gzip_cache(tmp_path):
+    """A corrupt gzip cache degrades to a cache miss instead of crashing with a 500."""
+    app = _make_app(tmp_path, offline=True)
+    save_path = tmp_path / "api" / "models" / "team" / "demo" / "revision" / "main" / "meta_get.json"
+    save_path.parent.mkdir(parents=True)
+    asyncio.run(
+        cache_utils.write_cache_request(
+            str(save_path),
+            status_code=200,
+            headers={"content-encoding": "gzip"},
+            # Magic bytes followed by junk: declares gzip but is not decodable.
+            content=b"\x1f\x8b" + b"not-really-gzip",
+        )
+    )
+
+    commit = asyncio.run(repo_utils.get_commit_hf_offline(app, "models", "team", "demo", "main"))
+
+    assert commit is None
+
+
+def test_get_newest_commit_hf_offline_reads_proxy_cache_envelope(tmp_path):
+    """A proxy-cache envelope (status_code/headers/content) meta_head.json is unwrapped."""
+    app = _make_app(tmp_path, offline=True)
+    revision_path = tmp_path / "api" / "models" / "team" / "demo" / "revision" / "main"
+    revision_path.mkdir(parents=True)
+    payload = json.dumps({"sha": "envelope-sha", "lastModified": "2024-04-01T00:00:00"}).encode("utf-8")
+    asyncio.run(
+        cache_utils.write_cache_request(
+            str(revision_path / "meta_head.json"),
+            status_code=200,
+            headers={"content-type": "application/json"},
+            content=payload,
+        )
+    )
+
+    commit = asyncio.run(repo_utils.get_newest_commit_hf_offline(app, "models", "team", "demo"))
+
+    assert commit == "envelope-sha"
+
+
+def test_get_newest_commit_hf_offline_skips_empty_head_cache(tmp_path):
+    """An empty proxy HEAD cache (no body) is skipped rather than crashing on a missing key."""
+    app = _make_app(tmp_path, offline=True)
+    revision_path = tmp_path / "api" / "models" / "team" / "demo" / "revision" / "main"
+    revision_path.mkdir(parents=True)
+    asyncio.run(
+        cache_utils.write_cache_request(
+            str(revision_path / "meta_head.json"),
+            status_code=200,
+            headers={"content-type": "application/json"},
+            content=b"",
+        )
+    )
+
+    commit = asyncio.run(repo_utils.get_newest_commit_hf_offline(app, "models", "team", "demo"))
+
+    assert commit is None
+
+
 def test_get_newest_commit_hf_falls_back_to_offline_on_timeout(monkeypatch, tmp_path):
     app = _make_app(tmp_path, offline=False)
     revision_path = tmp_path / "api" / "models" / "team" / "demo" / "revision" / "cached"
@@ -148,8 +245,10 @@ def test_get_newest_commit_hf_falls_back_to_offline_on_connect_error(monkeypatch
     assert commit == "offline-sha"
 
 
-def test_check_commit_hf_returns_false_when_upstream_request_fails(monkeypatch, tmp_path):
-    app = _make_app(tmp_path, offline=False)
+def _make_fake_client(monkeypatch, *, status_code=None, error=None, calls=None):
+    class FakeResponse:
+        def __init__(self):
+            self.status_code = status_code
 
     class FakeAsyncClient:
         async def __aenter__(self):
@@ -159,10 +258,40 @@ def test_check_commit_hf_returns_false_when_upstream_request_fails(monkeypatch, 
             return False
 
         async def request(self, *args, **kwargs):
-            raise httpx.ConnectError("offline")
+            if calls is not None:
+                calls.append(kwargs.get("url") or args)
+            if error is not None:
+                raise error
+            return FakeResponse()
 
     monkeypatch.setattr(repo_utils.httpx, "AsyncClient", FakeAsyncClient)
 
+
+def test_check_commit_hf_returns_none_and_retries_when_upstream_unreachable(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    calls = []
+    _make_fake_client(monkeypatch, error=httpx.ConnectError("offline"), calls=calls)
+
     ok = asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo", commit="main"))
 
-    assert ok is False
+    assert ok is None
+    assert len(calls) == 3
+
+
+def test_check_commit_hf_returns_none_on_upstream_server_error(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    _make_fake_client(monkeypatch, status_code=503)
+
+    ok = asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo", commit="main"))
+
+    assert ok is None
+
+
+def test_check_commit_hf_distinguishes_upstream_yes_and_no(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+
+    _make_fake_client(monkeypatch, status_code=200)
+    assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is True
+
+    _make_fake_client(monkeypatch, status_code=401)
+    assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is False

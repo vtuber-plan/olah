@@ -1,4 +1,5 @@
 import importlib
+import importlib.util
 import gzip
 import json
 import sys
@@ -14,12 +15,21 @@ from olah.proxy.result import ProxyResult, single_chunk_body
 
 def _load_proxy_files_module():
     sys.modules.pop("olah.proxy.files", None)
-    if "portalocker" not in sys.modules:
+    # Only inject the no-op stub when portalocker genuinely isn't installed
+    # (e.g. the base conda env). In envs with real portalocker (olah-e2e) we use
+    # the real thing -- never poison sys.modules globally with the stub, or it
+    # leaks into sibling test modules (e.g. test_concurrency) that need real
+    # fcntl.flock mutual exclusion.
+    if importlib.util.find_spec("portalocker") is None:
         portalocker_stub = types.ModuleType("portalocker")
 
         class _Lock:
             def __init__(self, *args, **kwargs):
-                self._fh = open(args[0], kwargs.get("mode", "a+b"))
+                # portalocker.Lock(filename, mode="r", ...): mode is positional[1]
+                # or a "mode" kwarg. Respect it so meta.bin rewrites land at the
+                # right offset (append mode would corrupt the header on reopen).
+                mode = kwargs.get("mode") or (args[1] if len(args) > 1 else "a+b")
+                self._fh = open(args[0], mode)
 
             def __enter__(self):
                 return self._fh
@@ -31,6 +41,25 @@ def _load_proxy_files_module():
         portalocker_stub.Lock = _Lock
         portalocker_stub.LOCK_EX = 1
         portalocker_stub.LOCK_SH = 2
+        portalocker_stub.LOCK_NB = 4
+
+        # The per-block single-flight path uses the lower-level lock()/unlock()
+        # API plus LOCK_NB and LockException. The stub never contends, so a lock
+        # attempt always succeeds and never raises -- a single request is always
+        # the leader, which is all these (single-request) unit tests exercise.
+
+        class _LockException(Exception):
+            pass
+
+        def _lock(fh, flags, timeout=None):
+            return fh
+
+        def _unlock(fh):
+            return None
+
+        portalocker_stub.LockException = _LockException
+        portalocker_stub.lock = _lock
+        portalocker_stub.unlock = _unlock
         sys.modules["portalocker"] = portalocker_stub
 
     return importlib.import_module("olah.proxy.files")
@@ -66,6 +95,9 @@ def _make_app(tmp_path, offline=False):
         repos_path=str(tmp_path / "repos"),
         hf_url_base=lambda: "https://huggingface.co",
         hf_lfs_url_base=lambda: "https://cdn-lfs.huggingface.co",
+        cache_compression="none",
+        cache_block_size=None,
+        cache_chunk_size=None,
     )
     return SimpleNamespace(state=SimpleNamespace(app_settings=SimpleNamespace(config=config)))
 
@@ -84,6 +116,10 @@ def test_get_contiguous_ranges_splits_cached_and_remote_segments():
             return 12
 
         def has_block(self, idx):
+            return idx == 1
+
+        # get_contiguous_ranges consults the bitmap-backed method; mirror has_block.
+        def is_block_cached(self, idx):
             return idx == 1
 
     assert proxy_files.get_contiguous_ranges(FakeCache(), 0, 12) == [
@@ -111,7 +147,6 @@ async def test_file_realtime_stream_returns_invalid_data_error_on_bad_pathsinfo(
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="http://localhost/file.bin",
         request=_make_request(),
         method="GET",
@@ -144,7 +179,6 @@ async def test_file_realtime_stream_handles_empty_and_ambiguous_pathsinfo(monkey
             repo="demo",
             file_path="file.bin",
             save_path=str(tmp_path / "save"),
-            head_path=str(tmp_path / "head"),
             url="http://localhost/file.bin",
             request=_make_request(),
             method="GET",
@@ -205,7 +239,6 @@ async def test_file_realtime_stream_builds_headers_and_streams_get_chunks(monkey
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/file.bin?download=1",
         request=_make_request("GET", headers={"range": "bytes=2-5", "authorization": "Bearer t", "host": "mirror.example"}),
         method="GET",
@@ -253,7 +286,6 @@ async def test_file_realtime_stream_uses_head_stream_for_head_requests(monkeypat
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://huggingface.co/team/demo/resolve/main/file.bin",
         request=_make_request("HEAD"),
         method="HEAD",
@@ -283,7 +315,7 @@ async def test_file_realtime_stream_without_repo_context_uses_remote_metadata(mo
             "authorization": authorization,
             "offline": offline,
         }
-        return proxy_files.RemoteFileMetadata(file_size=6, etag='"cdn-etag"')
+        return proxy_files.RemoteFileMetadata(file_size=6, etag='"cdn-etag"'), 200
 
     async def fake_file_chunk_get(**kwargs):
         captured["chunk_get"] = kwargs
@@ -296,7 +328,6 @@ async def test_file_realtime_stream_without_repo_context_uses_remote_metadata(mo
     result = await proxy_files._file_realtime_stream(
         app=_make_app(tmp_path),
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/team/demo/hash.bin",
         request=_make_request("GET", headers={"authorization": "Bearer t", "host": "mirror.example"}),
         method="GET",
@@ -316,14 +347,13 @@ async def test_file_realtime_stream_without_repo_context_uses_remote_metadata(mo
 @pytest.mark.asyncio
 async def test_file_realtime_stream_returns_proxy_timeout_when_metadata_lookup_fails(monkeypatch, tmp_path):
     async def fake_remote_file_metadata(*args, **kwargs):
-        return None
+        return None, None
 
     monkeypatch.setattr(proxy_files, "_remote_file_metadata", fake_remote_file_metadata)
 
     result = await proxy_files._file_realtime_stream(
         app=_make_app(tmp_path),
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/team/demo/hash.bin",
         request=_make_request("GET", headers={"host": "mirror.example"}),
         method="GET",
@@ -334,6 +364,88 @@ async def test_file_realtime_stream_returns_proxy_timeout_when_metadata_lookup_f
     assert result.status_code == 504
     assert result.headers["x-error-code"] == "ProxyTimeout"
     assert body == [b""]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upstream_status, expected_status, expected_error_code",
+    [(404, 404, "EntryNotFound"), (401, 401, None), (403, 403, None)],
+)
+async def test_file_realtime_stream_passes_through_upstream_client_errors(
+    monkeypatch, tmp_path, upstream_status, expected_status, expected_error_code
+):
+    async def fake_remote_file_metadata(*args, **kwargs):
+        return None, upstream_status
+
+    monkeypatch.setattr(proxy_files, "_remote_file_metadata", fake_remote_file_metadata)
+
+    result = await proxy_files._file_realtime_stream(
+        app=_make_app(tmp_path),
+        save_path=str(tmp_path / "save"),
+        url="https://mirror.example/team/demo/hash.bin",
+        request=_make_request("GET", headers={"host": "mirror.example"}),
+        method="GET",
+        allow_cache=False,
+    )
+    body = [chunk async for chunk in result.body]
+
+    assert result.status_code == expected_status
+    if expected_error_code is not None:
+        assert result.headers["x-error-code"] == expected_error_code
+    assert body == [b""]
+
+
+@pytest.mark.asyncio
+async def test_file_realtime_stream_uses_pathsinfo_for_canonical_repo(monkeypatch, tmp_path):
+    """Canonical repos (org=None, e.g. bert-base-uncased) must take the
+    paths-info branch too, not fall through to _remote_file_metadata."""
+    captured = {}
+
+    async def fail_remote_file_metadata(*args, **kwargs):
+        raise AssertionError("canonical repos should use the pathsinfo branch")
+
+    async def fake_pathsinfo(app, repo_type, org, repo, commit, paths, **kwargs):
+        captured["pathsinfo"] = (repo_type, org, repo, commit, paths)
+        return ProxyResult(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=single_chunk_body(
+                json.dumps([{"path": "config.json", "size": 7}])
+            ),
+        )
+
+    async def fake_resource_etag(**kwargs):
+        return '"plain-etag"'
+
+    async def fake_chunk_get(**kwargs):
+        yield b"cfg.data"
+
+    monkeypatch.setattr(proxy_files, "_remote_file_metadata", fail_remote_file_metadata)
+    monkeypatch.setattr(proxy_files, "pathsinfo_generator", fake_pathsinfo)
+    monkeypatch.setattr(proxy_files, "_resource_etag", fake_resource_etag)
+    monkeypatch.setattr(proxy_files, "_file_chunk_get", fake_chunk_get)
+
+    result = await proxy_files._file_realtime_stream(
+        app=_make_app(tmp_path),
+        save_path=str(tmp_path / "save"),
+        url="https://mirror.example/bert-base-uncased/resolve/main/config.json",
+        request=_make_request("GET", headers={"host": "mirror.example"}),
+        method="GET",
+        allow_cache=False,
+        repo_type="models",
+        org=None,
+        repo="bert-base-uncased",
+        file_path="config.json",
+        commit="main",
+    )
+    body = [chunk async for chunk in result.body]
+
+    assert captured["pathsinfo"] == (
+        "models", None, "bert-base-uncased", "main", ["config.json"]
+    )
+    assert result.status_code == 200
+    assert result.headers["content-length"] == "7"
+    assert body == [b"cfg.data"]
 
 
 @pytest.mark.asyncio
@@ -379,6 +491,7 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
         hash_repo="repohash",
         hash_file="filehash",
         request=request,
+        allow_cache=True,
     )
     assert lfs_result.status_code == 200
 
@@ -387,7 +500,10 @@ async def test_cdn_and_lfs_generators_use_shared_stream_builder(monkeypatch, tmp
     assert captured[0]["allow_cache"] is True
     assert captured[1]["url"] == "http://mirror.example/team/demo/hash.bin"
     assert captured[1].get("repo_type") is None
-    assert captured[1]["allow_cache"] is False
+    assert captured[1]["allow_cache"] is True
+    # LFS downloads are content-addressed: the cache revalidates against the
+    # content hash (hash_file), which is also the response etag.
+    assert captured[1]["expected_etag"] == "filehash"
 
 
 @pytest.mark.asyncio
@@ -424,7 +540,6 @@ async def test_file_realtime_stream_builds_multipart_response_for_multiple_range
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/file.bin",
         request=_make_request("GET", headers={"range": "bytes=0-1,4-5", "host": "mirror.example"}),
         method="GET",
@@ -475,7 +590,6 @@ async def test_file_realtime_stream_rejects_unsatisfiable_ranges(monkeypatch, tm
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/file.bin",
         request=_make_request("GET", headers={"range": "bytes=5-9", "host": "mirror.example"}),
         method="GET",
@@ -491,30 +605,21 @@ async def test_file_realtime_stream_rejects_unsatisfiable_ranges(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-async def test_get_file_range_from_cache_reads_sliced_bytes_across_blocks():
-    class FakeCache:
-        def _get_block_size(self):
-            return 4
+@pytest.mark.asyncio
+async def test_stream_range_reads_sliced_bytes_across_blocks(tmp_path):
+    from olah.cache.olah_cache import OlahCache
 
-        def _get_file_size(self):
-            return 8
+    cache = OlahCache.create(
+        str(tmp_path / "c"), file_size=8, block_size=4, chunk_size=2, compression_algo=0
+    )
+    await cache.write_block(0, b"ABCD")
+    await cache.write_block(1, b"EFGH")
+    out = b""
+    async for piece in cache.stream_range(1, 7):
+        out += piece
+    cache.close()
 
-        def has_block(self, idx):
-            return idx in {0, 1}
-
-        async def read_block(self, idx):
-            return [b"ABCD", b"EFGH"][idx]
-
-    chunks = [
-        chunk
-        async for chunk in proxy_files._get_file_range_from_cache(
-            FakeCache(),
-            start_pos=1,
-            end_pos=7,
-        )
-    ]
-
-    assert chunks == [b"BCD", b"EFG"]
+    assert out == b"BCDEFG"
 
 
 @pytest.mark.asyncio
@@ -661,7 +766,7 @@ async def test_remote_file_metadata_returns_none_on_http_errors(monkeypatch):
 
     monkeypatch.setattr(proxy_files.httpx, "AsyncClient", FakeAsyncClient)
 
-    metadata = await proxy_files._remote_file_metadata(
+    metadata, status = await proxy_files._remote_file_metadata(
         app=None,
         hf_url="https://remote/file",
         authorization=None,
@@ -669,6 +774,39 @@ async def test_remote_file_metadata_returns_none_on_http_errors(monkeypatch):
     )
 
     assert metadata is None
+    # A transport error means no upstream response at all -> no status to pass
+    # through; the caller reports a proxy timeout.
+    assert status is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_status", [400, 401, 403, 404, 429])
+async def test_remote_file_metadata_reports_upstream_client_errors(monkeypatch, upstream_status):
+    class FakeResponse:
+        status_code = upstream_status
+        headers = {}
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", FakeAsyncClient)
+
+    metadata, status = await proxy_files._remote_file_metadata(
+        app=None,
+        hf_url="https://remote/file",
+        authorization=None,
+        offline=False,
+    )
+
+    assert metadata is None
+    assert status == upstream_status
 
 
 @pytest.mark.asyncio
@@ -701,7 +839,6 @@ async def test_file_chunk_get_persists_single_block_files(tmp_path):
         async for chunk in proxy_files._file_chunk_get(
             app=_make_app(tmp_path),
             save_path=str(save_path),
-            head_path=str(tmp_path / "head"),
             client=FakeClient(),
             method="GET",
             url="https://huggingface.co/team/demo/resolve/main/tiny.json",
@@ -715,3 +852,38 @@ async def test_file_chunk_get_persists_single_block_files(tmp_path):
     block_path = save_path / "blocks" / "block_00000000.bin"
     assert block_path.exists()
     assert block_path.stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_file_chunk_get_streams_from_cache_without_touching_upstream(tmp_path):
+    # Pre-populate a multi-block cache, then ensure _file_chunk_get serves it
+    # entirely from cache (upstream never called) and yields exact bytes for both
+    # a full-file request and a sub-range spanning two blocks. This exercises the
+    # lean cache-hit branch added by the copy-removal optimization.
+    save_path = tmp_path / "repos" / "files" / "models" / "team" / "demo" / "resolve" / "main" / "blob.bin"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    block_size = 64
+    payload = bytes((i * 7) % 256 for i in range(200))  # 4 blocks (last partial, 8 bytes)
+    num_blocks = (len(payload) + block_size - 1) // block_size
+
+    cache = proxy_files.OlahCache.create(str(save_path), block_size=block_size, chunk_size=block_size, compression_algo=0)
+    cache.resize(len(payload))
+    for i in range(num_blocks):
+        blk = payload[i * block_size:(i + 1) * block_size]
+        blk = blk + b"\x00" * (block_size - len(blk))
+        await cache.write_block(i, blk)
+    cache.close()
+
+    class FailClient:
+        def stream(self, **kwargs):
+            raise AssertionError("cache hit must not reach upstream")
+
+    common = dict(app=_make_app(tmp_path), save_path=str(save_path), 
+                  client=FailClient(), method="GET", url="https://x/team/demo/resolve/main/blob.bin",
+                  allow_cache=True, file_size=len(payload))
+
+    full = [c async for c in proxy_files._file_chunk_get(headers={}, **common)]
+    assert b"".join(full) == payload
+
+    sub = [c async for c in proxy_files._file_chunk_get(headers={"range": "bytes=70-150"}, **common)]
+    assert b"".join(sub) == payload[70:151]

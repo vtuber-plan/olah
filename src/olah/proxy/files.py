@@ -9,10 +9,13 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Literal, Optional, Tuple
-from fastapi import Request
+from fastapi import Request, Response
+import fastapi.concurrency
 import httpx
+import portalocker
 from urllib.parse import urlparse, urljoin
 
 from olah.constants import (
@@ -23,11 +26,16 @@ from olah.constants import (
     HUGGINGFACE_HEADER_X_LINKED_SIZE,
     ORIGINAL_LOC,
 )
-from olah.cache.olah_cache import OlahCache
+from olah.cache.olah_cache import (
+    DEFAULT_BLOCK_SIZE,
+    DEFAULT_CHUNK_SIZE,
+    CacheIntegrityError,
+    OlahCache,
+    compression_algo_from_name,
+)
 from olah.errors import error_entry_not_found, error_proxy_invalid_data, error_proxy_timeout
 from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.utils.cache_utils import read_cache_request, write_cache_request
-from olah.utils.disk_utils import touch_file_access_time
 from olah.utils.url_utils import (
     RemoteInfo,
     add_query_param,
@@ -40,6 +48,7 @@ from olah.utils.url_utils import (
 )
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.rule_utils import check_cache_rules_hf
+from olah.utils.lfs_object_index import register_lfs_object, register_xet_object
 from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 from olah.utils.zip_utils import Decompressor, decompress_data
@@ -76,7 +85,7 @@ def get_contiguous_ranges(
     end_block = (end_pos - 1) // cache_file._get_block_size()
 
     range_start_pos = start_pos
-    range_is_remote = not cache_file.has_block(start_block)
+    range_is_remote = not cache_file.is_block_cached(start_block)
     cur_pos = start_pos
     # Get contiguous ranges: (range_start_pos, range_end_pos), is_remote
     ranges_and_cache_list: List[Tuple[Tuple[int, int], bool]] = []
@@ -85,7 +94,7 @@ def get_contiguous_ranges(
             cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
         )
 
-        if cache_file.has_block(cur_block):
+        if cache_file.is_block_cached(cur_block):
             cur_is_remote = False
         else:
             cur_is_remote = True
@@ -162,31 +171,6 @@ async def _write_block_safely(
         raise
 
 
-async def _get_file_range_from_cache(
-    cache_file: OlahCache, start_pos: int, end_pos: int
-):
-    start_block = start_pos // cache_file._get_block_size()
-    end_block = (end_pos - 1) // cache_file._get_block_size()
-    cur_pos = start_pos
-    for cur_block in range(start_block, end_block + 1):
-        _, block_start_pos, block_end_pos = get_block_info(
-            cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-        )
-        if not cache_file.has_block(cur_block):
-            raise Exception("Unknown exception: read block which has not been cached.")
-        raw_block = await cache_file.read_block(cur_block)
-        chunk = raw_block[
-            max(start_pos, block_start_pos)
-            - block_start_pos : min(end_pos, block_end_pos)
-            - block_start_pos
-        ]
-        yield chunk
-        cur_pos += len(chunk)
-
-    if cur_pos != end_pos:
-        raise Exception("The cache range from {} to {} is incomplete.")
-
-
 async def _get_file_range_from_remote(
     client: httpx.AsyncClient,
     remote_info: RemoteInfo,
@@ -240,26 +224,266 @@ async def _get_file_range_from_remote(
         )
 
 
+# ---------------------------------------------------------------------------
+# Per-block single-flight download coordination
+# ---------------------------------------------------------------------------
+# Concurrent requests (across coroutines AND across uvicorn worker processes)
+# for the same uncached block share ONE upstream download. The leader wins a
+# non-blocking exclusive advisory lock on a per-block sidecar (``<block>.dl.lock``)
+# and publishes the block; followers wait for that lock, then serve from cache.
+# If the leader dies before publishing, the OS releases its lock and a follower
+# becomes the new leader (bounded retry).
+
+def _try_lock_ex(path: str):
+    """Acquire a non-blocking exclusive advisory lock on ``path``.
+
+    Returns the open file handle (caller passes it to ``_release_lock``), or
+    ``None`` if another process currently holds the lock. The lock file is
+    created on demand and used ONLY as a lock target.
+    """
+    fh = open(path, "a+")
+    try:
+        portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
+        return fh
+    except portalocker.LockException:
+        fh.close()
+        return None
+
+
+def _release_lock(fh) -> None:
+    """Release an advisory lock acquired via ``_try_lock_ex``."""
+    try:
+        portalocker.unlock(fh)
+    except Exception:
+        pass
+    finally:
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+
+def _wait_lock_sh(path: str, timeout: float) -> bool:
+    """Poll for a shared advisory lock (up to ``timeout`` seconds).
+
+    Returns ``True`` once the leader's exclusive lock is released (acquire +
+    immediately release), or ``False`` on timeout. Uses non-blocking probes so it
+    works uniformly across portalocker versions; the sleeps run inside a
+    threadpool so the event loop is never blocked.
+    """
+    deadline = time.time() + timeout
+    while True:
+        fh = open(path, "a+")
+        try:
+            portalocker.lock(fh, portalocker.LOCK_SH | portalocker.LOCK_NB)
+            _release_lock(fh)
+            return True
+        except portalocker.LockException:
+            fh.close()
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
+
+async def _download_full_block(
+    client: httpx.AsyncClient,
+    remote_info: RemoteInfo,
+    cache_file: OlahCache,
+    block_start: int,
+    block_end: int,
+) -> bytes:
+    """Download exactly ``[block_start, block_end)`` from upstream.
+
+    Thin collector over ``_get_file_range_from_remote`` (which already verifies
+    the received byte count). Returns the real (unpadded) block bytes.
+    """
+    out = bytearray()
+    async for chunk in _get_file_range_from_remote(
+        client, remote_info, cache_file, block_start, block_end
+    ):
+        if chunk:
+            out += chunk
+    return bytes(out)
+
+
+async def _read_block_real_payload(
+    cache_file: OlahCache, block_index: int, real_len: int
+) -> bytes:
+    """Read a cached block and return its first ``real_len`` (unpadded) bytes.
+
+    ``read_block`` verifies chunk CRCs but does NOT auto-invalidate on failure
+    (unlike ``stream_range``), so on ``CacheIntegrityError`` the block is dropped
+    here and the caller treats it as a miss.
+    """
+    try:
+        padded = await cache_file.read_block(block_index)
+    except CacheIntegrityError:
+        await cache_file._invalidate_block(block_index)
+        raise
+    if padded is None:
+        # Block was evicted between has_block() and the read. Treat it like a
+        # corrupt block so the caller's single-flight path re-downloads it.
+        raise CacheIntegrityError(f"Block {block_index} vanished before read.")
+    return padded[:real_len]
+
+
+async def _fetch_block_single_flight(
+    *,
+    client: httpx.AsyncClient,
+    remote_info: RemoteInfo,
+    cache_file: OlahCache,
+    block_index: int,
+    block_start: int,
+    block_end: int,
+    allow_cache: bool,
+) -> bytes:
+    """Return the real (unpadded) payload of ``block_index``, single-flighted.
+
+    * Cached + CRC-valid -> serve from cache.
+    * Caching disabled -> download the range with no coordination.
+    * Otherwise coordinate via a per-block cross-process advisory lock: the
+      leader downloads + publishes (under ``asyncio.shield`` so a client
+      disconnect still lands the block); followers wait, then serve from cache.
+      A leader that dies before publishing is retried by a follower (bounded).
+    """
+    bs = cache_file._get_block_size()
+    real_len = block_end - block_start
+
+    # Fast path: serve from cache. A corrupt block is invalidated and re-fetched.
+    if cache_file.has_block(block_index):
+        try:
+            return await _read_block_real_payload(cache_file, block_index, real_len)
+        except CacheIntegrityError:
+            pass
+
+    if not allow_cache:
+        return await _download_full_block(
+            client, remote_info, cache_file, block_start, block_end
+        )
+
+    dl_lock_path = cache_file.get_block_path(block_index) + ".dl.lock"
+    max_attempts = 3
+    for _ in range(max_attempts):
+        # Try to BECOME the leader (non-blocking exclusive lock), off the event loop.
+        lock_fh = await fastapi.concurrency.run_in_threadpool(_try_lock_ex, dl_lock_path)
+        if lock_fh is not None:
+            try:
+                # Double-check under EX: a prior leader may have just published.
+                if cache_file.has_block(block_index):
+                    try:
+                        return await _read_block_real_payload(
+                            cache_file, block_index, real_len
+                        )
+                    except CacheIntegrityError:
+                        pass  # corrupt -> re-download below
+                raw_real = await _download_full_block(
+                    client, remote_info, cache_file, block_start, block_end
+                )
+                # write_block requires a full block_size buffer; pad the final block.
+                raw_block = (
+                    raw_real if real_len == bs else raw_real + b"\x00" * (bs - real_len)
+                )
+                # _write_block_safely shields the publish so a leader disconnect
+                # still lands the block (followers depend on it). If the entry was
+                # evicted mid-download (hourly cleanup removed blocks/), publishing
+                # is impossible -- treat it as best-effort and still return the
+                # fetched bytes so this client succeeds; a future request recreates
+                # the entry.
+                try:
+                    await _write_block_safely(cache_file, block_index, raw_block, allow_cache=True)
+                except FileNotFoundError:
+                    pass
+                return raw_real
+            finally:
+                _release_lock(lock_fh)
+        # Someone else is the leader: wait for it to finish, then serve from cache.
+        await fastapi.concurrency.run_in_threadpool(_wait_lock_sh, dl_lock_path, 120)
+        if cache_file.has_block(block_index):
+            try:
+                return await _read_block_real_payload(cache_file, block_index, real_len)
+            except CacheIntegrityError:
+                pass  # corrupt or leader died mid-publish -> retry as leader
+        # Block still absent -> leader died before publishing. Loop and try to
+        # become the new leader.
+    raise Exception(
+        f"block {block_index} never became available after {max_attempts} single-flight attempts"
+    )
+
+
+async def _yield_range_blocks(
+    *,
+    client: httpx.AsyncClient,
+    remote_info: RemoteInfo,
+    cache_file: OlahCache,
+    range_start_pos: int,
+    range_end_pos: int,
+    resume_pos: int,
+    allow_cache: bool,
+) -> AsyncIterator[bytes]:
+    """Yield the client-requested slice of each block in ``[resume_pos, range_end_pos)``.
+
+    Shared by the cache-MISS path (``resume_pos == range_start_pos``) and by the
+    cache-HIT recovery path (``resume_pos`` == where ``stream_range`` failed). Each
+    block goes through per-block single-flight, so a block evicted mid-response is
+    transparently re-fetched and the client still gets a complete, correct response.
+    """
+    bs = cache_file._get_block_size()
+    fs = cache_file._get_file_size()
+    first_block = resume_pos // bs
+    last_block = (range_end_pos - 1) // bs
+    for blk in range(first_block, last_block + 1):
+        block_start = blk * bs
+        block_end = min((blk + 1) * bs, fs)
+        block_bytes = await _fetch_block_single_flight(
+            client=client,
+            remote_info=remote_info,
+            cache_file=cache_file,
+            block_index=blk,
+            block_start=block_start,
+            block_end=block_end,
+            allow_cache=allow_cache,
+        )
+        lo = max(resume_pos, block_start) - block_start
+        hi = min(range_end_pos, block_end) - block_start
+        piece = block_bytes[lo:hi]
+        if piece:
+            yield piece
+
+
 async def _file_chunk_get(
     app,
     save_path: str,
-    head_path: str,
     client: httpx.AsyncClient,
     method: str,
-    url: str,
+    url: Optional[str],
     headers: Dict[str, str],
     allow_cache: bool,
     file_size: int,
+    expected_etag: Optional[str] = None,
 ):
     # Redirect Chunks
-    if os.path.exists(save_path):
-        cache_file = OlahCache(save_path)
-    else:
-        cache_file = OlahCache.create(save_path)
-        cache_file.resize(file_size=file_size)
-    
-    # Refresh access time
-    touch_file_access_time(save_path)
+    cfg = app.state.app_settings.config
+    compression_algo = compression_algo_from_name(cfg.cache_compression)
+    block_size = cfg.cache_block_size or DEFAULT_BLOCK_SIZE
+    chunk_size = cfg.cache_chunk_size or DEFAULT_CHUNK_SIZE
+    # Opening revalidates identity online: a non-None expected_etag that differs
+    # from the stored one wipes & recreates the cache. Offline callers pass None
+    # to trust the disk. The constructor handles create / reuse / wipe uniformly
+    # and sizes chunks.crc for new caches.
+    # Opening a cache does mkdirs + advisory locking + (on create) fsync, all of
+    # which would block the event loop -- run it in the threadpool. Opening also
+    # bumps the entry's meta.lock mtime, which is the LRU access signal eviction
+    # sorts on (see olah.utils.disk_utils.collect_cache_units).
+    cache_file = await fastapi.concurrency.run_in_threadpool(
+        OlahCache,
+        save_path,
+        file_size=file_size,
+        block_size=block_size,
+        chunk_size=chunk_size,
+        compression_algo=compression_algo,
+        expected_etag=expected_etag,
+    )
+
     try:
         _, all_ranges, _ = get_request_ranges(file_size, headers.get("range"))
 
@@ -269,95 +493,81 @@ async def _file_chunk_get(
             for (range_start_pos, range_end_pos), is_remote in ranges_and_cache_list:
                 # range_start_pos is zero-index and range_end_pos is exclusive
                 if is_remote:
-                    generator = _get_file_range_from_remote(
-                        client,
-                        RemoteInfo(method, url, headers),
-                        cache_file,
-                        range_start_pos,
-                        range_end_pos,
-                    )
-                else:
-                    generator = _get_file_range_from_cache(
-                        cache_file,
-                        range_start_pos,
-                        range_end_pos,
-                    )
-
-                cur_pos = range_start_pos
-                stream_cache = bytearray()
-                last_block, last_block_start_pos, last_block_end_pos = get_block_info(
-                    cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-                )
-                cur_block = last_block
-                try:
-                    async for chunk in generator:
-                        if len(chunk) != 0:
-                            yield bytes(chunk)
-                            stream_cache += chunk
-                            cur_pos += len(chunk)
-
-                        cur_block = cur_pos // cache_file._get_block_size()
-
-                        if cur_block == last_block:
-                            continue
-                        split_pos = last_block_end_pos - max(
-                            last_block_start_pos, range_start_pos
-                        )
-                        raw_block = stream_cache[:split_pos]
-                        stream_cache = stream_cache[split_pos:]
-                        if len(raw_block) == cache_file._get_block_size():
-                            await _write_block_safely(
-                                cache_file,
-                                last_block,
-                                raw_block,
-                                allow_cache,
-                            )
-                        last_block, last_block_start_pos, last_block_end_pos = get_block_info(
-                            cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
-                        )
-                finally:
-                    raw_block = bytes(stream_cache)
-                    if cur_pos == range_end_pos:
-                        final_block = last_block
-                        final_start = last_block_start_pos
-                        final_end = last_block_end_pos
-                        if final_start >= range_start_pos:
-                            expected_len = final_end - final_start
-                            if len(raw_block) == expected_len:
-                                if expected_len < cache_file._get_block_size():
-                                    raw_block += b"\x00" * (
-                                        cache_file._get_block_size() - expected_len
-                                    )
-                                await _write_block_safely(
-                                    cache_file,
-                                    final_block,
-                                    raw_block,
-                                    allow_cache,
-                                )
-
-                if cur_pos != range_end_pos:
-                    if is_remote:
+                    # Cache miss: fetch each missing block individually under a
+                    # per-block single-flight lock so concurrent requests for the
+                    # same uncached block share ONE upstream download (the leader
+                    # downloads + publishes; followers wait then serve from cache).
+                    if url is None:
+                        # Cache-only mode (e.g. the Xet route serving a fully-cached
+                        # object without re-resolving HF). A miss here means a block
+                        # was evicted/corrupted between the pre-check and now; abort
+                        # so the client retries and the route re-evaluates coverage.
                         raise Exception(
-                            f"The size of remote range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
+                            "cache miss in cache-only mode (no upstream URL available)"
                         )
-                    else:
+                    remote_info = RemoteInfo(method, url, headers)
+                    async for piece in _yield_range_blocks(
+                        client=client,
+                        remote_info=remote_info,
+                        cache_file=cache_file,
+                        range_start_pos=range_start_pos,
+                        range_end_pos=range_end_pos,
+                        resume_pos=range_start_pos,
+                        allow_cache=allow_cache,
+                    ):
+                        yield piece
+                else:
+                    # Cache hit: blocks are already on disk -- no reassembly, no
+                    # cache writes. OlahCache.stream_range serves both uncompressed
+                    # (raw seek+read) and compressed (sub-chunk-indexed) blocks in
+                    # ~1MB pieces, verifying each chunk's CRC. If a block vanishes
+                    # mid-stream (eviction) or fails CRC, stream_range raises
+                    # CacheIntegrityError; we fall back to per-block single-flight
+                    # for the unsent remainder so the client still gets a complete,
+                    # correct response instead of a truncated 500.
+                    cur_pos = range_start_pos
+                    try:
+                        async for piece in cache_file.stream_range(
+                            range_start_pos, range_end_pos
+                        ):
+                            if piece:
+                                yield piece
+                                cur_pos += len(piece)
+                    except CacheIntegrityError:
+                        if url is None:
+                            # Cache-only mode cannot re-fetch; let it surface.
+                            raise
+                        remote_info = RemoteInfo(method, url, headers)
+                        async for piece in _yield_range_blocks(
+                            client=client,
+                            remote_info=remote_info,
+                            cache_file=cache_file,
+                            range_start_pos=range_start_pos,
+                            range_end_pos=range_end_pos,
+                            resume_pos=cur_pos,
+                            allow_cache=allow_cache,
+                        ):
+                            if piece:
+                                yield piece
+                                cur_pos += len(piece)
+                    if cur_pos != range_end_pos:
                         raise Exception(
                             f"The size of cached range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
                         )
     finally:
-        cache_file.close()
+        await fastapi.concurrency.run_in_threadpool(cache_file.close)
 
 
 async def _stream_single_range(
     app,
     save_path: str,
-    head_path: str,
     client: httpx.AsyncClient,
     method: str,
-    url: str,
+    url: Optional[str],
     headers: Dict[str, str],
     allow_cache: bool,
     file_size: int,
+    expected_etag: Optional[str] = None,
     requested_range: Optional[Tuple[int, int]] = None,
 ) -> AsyncIterator[bytes]:
     range_headers = dict(headers)
@@ -370,13 +580,13 @@ async def _stream_single_range(
     async for chunk in _file_chunk_get(
         app=app,
         save_path=save_path,
-        head_path=head_path,
         client=client,
         method=method,
         url=url,
         headers=range_headers,
         allow_cache=allow_cache,
         file_size=file_size,
+        expected_etag=expected_etag,
     ):
         yield chunk
 
@@ -384,7 +594,6 @@ async def _stream_single_range(
 async def _file_chunk_head(
     app,
     save_path: str,
-    head_path: str,
     client: httpx.AsyncClient,
     method: str,
     url: str,
@@ -440,10 +649,16 @@ async def _remote_file_metadata(
     hf_url: str,
     authorization: Optional[str],
     offline: bool,
-) -> Optional[RemoteFileMetadata]:
+) -> Tuple[Optional[RemoteFileMetadata], Optional[int]]:
+    """Fetch file metadata from the remote. Returns (metadata, upstream status).
+
+    The status code is ``None`` when no upstream response was received (network
+    error). Callers pass 4xx statuses through so clients see the upstream error
+    instead of an opaque 504.
+    """
     if offline:
         etag = await _resource_etag(hf_url=hf_url, authorization=authorization, offline=True)
-        return RemoteFileMetadata(file_size=0, etag=etag)
+        return RemoteFileMetadata(file_size=0, etag=etag), None
 
     headers = {}
     if authorization is not None:
@@ -458,27 +673,106 @@ async def _remote_file_metadata(
                 follow_redirects=True,
             )
     except (httpx.HTTPError, ValueError):
-        return None
+        return None, None
     if response.status_code >= 400:
-        return None
+        return None, response.status_code
 
     content_length = response.headers.get("content-length")
     if content_length is None:
         # Xet-only files have no content-length in the resolve HEAD; fall back to x-linked-size.
         content_length = response.headers.get("x-linked-size")
     if content_length is None:
-        return None
+        return None, response.status_code
     try:
         file_size = int(content_length)
     except ValueError:
-        return None
+        return None, response.status_code
     xet_headers = {h: response.headers[h] for h in XET_RESPONSE_HEADERS if h in response.headers}
-    return RemoteFileMetadata(
-        file_size=file_size,
-        etag=response.headers.get("etag") or response.headers.get("x-linked-etag"),
-        xet_headers=xet_headers or None,
+    return (
+        RemoteFileMetadata(
+            file_size=file_size,
+            etag=response.headers.get("etag") or response.headers.get("x-linked-etag"),
+            xet_headers=xet_headers or None,
+        ),
+        response.status_code,
     )
 
+
+def _strip_quotes(value: Optional[str]) -> Optional[str]:
+    if value and len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+async def _try_redirect_to_content_route(
+    app,
+    hf_url: str,
+    authorization: Optional[str],
+    repo_type: Optional[str],
+    org: Optional[str],
+    repo: Optional[str],
+    file_path: Optional[str],
+    commit: Optional[str],
+) -> Optional[ProxyResult]:
+    """Redirect-model hook: for Xet files, return a 302 to olah's Xet content route.
+
+    Returns ``None`` to fall through to normal proxying (redirect model off, no
+    repo context, not a redirect, classic/plain file, or upstream error). The 302
+    deliberately omits ``x-xet-hash`` so hf_hub does not engage native Xet and
+    instead downloads over HTTP from olah's content route.
+    """
+    import re
+
+    cfg = app.state.app_settings.config
+    if not getattr(cfg, "cache_redirect_model", False):
+        return None
+    if not (repo_type and repo and file_path and commit):
+        return None
+
+    headers = {}
+    if authorization:
+        headers["authorization"] = authorization
+    try:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            resp = await client.head(hf_url, headers=headers, timeout=WORKER_API_TIMEOUT)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code not in (301, 302, 303, 307, 308):
+        return None
+
+    location = resp.headers.get("location", "")
+    xet_hash = resp.headers.get("x-xet-hash")
+    oid = _strip_quotes(resp.headers.get("x-linked-etag"))
+    try:
+        size = int(resp.headers.get("x-linked-size") or resp.headers.get("content-length"))
+    except (TypeError, ValueError):
+        size = None
+
+    if xet_hash and oid:
+        await register_xet_object(
+            app, repo_type, org, repo, file_path, commit, oid, xet_hash, size or 0
+        )
+        await register_lfs_object(app, repo_type, org, repo, oid)
+        m = re.search(r"/xet-bridge-[a-z]+/([^/]+)/([^/?]+)", location)
+        repo_hash = m.group(1) if m else "_"
+        response_headers = {
+            "location": f"/xet-bridge-us/{repo_hash}/{xet_hash}",
+            "etag": f'"{xet_hash}"',
+            "accept-ranges": "bytes",
+        }
+        if size is not None:
+            response_headers["content-length"] = str(size)
+            response_headers["x-linked-size"] = str(size)
+        if oid:
+            response_headers["x-linked-etag"] = f'"{oid}"'
+        if commit:
+            response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
+        return ProxyResult(
+            status_code=302, headers=response_headers, body=single_chunk_body(b"")
+        )
+
+    # Classic LFS / plain redirect: not routed here yet -> proxy.
+    return None
 
 async def _detect_xet_passthrough(
     hf_url: str,
@@ -548,7 +842,6 @@ async def _detect_xet_passthrough(
 async def _file_realtime_stream(
     app,
     save_path: str,
-    head_path: str,
     url: str,
     request: Request,
     repo_type: Optional[Literal["models", "datasets", "spaces"]] = None,
@@ -558,6 +851,7 @@ async def _file_realtime_stream(
     method="GET",
     allow_cache=True,
     commit: Optional[str] = None,
+    expected_etag: Optional[str] = None,
 ) -> ProxyResult:
     async def error_result(response) -> ProxyResult:
         return ProxyResult(
@@ -595,7 +889,9 @@ async def _file_realtime_stream(
         request_headers["host"] = urlparse(hf_url).netloc
 
     authorization = request.headers.get("authorization", None)
-
+    # Xet pass-through: Xet files cannot stream through olah's byte cache
+    # (the client speaks the Xet chunked protocol against xethub.hf.co
+    # directly), so hand back the upstream Xet metadata verbatim.
     if not app.state.app_settings.config.offline:
         xet_passthrough = await _detect_xet_passthrough(
             hf_url=hf_url,
@@ -605,7 +901,17 @@ async def _file_realtime_stream(
         if xet_passthrough is not None:
             return xet_passthrough
 
-    if repo_type is not None and org is not None and repo is not None and file_path is not None and commit is not None:
+    # Redirect model (opt-in): for Xet files, hand the client a 302 to olah's own
+    # Xet content route instead of proxying the bytes, so range requests hit the
+    # cache directly. Falls through to proxying for non-Xet / when off / on error.
+    redirect = await _try_redirect_to_content_route(
+        app, hf_url, authorization, repo_type, org, repo, file_path, commit
+    )
+    if redirect is not None:
+        return redirect
+    # Canonical repos (org=None, e.g. "bert-base-uncased") are ordinary HF
+    # repos; paths-info handles them the same as org/<repo> names.
+    if repo_type is not None and repo is not None and file_path is not None and commit is not None:
         generator = await pathsinfo_generator(
             app,
             repo_type,
@@ -638,34 +944,88 @@ async def _file_realtime_stream(
         if "size" not in pathinfo:
             return await error_result(error_proxy_timeout())
         file_size = pathinfo["size"]
-        etag = await _resource_etag(
-            hf_url=hf_url,
-            authorization=authorization,
-            offline=app.state.app_settings.config.offline,
-        )
+        # Register LFS content identity so later LFS downloads (which carry only
+        # the content hash, not the repo) can be authorized against this repo.
+        lfs_info = pathinfo.get("lfs") if isinstance(pathinfo, dict) else None
+        lfs_oid = lfs_info.get("oid") if isinstance(lfs_info, dict) else None
+        xet_hash = pathinfo.get("xetHash") if isinstance(pathinfo, dict) else None
+        if lfs_oid:
+            await register_lfs_object(app, repo_type, org, repo, lfs_oid)
+            if xet_hash:
+                await register_xet_object(
+                    app, repo_type, org, repo, file_path, commit, lfs_oid, xet_hash, file_size
+                )
+        # Content-addressed cache identity: for LFS/Xet files use the content
+        # SHA-256 (lfs oid) -- integrity-verifiable and stable across commits --
+        # instead of a URL-derived pseudo-etag. Fall back to _resource_etag for
+        # plain (non-LFS) files.
+        if lfs_oid:
+            etag = f'"{lfs_oid}"'
+        else:
+            etag = await _resource_etag(
+                hf_url=hf_url,
+                authorization=authorization,
+                offline=app.state.app_settings.config.offline,
+            )
     else:
-        metadata = await _remote_file_metadata(
+        metadata, upstream_status = await _remote_file_metadata(
             app=app,
             hf_url=hf_url,
             authorization=authorization,
             offline=app.state.app_settings.config.offline,
         )
         if metadata is None:
+            # Pass the upstream verdict through: a missing/unauthorized file is
+            # the client's problem, not a proxy timeout.
+            if upstream_status == 404:
+                return await error_result(error_entry_not_found())
+            if upstream_status in (401, 403):
+                return await error_result(Response(status_code=upstream_status))
             return await error_result(error_proxy_timeout())
         file_size = metadata.file_size
         etag = metadata.etag
 
-    response_headers = {}
+    # An explicit expected_etag (e.g. the LFS/Xet content hash) overrides the
+    # upstream-derived etag for both the response and cache revalidation.
+    if expected_etag is not None:
+        etag = expected_etag
+    return await _build_file_response(
+        app, save_path, request_headers, method, hf_url, file_size, etag, allow_cache, commit
+    )
+
+
+async def _build_file_response(
+    app,
+    save_path: str,
+    request_headers: Dict[str, str],
+    method: str,
+    upstream_url: Optional[str],
+    file_size: int,
+    etag: Optional[str],
+    allow_cache: bool,
+    commit: Optional[str],
+) -> ProxyResult:
+    """Build the ranged response (headers + streaming body) for a file served
+    from ``upstream_url`` and cached at ``save_path``.
+
+    Shared by the resolve proxy (``upstream_url`` = HF resolve URL) and the Xet
+    content route (``upstream_url`` = a freshly re-resolved signed xet URL). The
+    cache identity is ``etag`` (content-addressed for LFS/Xet files).
+    """
+    response_headers: Dict[str, str] = {}
     range_header = request_headers.get("range")
     _, all_ranges, _ = get_request_ranges(file_size, range_header)
     response_headers["accept-ranges"] = "bytes"
-    # Commit info
     if commit is not None:
         response_headers[HUGGINGFACE_HEADER_X_REPO_COMMIT.lower()] = commit
     response_headers["etag"] = etag
-    
+
     if etag is None:
-        return await error_result(error_proxy_timeout())
+        return ProxyResult(
+            status_code=504,
+            headers={"x-error-message": "Proxy Timeout"},
+            body=single_chunk_body(b""),
+        )
 
     if range_header is None:
         status_code = 200
@@ -690,6 +1050,11 @@ async def _file_realtime_stream(
             _multipart_content_length(boundary, all_ranges, file_size)
         )
 
+    # Identity passed to the cache for online revalidation. Offline trusts the
+    # disk (None) so a transient upstream-derived pseudo-etag never destroys a
+    # good cache while offline.
+    cache_expected_etag = None if app.state.app_settings.config.offline else etag
+
     async def body_iter() -> AsyncIterator[bytes]:
         async with httpx.AsyncClient() as client:
             if method.lower() == "get":
@@ -697,26 +1062,26 @@ async def _file_realtime_stream(
                     async for each_chunk in _stream_single_range(
                         app=app,
                         save_path=save_path,
-                        head_path=head_path,
                         client=client,
                         method=method,
-                        url=hf_url,
+                        url=upstream_url,
                         headers=request_headers,
                         allow_cache=allow_cache,
                         file_size=file_size,
+                        expected_etag=cache_expected_etag,
                     ):
                         yield each_chunk
                 elif len(all_ranges) == 1:
                     async for each_chunk in _stream_single_range(
                         app=app,
                         save_path=save_path,
-                        head_path=head_path,
                         client=client,
                         method=method,
-                        url=hf_url,
+                        url=upstream_url,
                         headers=request_headers,
                         allow_cache=allow_cache,
                         file_size=file_size,
+                        expected_etag=cache_expected_etag,
                         requested_range=all_ranges[0],
                     ):
                         yield each_chunk
@@ -726,13 +1091,13 @@ async def _file_realtime_stream(
                         async for each_chunk in _stream_single_range(
                             app=app,
                             save_path=save_path,
-                            head_path=head_path,
                             client=client,
                             method=method,
-                            url=hf_url,
+                            url=upstream_url,
                             headers=request_headers,
                             allow_cache=allow_cache,
                             file_size=file_size,
+                            expected_etag=cache_expected_etag,
                             requested_range=(start_pos, end_pos),
                         ):
                             yield each_chunk
@@ -742,10 +1107,9 @@ async def _file_realtime_stream(
                 async for each_chunk in _file_chunk_head(
                     app=app,
                     save_path=save_path,
-                    head_path=head_path,
                     client=client,
                     method=method,
-                    url=hf_url,
+                    url=upstream_url,
                     headers=request_headers,
                     allow_cache=allow_cache,
                     file_size=0,
@@ -770,16 +1134,11 @@ async def file_get_generator(
     org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.state.app_settings.config.repos_path
-    head_path = os.path.join(
-        repos_path, f"heads/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
-    )
     save_path = os.path.join(
         repos_path, f"files/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
     )
-    make_dirs(head_path)
     make_dirs(save_path)
 
-    # use_cache = os.path.exists(head_path) and os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
 
     # proxy
@@ -800,7 +1159,6 @@ async def file_get_generator(
         repo=repo,
         file_path=file_path,
         save_path=save_path,
-        head_path=head_path,
         url=url,
         request=request,
         method=method,
@@ -824,29 +1182,16 @@ async def cdn_file_get_generator(
     org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.state.app_settings.config.repos_path
-    head_path = os.path.join(
-        repos_path, f"heads/{repo_type}/{org_repo}/cdn/{file_hash}"
-    )
     save_path = os.path.join(
         repos_path, f"files/{repo_type}/{org_repo}/cdn/{file_hash}"
     )
-    make_dirs(head_path)
     make_dirs(save_path)
 
-    # use_cache = os.path.exists(head_path) and os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
-
-    # proxy
-    # request_url = urlparse(str(request.url))
-    # if request_url.netloc == app.state.app_settings.config.hf_lfs_netloc:
-    #     redirected_url = urljoin(app.state.app_settings.config.mirror_lfs_url_base(), get_url_tail(request_url))
-    # else:
-    #     redirected_url = urljoin(app.state.app_settings.config.mirror_url_base(), get_url_tail(request_url))
 
     return await _file_realtime_stream(
         app=app,
         save_path=save_path,
-        head_path=head_path,
         url=str(request.url),
         request=request,
         method=method,

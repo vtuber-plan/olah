@@ -1,3 +1,4 @@
+import os
 import sys
 import types
 from types import SimpleNamespace
@@ -103,6 +104,25 @@ async def test_ensure_repo_visibility_checks_upstream_visibility_with_auth(monke
     assert captured["call"] == ("models", "team", "demo", None, "Bearer secret")
 
 
+@pytest.mark.asyncio
+async def test_ensure_repo_visibility_returns_proxy_timeout_when_upstream_unreachable(monkeypatch):
+    repo = server_access.build_repo_ref("models", "team", "demo")
+
+    async def fake_check_proxy_rules_hf(*args, **kwargs):
+        return True
+
+    async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        return None
+
+    monkeypatch.setattr(server_access, "check_proxy_rules_hf", fake_check_proxy_rules_hf)
+    monkeypatch.setattr(server_access, "check_commit_hf", fake_check_commit_hf)
+
+    unreachable = await server_access.ensure_repo_visibility(_make_app(), repo, None)
+
+    assert unreachable.status_code == 504
+    assert unreachable.headers["x-error-code"] == "ProxyTimeout"
+
+
 def test_parse_repo_helpers_cover_compact_and_default_model_routes():
     parsed = server_access.parse_repo_ref("datasets", "team/demo")
     assert parsed == server_access.RepoRef(repo_type="datasets", org="team", repo="demo")
@@ -192,6 +212,48 @@ async def test_resolve_requested_commit_skips_duplicate_repo_check_after_visibil
     assert error is None
     assert resolved == server_upstream.ResolvedCommit(requested="main", resolved="abc123")
     assert calls == ["main"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_requested_commit_returns_proxy_timeout_when_upstream_unreachable(monkeypatch):
+    app = _make_app()
+    repo = server_access.build_repo_ref("models", "team", "demo")
+
+    async def unreachable_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        return None
+
+    monkeypatch.setattr(server_upstream, "check_commit_hf", unreachable_check_commit_hf)
+    monkeypatch.setattr(server_upstream, "get_commit_hf", pytest.fail)
+
+    _, error = await server_upstream.resolve_requested_commit(
+        app,
+        repo,
+        "main",
+        None,
+        missing_commit_response="repo_not_found",
+    )
+    assert error.status_code == 504
+    assert error.headers["x-error-code"] == "ProxyTimeout"
+
+
+@pytest.mark.asyncio
+async def test_resolve_requested_commit_returns_proxy_timeout_when_commit_lookup_fails(monkeypatch):
+    app = _make_app()
+    repo = server_access.build_repo_ref("models", "team", "demo")
+
+    async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        return True
+
+    async def failing_get_commit_hf(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server_upstream, "check_commit_hf", fake_check_commit_hf)
+    monkeypatch.setattr(server_upstream, "get_commit_hf", failing_get_commit_hf)
+
+    _, error = await server_upstream.resolve_requested_commit(app, repo, "main", None)
+
+    assert error.status_code == 504
+    assert error.headers["x-error-code"] == "ProxyTimeout"
 
 
 @pytest.mark.asyncio
@@ -288,6 +350,8 @@ def test_run_server_uses_initialized_app_instance(monkeypatch):
 
     server_module = importlib.import_module("olah.server")
     calls = {}
+    # No `workers` attribute on purpose: programmatic callers / older namespaces
+    # must fall back to the single-process branch, not crash.
     args = SimpleNamespace(host="127.0.0.1", port=8090, ssl_key=None, ssl_cert=None)
     server_module.app.state.app_settings = server_module.AppSettings()
 
@@ -303,6 +367,55 @@ def test_run_server_uses_initialized_app_instance(monkeypatch):
     assert hasattr(calls["app"].state, "app_settings")
     assert calls["kwargs"]["host"] == "127.0.0.1"
     assert calls["kwargs"]["port"] == 8090
+    assert "workers" not in calls["kwargs"]  # single-process: app object, no workers kwarg
+
+
+def test_run_server_multi_worker_requires_config(monkeypatch):
+    import importlib
+
+    server_module = importlib.import_module("olah.server")
+    args = SimpleNamespace(
+        host="127.0.0.1", port=8090, ssl_key=None, ssl_cert=None,
+        workers=4, config="", log_path="./logs",
+    )
+
+    with pytest.raises(ValueError, match="requires --config"):
+        server_module.run_server(args)
+
+
+def test_run_server_multi_worker_imports_app_and_sets_env(monkeypatch):
+    import importlib
+
+    server_module = importlib.import_module("olah.server")
+    calls = {}
+    args = SimpleNamespace(
+        host="127.0.0.1", port=8090, ssl_key=None, ssl_cert=None,
+        workers=4, config="/tmp/olah-test.toml", log_path="./test-logs",
+    )
+    env_before = {k: os.environ.get(k) for k in ("OLAH_CONFIG", "OLAH_LOG_PATH")}
+    monkeypatch.delenv("OLAH_CONFIG", raising=False)
+    monkeypatch.delenv("OLAH_LOG_PATH", raising=False)
+
+    def fake_run(app, **kwargs):
+        calls["app"] = app
+        calls["kwargs"] = kwargs
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+
+    try:
+        server_module.run_server(args)
+
+        # Multi-worker mode runs the import string, not the in-process app.
+        assert calls["app"] == "olah.server:app"
+        assert calls["kwargs"]["workers"] == 4
+        assert os.environ["OLAH_CONFIG"] == "/tmp/olah-test.toml"
+        assert os.environ["OLAH_LOG_PATH"] == "./test-logs"
+    finally:
+        for key, value in env_before.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_build_logger_redirects_stdout_and_stderr_only_once(tmp_path):
