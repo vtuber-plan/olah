@@ -11,6 +11,9 @@ import datetime
 
 from olah.utils.olah_utils import get_olah_path
 
+# The olah home dir (~/.olah) may not exist yet on a fresh install; peewee
+# will not create the parent directory itself.
+os.makedirs(get_olah_path(), exist_ok=True)
 db_path = os.path.join(get_olah_path(), "database.db")
 db = SqliteDatabase(db_path)
 
