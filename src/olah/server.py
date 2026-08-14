@@ -6,14 +6,14 @@
 # https://opensource.org/licenses/MIT.
 
 import argparse
-import datetime
 import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Sequence, Tuple, Union
+from typing import Sequence, Union
 
 import httpx
+import fastapi.concurrency
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 from fastapi_utils.tasks import repeat_every
@@ -35,10 +35,7 @@ from olah.server_routes import (
 from olah.utils.disk_utils import (
     convert_bytes_to_human_readable,
     convert_to_bytes,
-    get_folder_size,
-    sort_files_by_access_time,
-    sort_files_by_modify_time,
-    sort_files_by_size,
+    evict_cache_to_limit,
 )
 from olah.utils.logging import build_logger
 
@@ -115,40 +112,21 @@ async def check_disk_usage() -> None:
         return
 
     limit_size = app.state.app_settings.config.cache_size_limit
-    current_size = get_folder_size(app.state.app_settings.config.repos_path)
+    strategy = app.state.app_settings.config.cache_clean_strategy
+    repos_path = app.state.app_settings.config.repos_path
 
-    limit_size_h = convert_bytes_to_human_readable(limit_size)
-    current_size_h = convert_bytes_to_human_readable(current_size)
-
-    if current_size < limit_size:
-        return
-    print(f"Cache size exceeded! Limit: {limit_size_h}, Current: {current_size_h}.")
-    print("Cleaning...")
-    files_path = os.path.join(app.state.app_settings.config.repos_path, "files")
-    lfs_path = os.path.join(app.state.app_settings.config.repos_path, "lfs")
-
-    files: Sequence[Tuple[str, Union[int, datetime.datetime]]] = []
-    if app.state.app_settings.config.cache_clean_strategy == "LRU":
-        files = sort_files_by_access_time(files_path) + sort_files_by_access_time(lfs_path)
-        files = sorted(files, key=lambda x: x[1])
-    elif app.state.app_settings.config.cache_clean_strategy == "FIFO":
-        files = sort_files_by_modify_time(files_path) + sort_files_by_modify_time(lfs_path)
-        files = sorted(files, key=lambda x: x[1])
-    elif app.state.app_settings.config.cache_clean_strategy == "LARGE_FIRST":
-        files = sort_files_by_size(files_path) + sort_files_by_size(lfs_path)
-        files = sorted(files, key=lambda x: x[1], reverse=True)
-
-    for filepath, _ in files:
-        if current_size < limit_size:
-            break
-        filesize = os.path.getsize(filepath)
-        os.remove(filepath)
-        current_size -= filesize
-        print(f"Remove file: {filepath}. File Size: {convert_bytes_to_human_readable(filesize)}")
-
-    current_size = get_folder_size(app.state.app_settings.config.repos_path)
-    current_size_h = convert_bytes_to_human_readable(current_size)
-    print(f"Cleaning finished. Limit: {limit_size_h}, Current: {current_size_h}.")
+    # The whole scan + evict is synchronous (os.walk + shutil.rmtree); run it off
+    # the event loop so a TB-scale cache tree doesn't stall request handling. The
+    # collector does ONE walk for both total size and eviction candidates, evicts
+    # whole cache entries (never individual block files), and skips any entry
+    # whose meta.lock is held (in active open/create/resize).
+    after_size = await fastapi.concurrency.run_in_threadpool(
+        evict_cache_to_limit, repos_path, limit_size, strategy
+    )
+    print(
+        f"Cache cleanup: Limit={convert_bytes_to_human_readable(limit_size)}, "
+        f"Current={convert_bytes_to_human_readable(after_size)}, Strategy={strategy}."
+    )
 
 
 @asynccontextmanager

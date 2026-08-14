@@ -1,4 +1,5 @@
 import importlib
+import importlib.util
 import gzip
 import json
 import sys
@@ -14,7 +15,12 @@ from olah.proxy.result import ProxyResult, single_chunk_body
 
 def _load_proxy_files_module():
     sys.modules.pop("olah.proxy.files", None)
-    if "portalocker" not in sys.modules:
+    # Only inject the no-op stub when portalocker genuinely isn't installed
+    # (e.g. the base conda env). In envs with real portalocker (olah-e2e) we use
+    # the real thing -- never poison sys.modules globally with the stub, or it
+    # leaks into sibling test modules (e.g. test_concurrency) that need real
+    # fcntl.flock mutual exclusion.
+    if importlib.util.find_spec("portalocker") is None:
         portalocker_stub = types.ModuleType("portalocker")
 
         class _Lock:
@@ -112,6 +118,10 @@ def test_get_contiguous_ranges_splits_cached_and_remote_segments():
         def has_block(self, idx):
             return idx == 1
 
+        # get_contiguous_ranges consults the bitmap-backed method; mirror has_block.
+        def is_block_cached(self, idx):
+            return idx == 1
+
     assert proxy_files.get_contiguous_ranges(FakeCache(), 0, 12) == [
         ((0, 4), True),
         ((4, 8), False),
@@ -137,7 +147,6 @@ async def test_file_realtime_stream_returns_invalid_data_error_on_bad_pathsinfo(
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="http://localhost/file.bin",
         request=_make_request(),
         method="GET",
@@ -170,7 +179,6 @@ async def test_file_realtime_stream_handles_empty_and_ambiguous_pathsinfo(monkey
             repo="demo",
             file_path="file.bin",
             save_path=str(tmp_path / "save"),
-            head_path=str(tmp_path / "head"),
             url="http://localhost/file.bin",
             request=_make_request(),
             method="GET",
@@ -231,7 +239,6 @@ async def test_file_realtime_stream_builds_headers_and_streams_get_chunks(monkey
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/file.bin?download=1",
         request=_make_request("GET", headers={"range": "bytes=2-5", "authorization": "Bearer t", "host": "mirror.example"}),
         method="GET",
@@ -279,7 +286,6 @@ async def test_file_realtime_stream_uses_head_stream_for_head_requests(monkeypat
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://huggingface.co/team/demo/resolve/main/file.bin",
         request=_make_request("HEAD"),
         method="HEAD",
@@ -322,7 +328,6 @@ async def test_file_realtime_stream_without_repo_context_uses_remote_metadata(mo
     result = await proxy_files._file_realtime_stream(
         app=_make_app(tmp_path),
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/team/demo/hash.bin",
         request=_make_request("GET", headers={"authorization": "Bearer t", "host": "mirror.example"}),
         method="GET",
@@ -349,7 +354,6 @@ async def test_file_realtime_stream_returns_proxy_timeout_when_metadata_lookup_f
     result = await proxy_files._file_realtime_stream(
         app=_make_app(tmp_path),
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/team/demo/hash.bin",
         request=_make_request("GET", headers={"host": "mirror.example"}),
         method="GET",
@@ -454,7 +458,6 @@ async def test_file_realtime_stream_builds_multipart_response_for_multiple_range
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/file.bin",
         request=_make_request("GET", headers={"range": "bytes=0-1,4-5", "host": "mirror.example"}),
         method="GET",
@@ -505,7 +508,6 @@ async def test_file_realtime_stream_rejects_unsatisfiable_ranges(monkeypatch, tm
         repo="demo",
         file_path="file.bin",
         save_path=str(tmp_path / "save"),
-        head_path=str(tmp_path / "head"),
         url="https://mirror.example/file.bin",
         request=_make_request("GET", headers={"range": "bytes=5-9", "host": "mirror.example"}),
         method="GET",
@@ -722,7 +724,6 @@ async def test_file_chunk_get_persists_single_block_files(tmp_path):
         async for chunk in proxy_files._file_chunk_get(
             app=_make_app(tmp_path),
             save_path=str(save_path),
-            head_path=str(tmp_path / "head"),
             client=FakeClient(),
             method="GET",
             url="https://huggingface.co/team/demo/resolve/main/tiny.json",
@@ -762,7 +763,7 @@ async def test_file_chunk_get_streams_from_cache_without_touching_upstream(tmp_p
         def stream(self, **kwargs):
             raise AssertionError("cache hit must not reach upstream")
 
-    common = dict(app=_make_app(tmp_path), save_path=str(save_path), head_path=str(tmp_path / "head"),
+    common = dict(app=_make_app(tmp_path), save_path=str(save_path), 
                   client=FailClient(), method="GET", url="https://x/team/demo/resolve/main/blob.bin",
                   allow_cache=True, file_size=len(payload))
 

@@ -72,9 +72,10 @@ def _load_meta_head_object(file_path: str) -> Optional[Dict]:
 
     * a plain mirror ``RepoMeta`` document (``{"sha": ..., "lastModified": ...}``)
     * a proxy HTTP cache envelope written by ``write_cache_request``
-      (``{"status_code", "headers", "content": "<hex>"}``), whose ``content``
-      holds the (possibly gzip-compressed) revision API payload. HEAD caches
-      carry an empty body and therefore contribute no revision info.
+      (``{"status_code", "headers"}`` with the body in a sibling ``.body``
+      sidecar; legacy envelopes also accepted with the body inline as hex
+      ``content``). HEAD caches carry an empty body and therefore contribute no
+      revision info.
 
     Returns the inner revision object, or ``None`` if the file cannot be parsed
     as revision metadata.
@@ -85,13 +86,20 @@ def _load_meta_head_object(file_path: str) -> Optional[Dict]:
     except (OSError, ValueError):
         return None
 
-    if isinstance(raw, dict) and "content" in raw and "status_code" in raw:
-        # Proxy cache envelope: unwrap and decode the real payload.
+    body_path = file_path + ".body"
+    is_envelope = isinstance(raw, dict) and (
+        "status_code" in raw or os.path.exists(body_path)
+    )
+    if is_envelope:
+        # Proxy cache envelope written by write_cache_request: the body lives in
+        # a sibling .body sidecar (new) or inline as hex (legacy).
         try:
-            request_cache = {
-                "content": bytes.fromhex(raw["content"]),
-                "headers": raw.get("headers", {}),
-            }
+            if os.path.exists(body_path):
+                with open(body_path, "rb") as bf:
+                    content = bf.read()
+            else:
+                content = bytes.fromhex(raw.get("content", ""))
+            request_cache = {"content": content, "headers": raw.get("headers", {})}
             return _load_cached_json_payload(request_cache)
         except (ValueError, OSError, EOFError, zlib.error):
             return None

@@ -24,13 +24,9 @@ async def lfs_head_generator(
 ):
     # save
     repos_path = app.state.app_settings.config.repos_path
-    head_path = os.path.join(
-        repos_path, f"lfs/heads/{dir1}/{dir2}/{hash_repo}/{hash_file}"
-    )
     save_path = os.path.join(
         repos_path, f"lfs/files/{dir1}/{dir2}/{hash_repo}/{hash_file}"
     )
-    make_dirs(head_path)
     make_dirs(save_path)
 
     # LFS objects are content-addressed: hash_file IS the SHA-256 of the blob, so
@@ -40,7 +36,6 @@ async def lfs_head_generator(
     return await _file_realtime_stream(
         app=app,
         save_path=save_path,
-        head_path=head_path,
         url=str(request.url),
         request=request,
         method="HEAD",
@@ -61,19 +56,14 @@ async def lfs_get_generator(
 ):
     # save
     repos_path = app.state.app_settings.config.repos_path
-    head_path = os.path.join(
-        repos_path, f"lfs/heads/{dir1}/{dir2}/{hash_repo}/{hash_file}"
-    )
     save_path = os.path.join(
         repos_path, f"lfs/files/{dir1}/{dir2}/{hash_repo}/{hash_file}"
     )
-    make_dirs(head_path)
     make_dirs(save_path)
 
     return await _file_realtime_stream(
         app=app,
         save_path=save_path,
-        head_path=head_path,
         url=str(request.url),
         request=request,
         method="GET",

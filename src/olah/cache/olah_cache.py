@@ -35,7 +35,6 @@ Design notes
 
 import lzma
 import os
-import string
 import struct
 import threading
 import zlib
@@ -43,6 +42,8 @@ from typing import AsyncIterator, BinaryIO, Dict, List, Optional, Union
 
 import fastapi.concurrency
 import portalocker
+
+from olah.cache.bitset import Bitset
 
 CURRENT_OLAH_CACHE_VERSION = 10
 
@@ -347,7 +348,12 @@ class OlahCache(object):
         self._meta_lock_path = os.path.join(path, "meta.lock")
         self._crc_path = os.path.join(path, "chunks.crc")
         self._blocks_dir = os.path.join(path, "blocks")
-        self._data_path = os.path.join(self._blocks_dir, "block_${block_index}.bin")
+
+        # In-memory presence bitmap (revives cache/bitset.py). Built once per
+        # open() from a single blocks/ scan so bulk iterators (is_fully_cached,
+        # get_contiguous_ranges) avoid stat-ing every block. has_block() stays
+        # disk-authoritative for single-block decisions.
+        self._present: Optional[Bitset] = None
 
         self.open(
             path,
@@ -455,6 +461,8 @@ class OlahCache(object):
                     self._resize_crc_file()
 
         self.is_open = True
+        self._build_present_map()
+        self._touch_access()
 
     def _ensure_meta_lock(self) -> None:
         """Create the sidecar meta.lock if absent. Used only as a lock target.
@@ -467,6 +475,19 @@ class OlahCache(object):
         with open(self._meta_lock_path, "a+"):
             pass
         self._fsync_dir(self.path)
+
+    def _touch_access(self) -> None:
+        """Bump meta.lock mtime as a reliable last-access marker for LRU eviction.
+
+        FS atime is unreliable under noatime/relatime, and the old code touched
+        the wrong inode anyway (a directory, not the block files). mtime is always
+        maintained by the FS and meta.lock is never content-read, so its mtime is
+        an unambiguous per-entry access signal that eviction sorts on.
+        """
+        try:
+            os.utime(self._meta_lock_path, None)
+        except OSError:
+            pass
 
     def close(self):
         if not self.is_open:
@@ -508,6 +529,9 @@ class OlahCache(object):
         """
         if self.path is None:
             return
+        # The bitmap is stale once blocks/ is cleared; open() rebuilds it after
+        # recreation.
+        self._present = None
         for p in (self._meta_path, self._crc_path):
             try:
                 os.remove(p)
@@ -575,29 +599,84 @@ class OlahCache(object):
             self._resize_header(file_size)
             self._flush_header()
             self._resize_crc_file()
+        # file_size (and thus block count) changed; rebuild the presence bitmap.
+        self._build_present_map()
 
     # --- block presence ----------------------------------------------------
 
     def has_block(self, block_index: int) -> bool:
+        """Disk-authoritative presence check (exists + non-zero size).
+
+        Used for single-block decisions where cross-process correctness matters
+        (read pre-check, single-flight double-check). Bulk iterators should use
+        is_block_cached(), which consults the in-memory bitmap.
+        """
         block_path = self.get_block_path(block_index)
         return os.path.exists(block_path) and os.path.getsize(block_path) > 0
+
+    def is_block_cached(self, block_index: int) -> bool:
+        """Bitmap-backed O(1) presence check for bulk iteration.
+
+        Best-effort: reflects blocks/ at open() time plus this instance's own
+        writes/invalidations. A stale miss only ever costs a redundant
+        single-flight download (has_block still gates reads/writes), never
+        corruption. Falls back to has_block if the bitmap is unavailable.
+        """
+        if self._present is None:
+            return self.has_block(block_index)
+        try:
+            return self._present.test(block_index)
+        except IndexError:
+            return False
 
     def is_fully_cached(self) -> bool:
         """True if every block of the file is present on disk.
 
-        Used to decide whether a request can be served from the cache alone
-        (no upstream re-resolve / fetch). A zero-size file is treated as NOT
-        fully cached so callers fall through to the resolve path.
+        Uses the in-memory bitmap when available (one scandir at open, not a stat
+        per block). A zero-size file is treated as NOT fully cached so callers
+        fall through to the resolve path.
         """
         if self.header is None:
             return False
         n = self._get_block_number()
         if n == 0:
             return False
+        if self._present is not None:
+            return all(self._present.test(b) for b in range(n))
         return all(self.has_block(b) for b in range(n))
 
+    def _build_present_map(self) -> None:
+        """Populate ``self._present`` from a single blocks/ scan.
+
+        Turns the bulk-iterator hot path (is_fully_cached / get_contiguous_ranges
+        over thousands of blocks) from one stat per block into one scandir.
+        Re-called after resize, since file_size changes the block count.
+        """
+        if self.header is None:
+            self._present = None
+            return
+        n = self.header.block_number
+        bs = Bitset(n if n > 0 else 1)
+        try:
+            with os.scandir(self._blocks_dir) as it:
+                for entry in it:
+                    if not entry.is_file():
+                        continue
+                    name = entry.name
+                    if not (name.startswith("block_") and name.endswith(".bin")):
+                        continue
+                    idx_str = name[len("block_"):-len(".bin")]
+                    if not idx_str.isdigit():
+                        continue
+                    idx = int(idx_str)
+                    if 0 <= idx < n:
+                        bs.set(idx)
+        except FileNotFoundError:
+            pass
+        self._present = bs
+
     def get_block_path(self, block_index: int) -> str:
-        return string.Template(self._data_path).substitute(block_index=f"{block_index:0>8}")
+        return os.path.join(self._blocks_dir, f"block_{block_index:0>8}.bin")
 
     # --- chunks.crc --------------------------------------------------------
 
@@ -735,7 +814,14 @@ class OlahCache(object):
                     os.remove(tmp_path)
                 except OSError:
                     pass
-        # Block presence is tracked by file existence; no header field changed.
+        # Block presence is tracked by file existence; mirror it in the bitmap so
+        # bulk iterators (is_fully_cached / get_contiguous_ranges) stay in sync.
+        with self._header_lock:
+            if self._present is not None:
+                try:
+                    self._present.set(block_index)
+                except IndexError:
+                    pass
 
     @staticmethod
     def _fsync_dir(dir_path: str) -> None:
@@ -780,7 +866,19 @@ class OlahCache(object):
                 payload = payload + b"\x00" * (bs - len(payload))
             return payload
 
-        return await fastapi.concurrency.run_in_threadpool(read_and_verify)
+        try:
+            return await fastapi.concurrency.run_in_threadpool(read_and_verify)
+        except FileNotFoundError:
+            # Block was evicted between has_block() and the open. Treat as a miss
+            # (clear the stale bitmap bit) so the caller re-fetches instead of
+            # surfacing an opaque 500.
+            with self._header_lock:
+                if self._present is not None:
+                    try:
+                        self._present.clear(block_index)
+                    except IndexError:
+                        pass
+            return None
 
     def _decompress_block(self, fh: BinaryIO, algo: int, real_len: int) -> bytes:
         raw = fh.read()
@@ -829,6 +927,12 @@ class OlahCache(object):
                 os.fsync(f.fileno())
         except FileNotFoundError:
             pass
+        with self._header_lock:
+            if self._present is not None:
+                try:
+                    self._present.clear(block_index)
+                except IndexError:
+                    pass
 
     async def stream_range(self, start_pos: int, end_pos: int) -> AsyncIterator[bytes]:
         """Yield verified ~chunk-size pieces for [start_pos, end_pos).
@@ -851,7 +955,11 @@ class OlahCache(object):
 
         for cur_block in range(start_block, end_block + 1):
             if not self.has_block(cur_block):
-                raise Exception("Unknown exception: read block which has not been cached.")
+                # Block vanished (e.g. whole-entry eviction) between the coverage
+                # check and now. Drop it and surface a typed error the caller can
+                # recover from (re-fetch from upstream) instead of an opaque 500.
+                await self._invalidate_block(cur_block)
+                raise CacheIntegrityError(f"Block {cur_block} is not available.")
             try:
                 async for piece in self._stream_block_range(cur_block, start_pos, end_pos):
                     if piece:
@@ -859,6 +967,10 @@ class OlahCache(object):
             except CacheIntegrityError:
                 await self._invalidate_block(cur_block)
                 raise
+            except FileNotFoundError:
+                # Block file removed mid-read (eviction). Same recovery path.
+                await self._invalidate_block(cur_block)
+                raise CacheIntegrityError(f"Block {cur_block} vanished mid-read.")
 
     async def _stream_block_range(
         self, block_index: int, range_start: int, range_end: int
