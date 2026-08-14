@@ -103,6 +103,25 @@ async def test_ensure_repo_visibility_checks_upstream_visibility_with_auth(monke
     assert captured["call"] == ("models", "team", "demo", None, "Bearer secret")
 
 
+@pytest.mark.asyncio
+async def test_ensure_repo_visibility_returns_proxy_timeout_when_upstream_unreachable(monkeypatch):
+    repo = server_access.build_repo_ref("models", "team", "demo")
+
+    async def fake_check_proxy_rules_hf(*args, **kwargs):
+        return True
+
+    async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        return None
+
+    monkeypatch.setattr(server_access, "check_proxy_rules_hf", fake_check_proxy_rules_hf)
+    monkeypatch.setattr(server_access, "check_commit_hf", fake_check_commit_hf)
+
+    unreachable = await server_access.ensure_repo_visibility(_make_app(), repo, None)
+
+    assert unreachable.status_code == 504
+    assert unreachable.headers["x-error-code"] == "ProxyTimeout"
+
+
 def test_parse_repo_helpers_cover_compact_and_default_model_routes():
     parsed = server_access.parse_repo_ref("datasets", "team/demo")
     assert parsed == server_access.RepoRef(repo_type="datasets", org="team", repo="demo")
@@ -192,6 +211,48 @@ async def test_resolve_requested_commit_skips_duplicate_repo_check_after_visibil
     assert error is None
     assert resolved == server_upstream.ResolvedCommit(requested="main", resolved="abc123")
     assert calls == ["main"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_requested_commit_returns_proxy_timeout_when_upstream_unreachable(monkeypatch):
+    app = _make_app()
+    repo = server_access.build_repo_ref("models", "team", "demo")
+
+    async def unreachable_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        return None
+
+    monkeypatch.setattr(server_upstream, "check_commit_hf", unreachable_check_commit_hf)
+    monkeypatch.setattr(server_upstream, "get_commit_hf", pytest.fail)
+
+    _, error = await server_upstream.resolve_requested_commit(
+        app,
+        repo,
+        "main",
+        None,
+        missing_commit_response="repo_not_found",
+    )
+    assert error.status_code == 504
+    assert error.headers["x-error-code"] == "ProxyTimeout"
+
+
+@pytest.mark.asyncio
+async def test_resolve_requested_commit_returns_proxy_timeout_when_commit_lookup_fails(monkeypatch):
+    app = _make_app()
+    repo = server_access.build_repo_ref("models", "team", "demo")
+
+    async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        return True
+
+    async def failing_get_commit_hf(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server_upstream, "check_commit_hf", fake_check_commit_hf)
+    monkeypatch.setattr(server_upstream, "get_commit_hf", failing_get_commit_hf)
+
+    _, error = await server_upstream.resolve_requested_commit(app, repo, "main", None)
+
+    assert error.status_code == 504
+    assert error.headers["x-error-code"] == "ProxyTimeout"
 
 
 @pytest.mark.asyncio

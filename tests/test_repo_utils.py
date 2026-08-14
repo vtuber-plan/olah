@@ -245,8 +245,10 @@ def test_get_newest_commit_hf_falls_back_to_offline_on_connect_error(monkeypatch
     assert commit == "offline-sha"
 
 
-def test_check_commit_hf_returns_false_when_upstream_request_fails(monkeypatch, tmp_path):
-    app = _make_app(tmp_path, offline=False)
+def _make_fake_client(monkeypatch, *, status_code=None, error=None, calls=None):
+    class FakeResponse:
+        def __init__(self):
+            self.status_code = status_code
 
     class FakeAsyncClient:
         async def __aenter__(self):
@@ -256,10 +258,40 @@ def test_check_commit_hf_returns_false_when_upstream_request_fails(monkeypatch, 
             return False
 
         async def request(self, *args, **kwargs):
-            raise httpx.ConnectError("offline")
+            if calls is not None:
+                calls.append(kwargs.get("url") or args)
+            if error is not None:
+                raise error
+            return FakeResponse()
 
     monkeypatch.setattr(repo_utils.httpx, "AsyncClient", FakeAsyncClient)
 
+
+def test_check_commit_hf_returns_none_and_retries_when_upstream_unreachable(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    calls = []
+    _make_fake_client(monkeypatch, error=httpx.ConnectError("offline"), calls=calls)
+
     ok = asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo", commit="main"))
 
-    assert ok is False
+    assert ok is None
+    assert len(calls) == 3
+
+
+def test_check_commit_hf_returns_none_on_upstream_server_error(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    _make_fake_client(monkeypatch, status_code=503)
+
+    ok = asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo", commit="main"))
+
+    assert ok is None
+
+
+def test_check_commit_hf_distinguishes_upstream_yes_and_no(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+
+    _make_fake_client(monkeypatch, status_code=200)
+    assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is True
+
+    _make_fake_client(monkeypatch, status_code=401)
+    assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is False
