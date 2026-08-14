@@ -123,9 +123,7 @@ async def xet_get_generator(
 
     repos_path = app.state.app_settings.config.repos_path
     save_path = os.path.join(repos_path, "lfs", "files", "xet", xet_hash)
-    head_path = os.path.join(repos_path, "lfs", "heads", "xet", xet_hash)
     make_dirs(save_path)
-    make_dirs(head_path)
 
     request_headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
     # The signed CDN URL is self-authorizing; drop the bearer token so the CDN
@@ -150,7 +148,6 @@ async def xet_get_generator(
             return await _build_file_response(
                 app=app,
                 save_path=save_path,
-                head_path=head_path,
                 request_headers=request_headers,
                 method=method,
                 upstream_url=None,
@@ -176,7 +173,6 @@ async def xet_get_generator(
     return await _build_file_response(
         app=app,
         save_path=save_path,
-        head_path=head_path,
         request_headers=request_headers,
         method=method,
         upstream_url=signed_url,

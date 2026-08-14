@@ -66,7 +66,6 @@ def test_file_realtime_stream_handles_zero_length_head(monkeypatch, tmp_path):
             repo="NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
             file_path="__init__.py",
             save_path=str(tmp_path / "save"),
-            head_path=str(tmp_path / "head"),
             url="http://127.0.0.1:18090/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8/resolve/main/__init__.py",
             request=_make_request("HEAD"),
             method="HEAD",

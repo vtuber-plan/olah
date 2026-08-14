@@ -36,7 +36,6 @@ from olah.cache.olah_cache import (
 from olah.errors import error_entry_not_found, error_proxy_invalid_data, error_proxy_timeout
 from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.utils.cache_utils import read_cache_request, write_cache_request
-from olah.utils.disk_utils import touch_file_access_time
 from olah.utils.url_utils import (
     RemoteInfo,
     add_query_param,
@@ -77,7 +76,7 @@ def get_contiguous_ranges(
     end_block = (end_pos - 1) // cache_file._get_block_size()
 
     range_start_pos = start_pos
-    range_is_remote = not cache_file.has_block(start_block)
+    range_is_remote = not cache_file.is_block_cached(start_block)
     cur_pos = start_pos
     # Get contiguous ranges: (range_start_pos, range_end_pos), is_remote
     ranges_and_cache_list: List[Tuple[Tuple[int, int], bool]] = []
@@ -86,7 +85,7 @@ def get_contiguous_ranges(
             cur_pos, cache_file._get_block_size(), cache_file._get_file_size()
         )
 
-        if cache_file.has_block(cur_block):
+        if cache_file.is_block_cached(cur_block):
             cur_is_remote = False
         else:
             cur_is_remote = True
@@ -312,6 +311,10 @@ async def _read_block_real_payload(
     except CacheIntegrityError:
         await cache_file._invalidate_block(block_index)
         raise
+    if padded is None:
+        # Block was evicted between has_block() and the read. Treat it like a
+        # corrupt block so the caller's single-flight path re-downloads it.
+        raise CacheIntegrityError(f"Block {block_index} vanished before read.")
     return padded[:real_len]
 
 
@@ -372,8 +375,15 @@ async def _fetch_block_single_flight(
                     raw_real if real_len == bs else raw_real + b"\x00" * (bs - real_len)
                 )
                 # _write_block_safely shields the publish so a leader disconnect
-                # still lands the block (followers depend on it).
-                await _write_block_safely(cache_file, block_index, raw_block, allow_cache=True)
+                # still lands the block (followers depend on it). If the entry was
+                # evicted mid-download (hourly cleanup removed blocks/), publishing
+                # is impossible -- treat it as best-effort and still return the
+                # fetched bytes so this client succeeds; a future request recreates
+                # the entry.
+                try:
+                    await _write_block_safely(cache_file, block_index, raw_block, allow_cache=True)
+                except FileNotFoundError:
+                    pass
                 return raw_real
             finally:
                 _release_lock(lock_fh)
@@ -391,10 +401,49 @@ async def _fetch_block_single_flight(
     )
 
 
+async def _yield_range_blocks(
+    *,
+    client: httpx.AsyncClient,
+    remote_info: RemoteInfo,
+    cache_file: OlahCache,
+    range_start_pos: int,
+    range_end_pos: int,
+    resume_pos: int,
+    allow_cache: bool,
+) -> AsyncIterator[bytes]:
+    """Yield the client-requested slice of each block in ``[resume_pos, range_end_pos)``.
+
+    Shared by the cache-MISS path (``resume_pos == range_start_pos``) and by the
+    cache-HIT recovery path (``resume_pos`` == where ``stream_range`` failed). Each
+    block goes through per-block single-flight, so a block evicted mid-response is
+    transparently re-fetched and the client still gets a complete, correct response.
+    """
+    bs = cache_file._get_block_size()
+    fs = cache_file._get_file_size()
+    first_block = resume_pos // bs
+    last_block = (range_end_pos - 1) // bs
+    for blk in range(first_block, last_block + 1):
+        block_start = blk * bs
+        block_end = min((blk + 1) * bs, fs)
+        block_bytes = await _fetch_block_single_flight(
+            client=client,
+            remote_info=remote_info,
+            cache_file=cache_file,
+            block_index=blk,
+            block_start=block_start,
+            block_end=block_end,
+            allow_cache=allow_cache,
+        )
+        lo = max(resume_pos, block_start) - block_start
+        hi = min(range_end_pos, block_end) - block_start
+        piece = block_bytes[lo:hi]
+        if piece:
+            yield piece
+
+
 async def _file_chunk_get(
     app,
     save_path: str,
-    head_path: str,
     client: httpx.AsyncClient,
     method: str,
     url: Optional[str],
@@ -413,7 +462,9 @@ async def _file_chunk_get(
     # to trust the disk. The constructor handles create / reuse / wipe uniformly
     # and sizes chunks.crc for new caches.
     # Opening a cache does mkdirs + advisory locking + (on create) fsync, all of
-    # which would block the event loop -- run it in the threadpool.
+    # which would block the event loop -- run it in the threadpool. Opening also
+    # bumps the entry's meta.lock mtime, which is the LRU access signal eviction
+    # sorts on (see olah.utils.disk_utils.collect_cache_units).
     cache_file = await fastapi.concurrency.run_in_threadpool(
         OlahCache,
         save_path,
@@ -424,8 +475,6 @@ async def _file_chunk_get(
         expected_etag=expected_etag,
     )
 
-    # Refresh access time
-    touch_file_access_time(save_path)
     try:
         _, all_ranges, _ = get_request_ranges(file_size, headers.get("range"))
 
@@ -447,39 +496,26 @@ async def _file_chunk_get(
                         raise Exception(
                             "cache miss in cache-only mode (no upstream URL available)"
                         )
-                    bs = cache_file._get_block_size()
-                    fs = cache_file._get_file_size()
                     remote_info = RemoteInfo(method, url, headers)
-                    first_block = range_start_pos // bs
-                    last_block = (range_end_pos - 1) // bs
-                    for blk in range(first_block, last_block + 1):
-                        block_start = blk * bs
-                        block_end = min((blk + 1) * bs, fs)
-                        block_bytes = await _fetch_block_single_flight(
-                            client=client,
-                            remote_info=remote_info,
-                            cache_file=cache_file,
-                            block_index=blk,
-                            block_start=block_start,
-                            block_end=block_end,
-                            allow_cache=allow_cache,
-                        )
-                        # Yield only the slice of the block the client asked for
-                        # (a range strictly inside one block still fetches the
-                        # whole block, since caching is block-granular).
-                        lo = max(range_start_pos, block_start) - block_start
-                        hi = min(range_end_pos, block_end) - block_start
-                        piece = block_bytes[lo:hi]
-                        if piece:
-                            yield piece
+                    async for piece in _yield_range_blocks(
+                        client=client,
+                        remote_info=remote_info,
+                        cache_file=cache_file,
+                        range_start_pos=range_start_pos,
+                        range_end_pos=range_end_pos,
+                        resume_pos=range_start_pos,
+                        allow_cache=allow_cache,
+                    ):
+                        yield piece
                 else:
                     # Cache hit: blocks are already on disk -- no reassembly, no
                     # cache writes. OlahCache.stream_range serves both uncompressed
                     # (raw seek+read) and compressed (sub-chunk-indexed) blocks in
-                    # ~1MB pieces, verifying each chunk's CRC. A CRC mismatch
-                    # raises CacheIntegrityError (the block is invalidated so the
-                    # next request re-fetches); we let it abort this response
-                    # rather than serve unverified bytes.
+                    # ~1MB pieces, verifying each chunk's CRC. If a block vanishes
+                    # mid-stream (eviction) or fails CRC, stream_range raises
+                    # CacheIntegrityError; we fall back to per-block single-flight
+                    # for the unsent remainder so the client still gets a complete,
+                    # correct response instead of a truncated 500.
                     cur_pos = range_start_pos
                     try:
                         async for piece in cache_file.stream_range(
@@ -489,7 +525,22 @@ async def _file_chunk_get(
                                 yield piece
                                 cur_pos += len(piece)
                     except CacheIntegrityError:
-                        raise
+                        if url is None:
+                            # Cache-only mode cannot re-fetch; let it surface.
+                            raise
+                        remote_info = RemoteInfo(method, url, headers)
+                        async for piece in _yield_range_blocks(
+                            client=client,
+                            remote_info=remote_info,
+                            cache_file=cache_file,
+                            range_start_pos=range_start_pos,
+                            range_end_pos=range_end_pos,
+                            resume_pos=cur_pos,
+                            allow_cache=allow_cache,
+                        ):
+                            if piece:
+                                yield piece
+                                cur_pos += len(piece)
                     if cur_pos != range_end_pos:
                         raise Exception(
                             f"The size of cached range ({range_end_pos - range_start_pos}) is different from sent size ({cur_pos - range_start_pos})."
@@ -501,7 +552,6 @@ async def _file_chunk_get(
 async def _stream_single_range(
     app,
     save_path: str,
-    head_path: str,
     client: httpx.AsyncClient,
     method: str,
     url: Optional[str],
@@ -521,7 +571,6 @@ async def _stream_single_range(
     async for chunk in _file_chunk_get(
         app=app,
         save_path=save_path,
-        head_path=head_path,
         client=client,
         method=method,
         url=url,
@@ -536,7 +585,6 @@ async def _stream_single_range(
 async def _file_chunk_head(
     app,
     save_path: str,
-    head_path: str,
     client: httpx.AsyncClient,
     method: str,
     url: str,
@@ -703,7 +751,6 @@ async def _try_redirect_to_content_route(
 async def _file_realtime_stream(
     app,
     save_path: str,
-    head_path: str,
     url: str,
     request: Request,
     repo_type: Optional[Literal["models", "datasets", "spaces"]] = None,
@@ -832,14 +879,13 @@ async def _file_realtime_stream(
     if expected_etag is not None:
         etag = expected_etag
     return await _build_file_response(
-        app, save_path, head_path, request_headers, method, hf_url, file_size, etag, allow_cache, commit
+        app, save_path, request_headers, method, hf_url, file_size, etag, allow_cache, commit
     )
 
 
 async def _build_file_response(
     app,
     save_path: str,
-    head_path: str,
     request_headers: Dict[str, str],
     method: str,
     upstream_url: Optional[str],
@@ -905,7 +951,6 @@ async def _build_file_response(
                     async for each_chunk in _stream_single_range(
                         app=app,
                         save_path=save_path,
-                        head_path=head_path,
                         client=client,
                         method=method,
                         url=upstream_url,
@@ -919,7 +964,6 @@ async def _build_file_response(
                     async for each_chunk in _stream_single_range(
                         app=app,
                         save_path=save_path,
-                        head_path=head_path,
                         client=client,
                         method=method,
                         url=upstream_url,
@@ -936,7 +980,6 @@ async def _build_file_response(
                         async for each_chunk in _stream_single_range(
                             app=app,
                             save_path=save_path,
-                            head_path=head_path,
                             client=client,
                             method=method,
                             url=upstream_url,
@@ -953,7 +996,6 @@ async def _build_file_response(
                 async for each_chunk in _file_chunk_head(
                     app=app,
                     save_path=save_path,
-                    head_path=head_path,
                     client=client,
                     method=method,
                     url=upstream_url,
@@ -981,16 +1023,11 @@ async def file_get_generator(
     org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.state.app_settings.config.repos_path
-    head_path = os.path.join(
-        repos_path, f"heads/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
-    )
     save_path = os.path.join(
         repos_path, f"files/{repo_type}/{org_repo}/resolve/{commit}/{file_path}"
     )
-    make_dirs(head_path)
     make_dirs(save_path)
 
-    # use_cache = os.path.exists(head_path) and os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
 
     # proxy
@@ -1011,7 +1048,6 @@ async def file_get_generator(
         repo=repo,
         file_path=file_path,
         save_path=save_path,
-        head_path=head_path,
         url=url,
         request=request,
         method=method,
@@ -1035,29 +1071,16 @@ async def cdn_file_get_generator(
     org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.state.app_settings.config.repos_path
-    head_path = os.path.join(
-        repos_path, f"heads/{repo_type}/{org_repo}/cdn/{file_hash}"
-    )
     save_path = os.path.join(
         repos_path, f"files/{repo_type}/{org_repo}/cdn/{file_hash}"
     )
-    make_dirs(head_path)
     make_dirs(save_path)
 
-    # use_cache = os.path.exists(head_path) and os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
-
-    # proxy
-    # request_url = urlparse(str(request.url))
-    # if request_url.netloc == app.state.app_settings.config.hf_lfs_netloc:
-    #     redirected_url = urljoin(app.state.app_settings.config.mirror_lfs_url_base(), get_url_tail(request_url))
-    # else:
-    #     redirected_url = urljoin(app.state.app_settings.config.mirror_url_base(), get_url_tail(request_url))
 
     return await _file_realtime_stream(
         app=app,
         save_path=save_path,
-        head_path=head_path,
         url=str(request.url),
         request=request,
         method=method,
