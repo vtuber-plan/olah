@@ -245,12 +245,15 @@ def test_get_newest_commit_hf_falls_back_to_offline_on_connect_error(monkeypatch
     assert commit == "offline-sha"
 
 
-def _make_fake_client(monkeypatch, *, status_code=None, error=None, calls=None):
+def _make_fake_client(monkeypatch, *, status_code=None, error=None, calls=None, handler=None):
     class FakeResponse:
-        def __init__(self):
-            self.status_code = status_code
+        def __init__(self, code):
+            self.status_code = code
 
     class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
         async def __aenter__(self):
             return self
 
@@ -258,11 +261,14 @@ def _make_fake_client(monkeypatch, *, status_code=None, error=None, calls=None):
             return False
 
         async def request(self, *args, **kwargs):
+            headers = kwargs.get("headers") or {}
             if calls is not None:
-                calls.append(kwargs.get("url") or args)
+                calls.append({"url": kwargs.get("url") or (args[1] if len(args) > 1 else args), "headers": dict(headers)})
             if error is not None:
                 raise error
-            return FakeResponse()
+            if handler is not None:
+                return FakeResponse(handler(headers))
+            return FakeResponse(status_code)
 
     monkeypatch.setattr(repo_utils.httpx, "AsyncClient", FakeAsyncClient)
 
@@ -295,3 +301,38 @@ def test_check_commit_hf_distinguishes_upstream_yes_and_no(monkeypatch, tmp_path
 
     _make_fake_client(monkeypatch, status_code=401)
     assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is False
+
+
+def test_check_commit_hf_treats_redirects_as_visible(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    _make_fake_client(monkeypatch, status_code=302)
+    assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is True
+
+
+def test_check_commit_hf_returns_none_on_rate_limit(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    calls = []
+    _make_fake_client(monkeypatch, status_code=429, calls=calls)
+    assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is None
+    assert len(calls) == 3
+
+
+def test_check_commit_hf_does_not_retry_anonymously_when_token_is_rejected(monkeypatch, tmp_path):
+    """Match huggingface_hub: a rejected token is a hard 401, even for public repos."""
+    app = _make_app(tmp_path, offline=False)
+    calls = []
+
+    def handler(headers):
+        if any(k.lower() == "authorization" for k in headers):
+            return 401
+        return 200
+
+    _make_fake_client(monkeypatch, handler=handler, calls=calls)
+    ok = asyncio.run(
+        repo_utils.check_commit_hf(
+            app, "models", "team", "demo", authorization="Bearer hf_bogus"
+        )
+    )
+    assert ok is False
+    assert len(calls) == 1
+    assert calls[0]["headers"].get("authorization") == "Bearer hf_bogus"
