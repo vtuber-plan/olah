@@ -21,6 +21,12 @@ from olah.utils.cache_utils import read_cache_request
 
 logger = logging.getLogger(__name__)
 
+# Hub HEAD /api/{type}/{repo} is used as a visibility probe on every client
+# request. huggingface_hub treats our 401 RepoNotFound as "model does not
+# exist", so rate-limits and redirects must not be mapped onto that.
+_HF_VISIBILITY_OK = {200, 301, 302, 303, 307, 308}
+_HF_VISIBILITY_RETRY = {408, 425, 429}
+
 
 def _content_encoding_is_gzip(headers: object) -> bool:
     """Return True if the cached response headers advertise gzip content-encoding.
@@ -416,9 +422,11 @@ async def check_commit_hf(
         authorization: The authorization token (optional).
 
     Returns:
-        True if the commit is valid (status code 200 or 307), False if the
-        upstream rejected it (other non-5xx status), or None if the upstream
-        could not be reached (transport error or 5xx response).
+        True if the commit is valid (2xx or redirect), False if the
+        upstream rejected it (other non-retryable status), or None if the
+        upstream could not be reached (transport error, 429, or 5xx).
+        None is retried by the decorator; callers map it to HTTP 504 rather
+        than 401 so huggingface_hub does not treat a blip as "repo not found".
 
     """
     org_repo = get_org_repo(org, repo)
@@ -436,7 +444,7 @@ async def check_commit_hf(
     if authorization is not None:
         headers["authorization"] = authorization
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.request(
                 method="HEAD",
                 url=url,
@@ -447,6 +455,6 @@ async def check_commit_hf(
     except httpx.HTTPError as e:
         logger.warning("Upstream request failed while checking %s: %r", url, e)
         return None
-    if status_code >= 500:
+    if status_code in _HF_VISIBILITY_RETRY or status_code >= 500:
         return None
-    return status_code in [200, 307]
+    return status_code in _HF_VISIBILITY_OK
