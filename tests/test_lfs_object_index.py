@@ -58,6 +58,49 @@ async def test_authorize_fail_closed(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_visibility_cache_skips_transient_failures(monkeypatch, tmp_path):
+    """A transient upstream failure (504) must not poison the visibility cache.
+
+    With check_commit_hf mapping Hub 429/408/425 to None -> error_proxy_timeout,
+    caching that as "not visible" would deny every LFS/Xet object of the repo
+    for the whole TTL on a single rate-limit blip.
+    """
+    import olah.server_access as server_access
+
+    app = _app(tmp_path)
+    monkeypatch.setattr(idx, "_vis_cache", {})
+    calls = []
+
+    async def transient(app, ref, auth):
+        calls.append(ref.repo)
+        return server_access.error_proxy_timeout()
+
+    monkeypatch.setattr(server_access, "ensure_repo_visibility", transient)
+    assert await idx._visibility_cached(app, "models", "orgA", "repoA", "tok") is False
+    assert await idx._visibility_cached(app, "models", "orgA", "repoA", "tok") is False
+    assert len(calls) == 2  # nothing cached -> probed again each time
+
+    async def allowed(app, ref, auth):
+        calls.append(ref.repo)
+        return None
+
+    monkeypatch.setattr(server_access, "ensure_repo_visibility", allowed)
+    assert await idx._visibility_cached(app, "models", "orgA", "repoA", "tok") is True
+    assert await idx._visibility_cached(app, "models", "orgA", "repoA", "tok") is True
+    assert len(calls) == 3  # success cached -> second call served from cache
+
+    async def denied(app, ref, auth):
+        return server_access.error_repo_not_found()
+
+    # Definitive rejections (401 repo-not-found) are still cached.
+    monkeypatch.setattr(server_access, "ensure_repo_visibility", denied)
+    assert await idx._visibility_cached(app, "models", "orgA", "repoB", "tok") is False
+    monkeypatch.setattr(server_access, "ensure_repo_visibility", allowed)
+    assert await idx._visibility_cached(app, "models", "orgA", "repoB", "tok") is False
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
 async def test_authorize_offline_trusts_local(monkeypatch, tmp_path):
     app = _app(tmp_path, offline=True)
     # Offline never probes and never blocks (cache is trusted); even an unknown
