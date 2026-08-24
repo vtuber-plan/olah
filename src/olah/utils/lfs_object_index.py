@@ -116,7 +116,13 @@ async def get_lfs_object_repos(
 async def _visibility_cached(
     app, repo_type: str, org: Optional[str], repo: str, authorization: Optional[str]
 ) -> bool:
-    """Memoized repo-visibility probe (re-uses server_access.ensure_repo_visibility)."""
+    """Memoized repo-visibility probe (re-uses server_access.ensure_repo_visibility).
+
+    Only definitive outcomes are cached. A transient upstream failure (504
+    ProxyTimeout, e.g. a rate-limited or unreachable Hub) must not be cached
+    as "not visible": that would fail-close LFS/Xet authorization for the
+    whole TTL instead of retrying on the next request.
+    """
     from olah.server_access import build_repo_ref, ensure_repo_visibility
 
     repo_key = f"{repo_type}/{org}/{repo}"
@@ -129,8 +135,10 @@ async def _visibility_cached(
     ref = build_repo_ref(repo_type, org, repo)
     err = await ensure_repo_visibility(app, ref, authorization)
     ok = err is None
+    transient = err is not None and err.status_code == 504
     with _vis_lock:
-        _vis_cache[(th, repo_key)] = (now, ok)
+        if not transient:
+            _vis_cache[(th, repo_key)] = (now, ok)
     return ok
 
 

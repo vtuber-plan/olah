@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 # Hub HEAD /api/{type}/{repo} is used as a visibility probe on every client
 # request. huggingface_hub treats our 401 RepoNotFound as "model does not
 # exist", so rate-limits and redirects must not be mapped onto that.
-_HF_VISIBILITY_OK = {200, 301, 302, 303, 307, 308}
+# Redirects are followed (follow_redirects on the AsyncClient below), so
+# classification only ever sees the final status of the redirect chain.
 _HF_VISIBILITY_RETRY = {408, 425, 429}
 
 
@@ -422,9 +423,10 @@ async def check_commit_hf(
         authorization: The authorization token (optional).
 
     Returns:
-        True if the commit is valid (2xx or redirect), False if the
-        upstream rejected it (other non-retryable status), or None if the
-        upstream could not be reached (transport error, 429, or 5xx).
+        True if the commit is valid (a final 2xx status once redirects have
+        been followed), False if the upstream rejected it (other
+        non-retryable status), or None if the upstream could not be reached
+        (transport error, 429, or 5xx).
         None is retried by the decorator; callers map it to HTTP 504 rather
         than 401 so huggingface_hub does not treat a blip as "repo not found".
 
@@ -457,4 +459,4 @@ async def check_commit_hf(
         return None
     if status_code in _HF_VISIBILITY_RETRY or status_code >= 500:
         return None
-    return status_code in _HF_VISIBILITY_OK
+    return 200 <= status_code < 300

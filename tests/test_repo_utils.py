@@ -245,14 +245,18 @@ def test_get_newest_commit_hf_falls_back_to_offline_on_connect_error(monkeypatch
     assert commit == "offline-sha"
 
 
-def _make_fake_client(monkeypatch, *, status_code=None, error=None, calls=None, handler=None):
+def _make_fake_client(
+    monkeypatch, *, status_code=None, error=None, calls=None, handler=None, responses=None, init_kwargs=None
+):
     class FakeResponse:
         def __init__(self, code):
             self.status_code = code
 
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs):
-            pass
+            self._follow_redirects = bool(kwargs.get("follow_redirects", False))
+            if init_kwargs is not None:
+                init_kwargs.update(kwargs)
 
         async def __aenter__(self):
             return self
@@ -266,6 +270,14 @@ def _make_fake_client(monkeypatch, *, status_code=None, error=None, calls=None, 
                 calls.append({"url": kwargs.get("url") or (args[1] if len(args) > 1 else args), "headers": dict(headers)})
             if error is not None:
                 raise error
+            if responses is not None:
+                # Emulate httpx: consume the redirect chain only while
+                # follow_redirects is enabled, so the returned status is the
+                # final one actually seen by the caller.
+                code = responses.pop(0) if responses else 500
+                while 300 <= code < 400 and self._follow_redirects and responses:
+                    code = responses.pop(0)
+                return FakeResponse(code)
             if handler is not None:
                 return FakeResponse(handler(headers))
             return FakeResponse(status_code)
@@ -303,10 +315,22 @@ def test_check_commit_hf_distinguishes_upstream_yes_and_no(monkeypatch, tmp_path
     assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is False
 
 
-def test_check_commit_hf_treats_redirects_as_visible(monkeypatch, tmp_path):
+def test_check_commit_hf_follows_redirects_and_classifies_final_status(monkeypatch, tmp_path):
+    """httpx follows the redirect chain; only the final status is classified.
+
+    Real httpx never surfaces a 3xx here, so the fake client emulates
+    redirect-following by serving a chain of statuses.
+    """
     app = _make_app(tmp_path, offline=False)
-    _make_fake_client(monkeypatch, status_code=302)
+    init_kwargs = {}
+    _make_fake_client(monkeypatch, responses=[302, 200], init_kwargs=init_kwargs)
     assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is True
+    assert init_kwargs.get("follow_redirects") is True
+
+    # A redirect chain ending on a missing repo is still a rejection (401
+    # to the client), not "visible".
+    _make_fake_client(monkeypatch, responses=[302, 404])
+    assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is False
 
 
 def test_check_commit_hf_returns_none_on_rate_limit(monkeypatch, tmp_path):
