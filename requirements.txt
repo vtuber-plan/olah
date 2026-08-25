@@ -5,7 +5,7 @@ httpx==0.28.1
 pydantic==2.13.4
 pydantic-settings==2.15.0
 toml==0.10.2
-huggingface_hub==1.27.0
+huggingface_hub==1.28.0
 pytest==9.1.1
 pytest-asyncio==1.4.0
 PyYAML==6.0.3
