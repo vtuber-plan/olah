@@ -13,10 +13,11 @@ import httpx
 from fastapi import APIRouter, FastAPI, Form, Request
 from fastapi.responses import JSONResponse, Response
 
-from olah.errors import error_repo_not_found
+from olah.errors import error_proxy_timeout, error_repo_not_found
 from olah.proxy.commits import commits_generator
 from olah.proxy.meta import meta_generator
 from olah.proxy.pathsinfo import pathsinfo_generator
+from olah.proxy.refs import refs_generator
 from olah.proxy.tree import tree_generator
 from olah.server_access import build_repo_ref, ensure_repo_visibility, parse_repo_ref
 from olah.server_mirror import load_local_mirror_payload
@@ -35,6 +36,34 @@ class _NullLogger:
 
 def _get_logger(app: FastAPI):
     return getattr(app.state, "logger", None) or _NullLogger()
+
+
+async def refs_proxy_common(
+    app: FastAPI,
+    repo_type: str,
+    org: Optional[str],
+    repo: str,
+    include_prs: bool,
+    authorization: Optional[str],
+) -> Response:
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
+    if access_error is not None:
+        return access_error
+    refs_data = load_local_mirror_payload(
+        app,
+        repo_ref,
+        lambda local_repo: local_repo.get_refs(include_prs=include_prs),
+        _get_logger(app),
+    )
+    if refs_data is not None:
+        return JSONResponse(content=refs_data)
+    try:
+        return await build_streaming_response(
+            await refs_generator(app, repo_type, org, repo, include_prs, authorization)
+        )
+    except httpx.HTTPError:
+        return error_proxy_timeout()
 
 
 async def meta_proxy_common(
@@ -341,6 +370,30 @@ async def xet_read_token_expanded(repo_type: str, org: str, repo: str, commit: s
 @router.get("/api/{repo_type}/{org_repo}/xet-read-token/{commit}")
 async def xet_read_token_compact(repo_type: str, org_repo: str, commit: str, request: Request):
     return await _xet_read_token_passthrough(repo_type, org_repo, commit, request)
+
+
+# Register compact refs before the generic org/repo metadata route: otherwise
+# /api/models/gpt2/refs is parsed as metadata for the repository gpt2/refs.
+@router.get("/api/{repo_type}/{org}/{repo}/refs")
+async def refs_proxy_expanded(
+    repo_type: str, org: str, repo: str, request: Request, include_prs: bool = False
+):
+    return await refs_proxy_common(
+        request.app, repo_type, org, repo, include_prs, request.headers.get("authorization")
+    )
+
+
+@router.get("/api/{repo_type}/{org_repo}/refs")
+async def refs_proxy_compact(
+    repo_type: str, org_repo: str, request: Request, include_prs: bool = False
+):
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
+        return error_repo_not_found()
+    return await refs_proxy_common(
+        request.app, repo_type, repo_ref.org, repo_ref.repo, include_prs,
+        request.headers.get("authorization"),
+    )
 
 
 @router.head("/api/{repo_type}/{org_repo}")

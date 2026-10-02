@@ -34,6 +34,30 @@ class LocalMirrorRepo(object):
     def _format_git_datetime(self, value: datetime) -> str:
         return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
+    def get_refs(self, include_prs: bool = False) -> Dict[str, List[Dict[str, str]]]:
+        """Expose real Git refs, including packed refs and peeled tag targets."""
+        groups = {"refs/heads/": "branches", "refs/tags/": "tags", "refs/convert/": "converts"}
+        result = {group: [] for group in groups.values()}
+        if include_prs:
+            groups["refs/pr/"] = "pullRequests"
+            result["pullRequests"] = []
+        for ref in sorted(self._git_repo.references, key=lambda ref: ref.path):
+            for prefix, group in groups.items():
+                if ref.path.startswith(prefix):
+                    try:
+                        target = ref.commit.hexsha
+                    except (ValueError, gitdb.exc.BadObject, gitdb.exc.BadName):
+                        # A tag can point at a tree/blob rather than a commit.
+                        # Hub refs describe commits, so those are not candidates.
+                        continue
+                    result[group].append({
+                        "name": ref.path[len(prefix):],
+                        "ref": ref.path,
+                        "targetCommit": target,
+                    })
+                    break
+        return result
+
     def _sha256(self, text: Union[str, bytes]) -> str:
         if isinstance(text, bytes) or isinstance(text, bytearray):
             bin = text
