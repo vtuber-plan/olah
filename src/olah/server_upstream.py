@@ -6,7 +6,7 @@ from fastapi.responses import Response
 from olah.errors import error_proxy_timeout, error_repo_not_found, error_revision_not_found
 from olah.proxy.result import ProxyResult
 from olah.server_access import RepoRef
-from olah.utils.repo_utils import check_commit_hf, get_commit_hf, get_newest_commit_hf
+from olah.utils.repo_utils import check_commit_hf, get_commit_hf, get_newest_commit_hf, is_full_commit_hash
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,9 @@ class ResolvedCommit:
 
     @property
     def refresh_cache(self) -> bool:
-        return self.requested != self.resolved
+        # Hex case normalization does not make an immutable SHA a mutable alias.
+        requested = self.requested.lower() if is_full_commit_hash(self.requested) else self.requested
+        return requested != self.resolved
 
 
 async def get_latest_commit(app, repo: RepoRef, authorization: Optional[str]) -> Optional[str]:

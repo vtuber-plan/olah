@@ -9,6 +9,7 @@ from olah.proxy.result import single_chunk_body
 
 def _make_app(tmp_path):
     config = SimpleNamespace(
+        offline=False,
         repos_path=str(tmp_path / "repos"),
         hf_url_base=lambda: "https://huggingface.example",
     )

@@ -463,6 +463,9 @@ async def _file_chunk_get(
 ):
     # Redirect Chunks
     cfg = app.state.app_settings.config
+    # Never recover a missing/corrupt cached block from upstream while offline.
+    if cfg.offline:
+        url = None
     compression_algo = compression_algo_from_name(cfg.cache_compression)
     block_size = cfg.cache_block_size or DEFAULT_BLOCK_SIZE
     chunk_size = cfg.cache_chunk_size or DEFAULT_CHUNK_SIZE
@@ -927,7 +930,7 @@ async def _file_realtime_stream(
     xet_passthrough_on = (
         not cfg.offline and getattr(cfg, "xet_passthrough", False)
     )
-    redirect_model_on = getattr(cfg, "cache_redirect_model", False)
+    redirect_model_on = not cfg.offline and getattr(cfg, "cache_redirect_model", False)
     if xet_passthrough_on or redirect_model_on:
         probe = await _probe_xet_resolve(hf_url=hf_url, authorization=authorization)
         if xet_passthrough_on:
@@ -1082,6 +1085,34 @@ async def _build_file_response(
         response_headers["content-length"] = str(
             _multipart_content_length(boundary, all_ranges, file_size)
         )
+
+    if app.state.app_settings.config.offline:
+        # Reject missing requested blocks before sending successful headers.
+        # Keep the streaming path cache-only too: eviction or corruption after
+        # this check must never silently turn an offline hit into a download.
+        upstream_url = None
+        if method.lower() == "get" and file_size > 0:
+            def cached_ranges_available() -> bool:
+                if not os.path.exists(os.path.join(save_path, "meta.bin")):
+                    return False
+                cache = OlahCache(save_path, file_size=file_size)
+                try:
+                    return all(
+                        not is_remote
+                        for start, end in all_ranges
+                        for _, is_remote in get_contiguous_ranges(cache, start, end)
+                    )
+                finally:
+                    cache.close()
+
+            available = await fastapi.concurrency.run_in_threadpool(cached_ranges_available)
+            if not available:
+                missing = error_entry_not_found()
+                return ProxyResult(
+                    status_code=missing.status_code,
+                    headers=missing.headers,
+                    body=single_chunk_body(missing.body),
+                )
 
     # Identity passed to the cache for online revalidation. Offline trusts the
     # disk (None) so a transient upstream-derived pseudo-etag never destroys a

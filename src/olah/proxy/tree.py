@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
+from olah.errors import error_entry_not_found
 
 from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
@@ -120,8 +121,16 @@ async def tree_generator(
         f"/api/{repo_type}/{org_repo}/tree/{commit}/{path}",
     )
     # proxy
-    if use_cache and not override_cache:
+    offline = app.state.app_settings.config.offline
+    if use_cache and (offline or not override_cache):
         return await _tree_cache_generator(save_path)
+    if offline:
+        missing = error_entry_not_found()
+        return ProxyResult(
+            status_code=missing.status_code,
+            headers=missing.headers,
+            body=single_chunk_body(missing.body),
+        )
     return await _tree_proxy_generator(
         app, headers, tree_url, method, {"recursive": recursive, "expand": expand}, allow_cache, save_path
     )

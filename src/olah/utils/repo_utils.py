@@ -9,6 +9,7 @@ import datetime
 import gzip
 import logging
 import os
+import re
 import glob
 import tenacity
 from typing import Dict, Literal, Optional, Tuple
@@ -313,6 +314,11 @@ async def get_newest_commit_hf(
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
 
 
+def is_full_commit_hash(commit: str) -> bool:
+    """Only full Git SHA-1 IDs are immutable; short IDs still need resolution."""
+    return re.fullmatch(r"[0-9a-fA-F]{40}", commit) is not None
+
+
 async def get_commit_hf_offline(
     app,
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
@@ -335,6 +341,10 @@ async def get_commit_hf_offline(
     Returns:
         The commit SHA as a string if available in the offline cache, or None if the information is not cached.
     """
+    # A full SHA is already a cache address, independent of whether revision
+    # metadata was cached. Access and visibility remain the caller's checks.
+    if is_full_commit_hash(commit):
+        return commit.lower()
     repos_path = app.state.app_settings.config.repos_path
     save_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
     if not os.path.exists(save_path):
@@ -374,6 +384,8 @@ async def get_commit_hf(
     Raises:
         This function does not raise any explicit exceptions but may propagate exceptions from underlying functions.
     """
+    if is_full_commit_hash(commit):
+        return commit.lower()
     org_repo = get_org_repo(org, repo)
     url = urljoin(
         app.state.app_settings.config.hf_url_base(),

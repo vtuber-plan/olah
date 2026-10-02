@@ -14,7 +14,7 @@ from fastapi import FastAPI
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-from olah.errors import error_proxy_invalid_data
+from olah.errors import error_entry_not_found, error_proxy_invalid_data
 from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
@@ -95,8 +95,16 @@ async def pathsinfo_generator(
             f"/api/{repo_type}/{org_repo}/paths-info/{commit}",
         )
         # proxy
-        if use_cache and not override_cache:
+        offline = app.state.app_settings.config.offline
+        if use_cache and (offline or not override_cache):
             status, response_headers, content = await _pathsinfo_cache(save_path)
+        elif offline:
+            missing = error_entry_not_found()
+            return ProxyResult(
+                status_code=missing.status_code,
+                headers=missing.headers,
+                body=single_chunk_body(missing.body),
+            )
         else:
             status, response_headers, content = await _pathsinfo_proxy(
                 app, request_headers, pathsinfo_url, method, path, allow_cache, save_path
