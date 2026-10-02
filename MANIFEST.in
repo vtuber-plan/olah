@@ -1,0 +1,3 @@
+# Keep the release-workflow regression tests runnable from the source archive.
+include .github/scripts/release.py
+include .github/workflows/*.yml

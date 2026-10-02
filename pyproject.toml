@@ -35,3 +35,6 @@ exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", 
 
 [tool.wheel]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
+
+[tool.pytest.ini_options]
+markers = ["live: opt-in tests that download from the real Hugging Face service"]

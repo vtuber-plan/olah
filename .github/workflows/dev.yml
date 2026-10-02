@@ -36,4 +36,4 @@ jobs:
       - name: Test Olah
         run: |
           cd ${{ github.workspace }}
-          python -m pytest tests
+          python -m pytest tests -m "not live"

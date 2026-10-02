@@ -7,72 +7,164 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
+# Serialize publications (including latest) without cancelling pending releases.
 concurrency:
-  group: release-${{ github.ref }}
+  group: olah-release
   cancel-in-progress: false
+  queue: max
 
 jobs:
-  build-and-release:
-    name: Build wheel and publish GitHub release
+  build:
+    name: Validate, test and build distributions
     runs-on: ubuntu-latest
-
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact-name: release-dist-${{ github.run_attempt }}
     steps:
-      - name: Check out repository code
+      - name: Check out the tagged commit
         uses: actions/checkout@v4
-
-      - name: Set up Apache Arrow
-        run: |
-          sudo apt update
-          sudo apt install -y -V ca-certificates lsb-release wget
-          wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
-          sudo apt install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
-          sudo apt update
-          sudo apt install -y -V libarrow-dev libarrow-glib-dev libparquet-dev libparquet-glib-dev
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install build dependencies
+      - name: Validate stable tag matches package version
+        id: version
+        run: python .github/scripts/release.py validate "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Install test and build dependencies
         run: |
-          pip install --upgrade pip
-          pip install -e .
-          pip install -r requirements.txt
-          pip install build twine
+          python -m pip install --upgrade pip
+          python -m pip install -e . -r requirements.txt build twine
 
-      - name: Validate tag matches package version
+      - name: Run deterministic regression tests
+        run: python -m pytest tests -m "not live"
+
+      - name: Build wheel and source distribution once
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PACKAGE_VERSION="$(python -c "from pathlib import Path; import tomllib; print(tomllib.loads(Path('pyproject.toml').read_text())['project']['version'])")"
-          if [[ "${TAG_VERSION}" != "${PACKAGE_VERSION}" ]]; then
-            echo "Tag version ${TAG_VERSION} does not match pyproject version ${PACKAGE_VERSION}" >&2
-            exit 1
-          fi
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          python -m build
+          python -m twine check --strict dist/*
 
-      - name: Test Olah
-        run: python -m pytest tests
+      - name: Smoke-test the installed wheel outside the source tree
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-check"
+          "$RUNNER_TEMP/wheel-check/bin/python" -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          wheel-check/bin/python -c 'import importlib.metadata, os; import olah.server; assert importlib.metadata.version("olah") == os.environ["VERSION"]'
+          wheel-check/bin/olah-cli --help
 
-      - name: Build Olah
-        run: python -m build
+      - name: Preserve the tested distributions for publication and retries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-${{ github.run_attempt }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Check build artifacts
-        run: python -m twine check dist/*
-
+  publish-pypi:
+    name: Publish tested distributions to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: dist
+      - name: Reject conflicting files from an earlier publication
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: python .github/scripts/release.py check-pypi "$VERSION" dist
       - name: Publish package to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
+          # Existing files are allowed only after their hashes match above.
+          skip-existing: true
+      - name: Verify both published PyPI files before continuing
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          for attempt in {1..6}; do
+            if python .github/scripts/release.py check-pypi "$VERSION" dist --require-all; then
+              exit 0
+            fi
+            echo "Waiting for PyPI metadata (attempt $attempt/6)"
+            sleep 10
+          done
+          exit 1
 
+  publish-github:
+    name: Create GitHub Release and attach distributions
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      promote-latest: ${{ steps.latest.outputs.promote }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: dist
+      - name: Keep older release retries from replacing latest
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' > "$RUNNER_TEMP/release-tags"
+          python .github/scripts/release.py latest "$VERSION" "$RUNNER_TEMP/release-tags" >> "$GITHUB_OUTPUT"
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           prerelease: false
+          make_latest: ${{ steps.latest.outputs.promote }}
+          fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
             dist/*.whl
+
+  publish-images:
+    name: Publish release container images
+    needs: [build, publish-github]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-image-tag-version.yml
+    with:
+      olah_version: ${{ needs.build.outputs.version }}
+      git_ref: ${{ github.sha }}
+      use_release_asset: true
+      push_latest: ${{ needs.publish-github.outputs.promote-latest == 'true' }}
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

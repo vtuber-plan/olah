@@ -1,85 +1,136 @@
 name: Docker Image Build/Publish release image
 
 on:
-  workflow_run:
-    workflows:
-      - Build and publish release artifacts
-    types:
-      - completed
+  workflow_call:
+    inputs:
+      olah_version:
+        required: true
+        type: string
+      git_ref:
+        description: Exact commit tested by the release workflow
+        required: true
+        type: string
+      use_release_asset:
+        description: Install the wheel attached by the release workflow
+        type: boolean
+        default: false
+      push_latest:
+        type: boolean
+        default: false
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
   workflow_dispatch:
     inputs:
       olah_version:
-        description: Published Olah version already available on PyPI
+        description: Published stable version on PyPI, with an existing vX.Y.Z tag
         required: true
-        default: 0.4.1
+        type: string
 
 permissions:
   contents: read
   packages: write
 
+# Manual image repairs cannot collide with publication of the same version.
 concurrency:
-  group: docker-release-${{ github.event.workflow_run.head_branch || github.event.inputs.olah_version }}
+  group: docker-release-${{ inputs.olah_version }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   build-and-push-docker-image:
     name: Build release Docker image and push to registries
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-
+    timeout-minutes: 60
     steps:
+      - name: Validate version before resolving a ref
+        env:
+          VERSION: ${{ inputs.olah_version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Expected a stable X.Y.Z version, got: $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Checkout the release source, never the default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref || format('refs/tags/v{0}', inputs.olah_version) }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate checked-out package version
+        env:
+          VERSION: ${{ inputs.olah_version }}
+        run: |
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import tomllib
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          if version != os.environ["VERSION"]:
+              raise SystemExit(f"Checked-out package version {version} does not match the requested version")
+          PYTHON
+
+      - name: Recheck latest eligibility on every image retry
+        if: ${{ inputs.push_latest }}
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.olah_version }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' > "$RUNNER_TEMP/release-tags"
+          python .github/scripts/release.py latest "$VERSION" "$RUNNER_TEMP/release-tags" >> "$GITHUB_OUTPUT"
+
       - name: Determine package source and image tags
         env:
+          VERSION: ${{ inputs.olah_version }}
+          USE_RELEASE_ASSET: ${{ inputs.use_release_asset }}
+          PUSH_LATEST: ${{ inputs.push_latest && steps.latest.outputs.promote == 'true' }}
           DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/olah
           GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/olah
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-            TAG_NAME="${{ github.event.workflow_run.head_branch }}"
-            VERSION="${TAG_NAME#v}"
-            OLAH_SOURCE="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/olah-${VERSION}-py3-none-any.whl"
-            PUSH_LATEST="true"
+          GHCR_IMAGE="${GHCR_IMAGE,,}"
+          if [[ "$USE_RELEASE_ASSET" == "true" ]]; then
+            OLAH_SOURCE="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/olah-${VERSION}-py3-none-any.whl"
           else
-            VERSION="${{ github.event.inputs.olah_version }}"
             OLAH_SOURCE="olah==${VERSION}"
-            PUSH_LATEST="false"
           fi
-
           TAGS="${DOCKERHUB_IMAGE}:${VERSION}"$'\n'"${GHCR_IMAGE}:${VERSION}"
-          if [[ "${PUSH_LATEST}" == "true" ]]; then
+          # Manual dispatch deliberately publishes only the requested version.
+          if [[ "$PUSH_LATEST" == "true" ]]; then
             TAGS="${TAGS}"$'\n'"${DOCKERHUB_IMAGE}:latest"$'\n'"${GHCR_IMAGE}:latest"
           fi
-
-          echo "OLAH_SOURCE=${OLAH_SOURCE}" >> "$GITHUB_ENV"
-          echo "OLAH_VERSION=${VERSION}" >> "$GITHUB_ENV"
           {
+            echo "OLAH_SOURCE=${OLAH_SOURCE}"
             echo "IMAGE_TAGS<<EOF"
-            echo "${TAGS}"
+            echo "$TAGS"
             echo "EOF"
           } >> "$GITHUB_ENV"
 
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build push image
+      - name: Build and push images
         id: build
         uses: docker/build-push-action@v5
         with:
@@ -90,6 +141,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE_TAGS }}
-
+          labels: |
+            org.opencontainers.image.version=${{ inputs.olah_version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
       - name: Print image digest
-        run: echo "${{ steps.build.outputs.digest }}"
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "$IMAGE_DIGEST"
