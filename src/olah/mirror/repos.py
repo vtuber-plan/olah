@@ -256,14 +256,22 @@ class LocalMirrorRepo(object):
 
     def get_tree(
         self, commit_hash: str, path: str, recursive: bool = False, expand: bool = False
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[List[Dict[str, Any]]]:
         try:
             commit = self._git_repo.commit(commit_hash)
-        except gitdb.exc.BadName:
+            if not path.strip("/"):
+                tree = commit.tree
+            else:
+                tree = self.get_index_object_by_path(commit_hash=commit_hash, path=path)
+        except (gitdb.exc.BadName, gitdb.exc.BadObject, ValueError, KeyError):
+            # GitPython resolves full commit hashes lazily when reading the tree.
             return None
 
-        index_obj = self.get_index_object_by_path(commit_hash=commit_hash, path=path)
-        items = self._get_tree_files(tree=index_obj, recursive=recursive, expand=expand)
+        if not isinstance(tree, Tree):
+            # Missing paths and files cannot be listed; let the API use its fallback.
+            return None
+
+        items = self._get_tree_files(tree=tree, recursive=recursive, expand=expand)
         for r in items:
             r.pop("name")
         return items
