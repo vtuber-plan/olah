@@ -285,25 +285,70 @@ def _wait_lock_sh(path: str, timeout: float) -> bool:
             time.sleep(0.05)
 
 
-async def _download_full_block(
+async def _download_block_streaming(
     client: httpx.AsyncClient,
     remote_info: RemoteInfo,
     cache_file: OlahCache,
+    block_index: int,
     block_start: int,
     block_end: int,
-) -> bytes:
-    """Download exactly ``[block_start, block_end)`` from upstream.
+    lo: int,
+    hi: int,
+    allow_cache: bool,
+) -> AsyncIterator[bytes]:
+    """Download ``[block_start, block_end)`` from upstream and publish it.
 
-    Thin collector over ``_get_file_range_from_remote`` (which already verifies
-    the received byte count). Returns the real (unpadded) block bytes.
+    Yields the caller's block-relative ``[lo, hi)`` window as chunks arrive, so
+    time-to-first-byte is one upstream chunk rather than one whole block. The
+    whole block is still accumulated, because ``write_block`` takes one
+    contiguous buffer.
+
+    The most recent piece is always held back until the block has been verified
+    and published. Publishing after the final ``yield`` would make it conditional
+    on the consumer pulling once more, which a server that stops at
+    content-length does not do -- leaving every response's last block uncached.
     """
-    out = bytearray()
+    bs = cache_file._get_block_size()
+    real_len = block_end - block_start
+    buf = bytearray()
+    sent = lo
+    pending = b""
     async for chunk in _get_file_range_from_remote(
         client, remote_info, cache_file, block_start, block_end
     ):
-        if chunk:
-            out += chunk
-    return bytes(out)
+        if not chunk:
+            continue
+        buf += chunk
+        avail = min(len(buf), hi)
+        if avail > sent:
+            if pending:
+                yield pending
+            pending = bytes(buf[sent:avail])
+            sent = avail
+    # _get_file_range_from_remote trusts a content-length header over the bytes it
+    # actually saw, so a truncated body with an intact header reaches here short.
+    if len(buf) != real_len:
+        raise Exception(
+            f"The content of the response is incomplete. Block: {block_index}. "
+            f"Expected-{real_len}. Accepted-{len(buf)}"
+        )
+    if allow_cache:
+        raw_real = bytes(buf)
+        # write_block requires a full block_size buffer; pad the final block.
+        raw_block = raw_real if real_len == bs else raw_real + b"\x00" * (bs - real_len)
+        # _write_block_safely shields the publish so a leader disconnect still lands
+        # the block (followers depend on it). If the entry was evicted mid-download
+        # (hourly cleanup removed blocks/), publishing is impossible -- treat it as
+        # best-effort; the client already has its bytes and a future request
+        # recreates the entry.
+        try:
+            await _write_block_safely(
+                cache_file, block_index, raw_block, allow_cache=True
+            )
+        except FileNotFoundError:
+            pass
+    if pending:
+        yield pending
 
 
 async def _read_block_real_payload(
@@ -327,7 +372,7 @@ async def _read_block_real_payload(
     return padded[:real_len]
 
 
-async def _fetch_block_single_flight(
+async def _stream_block_single_flight(
     *,
     client: httpx.AsyncClient,
     remote_info: RemoteInfo,
@@ -335,31 +380,52 @@ async def _fetch_block_single_flight(
     block_index: int,
     block_start: int,
     block_end: int,
+    lo: int,
+    hi: int,
     allow_cache: bool,
-) -> bytes:
-    """Return the real (unpadded) payload of ``block_index``, single-flighted.
+) -> AsyncIterator[bytes]:
+    """Yield block-relative ``[lo, hi)`` of ``block_index``, single-flighted.
 
     * Cached + CRC-valid -> serve from cache.
-    * Caching disabled -> download the range with no coordination.
+    * Caching disabled -> stream the range with no coordination.
     * Otherwise coordinate via a per-block cross-process advisory lock: the
-      leader downloads + publishes (under ``asyncio.shield`` so a client
-      disconnect still lands the block); followers wait, then serve from cache.
-      A leader that dies before publishing is retried by a follower (bounded).
+      leader downloads + publishes (streaming to its own client as it goes);
+      followers wait for that lock, then serve from cache. A leader that dies
+      before publishing is retried by a follower (bounded).
     """
-    bs = cache_file._get_block_size()
     real_len = block_end - block_start
 
-    # Fast path: serve from cache. A corrupt block is invalidated and re-fetched.
-    if cache_file.has_block(block_index):
+    async def from_cache() -> Optional[bytes]:
+        """The window read from cache, or None if the block is absent/corrupt."""
+        if not cache_file.has_block(block_index):
+            return None
         try:
-            return await _read_block_real_payload(cache_file, block_index, real_len)
+            payload = await _read_block_real_payload(cache_file, block_index, real_len)
         except CacheIntegrityError:
-            pass
+            return None
+        return payload[lo:hi]
+
+    # Fast path: serve from cache. A corrupt block is invalidated and re-fetched.
+    cached = await from_cache()
+    if cached is not None:
+        if cached:
+            yield cached
+        return
 
     if not allow_cache:
-        return await _download_full_block(
-            client, remote_info, cache_file, block_start, block_end
-        )
+        async for piece in _download_block_streaming(
+            client,
+            remote_info,
+            cache_file,
+            block_index,
+            block_start,
+            block_end,
+            lo,
+            hi,
+            allow_cache=False,
+        ):
+            yield piece
+        return
 
     dl_lock_path = cache_file.get_block_path(block_index) + ".dl.lock"
     max_attempts = 3
@@ -369,40 +435,33 @@ async def _fetch_block_single_flight(
         if lock_fh is not None:
             try:
                 # Double-check under EX: a prior leader may have just published.
-                if cache_file.has_block(block_index):
-                    try:
-                        return await _read_block_real_payload(
-                            cache_file, block_index, real_len
-                        )
-                    except CacheIntegrityError:
-                        pass  # corrupt -> re-download below
-                raw_real = await _download_full_block(
-                    client, remote_info, cache_file, block_start, block_end
-                )
-                # write_block requires a full block_size buffer; pad the final block.
-                raw_block = (
-                    raw_real if real_len == bs else raw_real + b"\x00" * (bs - real_len)
-                )
-                # _write_block_safely shields the publish so a leader disconnect
-                # still lands the block (followers depend on it). If the entry was
-                # evicted mid-download (hourly cleanup removed blocks/), publishing
-                # is impossible -- treat it as best-effort and still return the
-                # fetched bytes so this client succeeds; a future request recreates
-                # the entry.
-                try:
-                    await _write_block_safely(cache_file, block_index, raw_block, allow_cache=True)
-                except FileNotFoundError:
-                    pass
-                return raw_real
+                cached = await from_cache()
+                if cached is not None:
+                    if cached:
+                        yield cached
+                    return
+                async for piece in _download_block_streaming(
+                    client,
+                    remote_info,
+                    cache_file,
+                    block_index,
+                    block_start,
+                    block_end,
+                    lo,
+                    hi,
+                    allow_cache=True,
+                ):
+                    yield piece
+                return
             finally:
                 _release_lock(lock_fh)
         # Someone else is the leader: wait for it to finish, then serve from cache.
         await fastapi.concurrency.run_in_threadpool(_wait_lock_sh, dl_lock_path, 120)
-        if cache_file.has_block(block_index):
-            try:
-                return await _read_block_real_payload(cache_file, block_index, real_len)
-            except CacheIntegrityError:
-                pass  # corrupt or leader died mid-publish -> retry as leader
+        cached = await from_cache()
+        if cached is not None:
+            if cached:
+                yield cached
+            return
         # Block still absent -> leader died before publishing. Loop and try to
         # become the new leader.
     raise Exception(
@@ -434,20 +493,21 @@ async def _yield_range_blocks(
     for blk in range(first_block, last_block + 1):
         block_start = blk * bs
         block_end = min((blk + 1) * bs, fs)
-        block_bytes = await _fetch_block_single_flight(
+        lo = max(resume_pos, block_start) - block_start
+        hi = min(range_end_pos, block_end) - block_start
+        async for piece in _stream_block_single_flight(
             client=client,
             remote_info=remote_info,
             cache_file=cache_file,
             block_index=blk,
             block_start=block_start,
             block_end=block_end,
+            lo=lo,
+            hi=hi,
             allow_cache=allow_cache,
-        )
-        lo = max(resume_pos, block_start) - block_start
-        hi = min(range_end_pos, block_end) - block_start
-        piece = block_bytes[lo:hi]
-        if piece:
-            yield piece
+        ):
+            if piece:
+                yield piece
 
 
 async def _file_chunk_get(
