@@ -9,6 +9,9 @@ import os
 
 
 WORKER_API_TIMEOUT = 15
+# Kept under huggingface_hub's 10s read timeout: timing out on headers fails its
+# download, whereas a stalled body is resumed.
+HEADER_HOLD_TIMEOUT = 5
 CHUNK_SIZE = 4096
 LFS_FILE_BLOCK = 64 * 1024 * 1024
 

@@ -26,6 +26,14 @@ class UpstreamRateLimited(Exception):
         return JSONResponse(content={"error": headers["x-error-message"]}, headers=headers, status_code=429)
 
 
+class UpstreamStatusError(Exception):
+    """The Hub answered a file range request with a non-2xx status other than 429."""
+
+    def __init__(self, status_code: int):
+        super().__init__(f"Upstream returned HTTP {status_code}")
+        self.status_code = status_code
+
+
 def raise_if_rate_limited(response) -> None:
     if response.status_code == 429:
         raise UpstreamRateLimited(response.headers)
