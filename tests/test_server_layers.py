@@ -163,7 +163,11 @@ async def test_resolve_requested_commit_centralizes_repo_and_revision_errors(mon
     async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
         return commit is None
 
+    async def fake_lookup_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        return False, None
+
     monkeypatch.setattr(server_upstream, "check_commit_hf", fake_check_commit_hf)
+    monkeypatch.setattr(server_upstream, "lookup_commit_hf", fake_lookup_commit_hf)
     monkeypatch.setattr(server_upstream, "get_commit_hf", pytest.fail)
 
     _, revision_error = await server_upstream.resolve_requested_commit(
@@ -191,15 +195,13 @@ async def test_resolve_requested_commit_skips_duplicate_repo_check_after_visibil
     repo = server_access.build_repo_ref("models", "team", "demo")
     calls = []
 
-    async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+    async def fake_lookup_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
         calls.append(commit)
-        return True
+        return True, "abc123"
 
-    async def fake_get_commit_hf(*args, **kwargs):
-        return "abc123"
-
-    monkeypatch.setattr(server_upstream, "check_commit_hf", fake_check_commit_hf)
-    monkeypatch.setattr(server_upstream, "get_commit_hf", fake_get_commit_hf)
+    monkeypatch.setattr(server_upstream, "check_commit_hf", pytest.fail)
+    monkeypatch.setattr(server_upstream, "lookup_commit_hf", fake_lookup_commit_hf)
+    monkeypatch.setattr(server_upstream, "get_commit_hf", pytest.fail)
 
     resolved, error = await server_upstream.resolve_requested_commit(
         app,
@@ -215,6 +217,28 @@ async def test_resolve_requested_commit_skips_duplicate_repo_check_after_visibil
 
 
 @pytest.mark.asyncio
+async def test_resolve_requested_commit_checks_full_sha_without_lookup(monkeypatch):
+    app = _make_app()
+    repo = server_access.build_repo_ref("models", "team", "demo")
+    sha = "A" * 40
+    calls = []
+
+    async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        calls.append(commit)
+        return True
+
+    monkeypatch.setattr(server_upstream, "check_commit_hf", fake_check_commit_hf)
+    monkeypatch.setattr(server_upstream, "lookup_commit_hf", pytest.fail)
+    monkeypatch.setattr(server_upstream, "get_commit_hf", pytest.fail)
+
+    resolved, error = await server_upstream.resolve_requested_commit(app, repo, sha, None, repo_visible=True)
+
+    assert error is None
+    assert resolved == server_upstream.ResolvedCommit(requested=sha, resolved=sha.lower())
+    assert calls == [sha]
+
+
+@pytest.mark.asyncio
 async def test_resolve_requested_commit_returns_proxy_timeout_when_upstream_unreachable(monkeypatch):
     app = _make_app()
     repo = server_access.build_repo_ref("models", "team", "demo")
@@ -222,7 +246,11 @@ async def test_resolve_requested_commit_returns_proxy_timeout_when_upstream_unre
     async def unreachable_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
         return None
 
+    async def unreachable_lookup_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        return None, None
+
     monkeypatch.setattr(server_upstream, "check_commit_hf", unreachable_check_commit_hf)
+    monkeypatch.setattr(server_upstream, "lookup_commit_hf", unreachable_lookup_commit_hf)
     monkeypatch.setattr(server_upstream, "get_commit_hf", pytest.fail)
 
     _, error = await server_upstream.resolve_requested_commit(
@@ -244,11 +272,12 @@ async def test_resolve_requested_commit_returns_proxy_timeout_when_commit_lookup
     async def fake_check_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
         return True
 
-    async def failing_get_commit_hf(*args, **kwargs):
-        return None
+    async def sha_less_lookup_commit_hf(app, repo_type, org, repo_name, commit, authorization=None):
+        return True, None
 
     monkeypatch.setattr(server_upstream, "check_commit_hf", fake_check_commit_hf)
-    monkeypatch.setattr(server_upstream, "get_commit_hf", failing_get_commit_hf)
+    monkeypatch.setattr(server_upstream, "lookup_commit_hf", sha_less_lookup_commit_hf)
+    monkeypatch.setattr(server_upstream, "get_commit_hf", pytest.fail)
 
     _, error = await server_upstream.resolve_requested_commit(app, repo, "main", None)
 

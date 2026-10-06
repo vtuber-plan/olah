@@ -412,9 +412,33 @@ async def get_commit_hf(
 @tenacity.retry(
     stop=tenacity.stop_after_attempt(3),
     wait=tenacity.wait_exponential(multiplier=0.5, max=2),
-    retry=tenacity.retry_if_result(lambda result: result is None),
-    retry_error_callback=lambda retry_state: None,
+    retry=tenacity.retry_if_result(lambda result: result[0] is None),
+    retry_error_callback=lambda retry_state: (None, None),
 )
+async def _probe_hf(
+    url: str, method: str, authorization: Optional[str]
+) -> Tuple[Optional[bool], Optional[httpx.Response]]:
+    """Request a Hub API URL and classify the final status (see check_commit_hf)."""
+    headers = {}
+    if authorization is not None:
+        headers["authorization"] = authorization
+    try:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            response = await client.request(
+                method=method,
+                url=url,
+                headers=headers,
+                timeout=WORKER_API_TIMEOUT,
+            )
+    except httpx.HTTPError as e:
+        logger.warning("Upstream request failed while checking %s: %r", url, e)
+        return None, None
+    status_code = response.status_code
+    if status_code in _HF_VISIBILITY_RETRY or status_code >= 500:
+        return None, response
+    return 200 <= status_code < 300, response
+
+
 async def check_commit_hf(
     app,
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
@@ -439,8 +463,8 @@ async def check_commit_hf(
         been followed), False if the upstream rejected it (other
         non-retryable status), or None if the upstream could not be reached
         (transport error, 429, or 5xx).
-        None is retried by the decorator; callers map it to HTTP 504 rather
-        than 401 so huggingface_hub does not treat a blip as "repo not found".
+        None is retried; callers map it to HTTP 504 rather than 401 so
+        huggingface_hub does not treat a blip as "repo not found".
 
     """
     org_repo = get_org_repo(org, repo)
@@ -453,22 +477,34 @@ async def check_commit_hf(
             app.state.app_settings.config.hf_url_base(),
             f"/api/{repo_type}/{org_repo}/revision/{commit}",
         )
+    exists, _ = await _probe_hf(url, "HEAD", authorization)
+    return exists
 
-    headers = {}
-    if authorization is not None:
-        headers["authorization"] = authorization
+
+async def lookup_commit_hf(
+    app,
+    repo_type: Optional[Literal["models", "datasets", "spaces"]],
+    org: Optional[str],
+    repo: str,
+    commit: str,
+    authorization: Optional[str] = None,
+) -> Tuple[Optional[bool], Optional[str]]:
+    """Check a revision and resolve it to a commit SHA in one upstream request.
+
+    Returns ``(exists, sha)``: ``exists`` is classified exactly as
+    ``check_commit_hf`` does, and ``sha`` is set only when the revision exists
+    and the Hub returned a usable payload.
+    """
+    org_repo = get_org_repo(org, repo)
+    url = urljoin(
+        app.state.app_settings.config.hf_url_base(),
+        f"/api/{repo_type}/{org_repo}/revision/{commit}",
+    )
+    exists, response = await _probe_hf(url, "GET", authorization)
+    if not exists:
+        return exists, None
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            response = await client.request(
-                method="HEAD",
-                url=url,
-                headers=headers,
-                timeout=WORKER_API_TIMEOUT,
-            )
-            status_code = response.status_code
-    except httpx.HTTPError as e:
-        logger.warning("Upstream request failed while checking %s: %r", url, e)
-        return None
-    if status_code in _HF_VISIBILITY_RETRY or status_code >= 500:
-        return None
-    return 200 <= status_code < 300
+        sha = response.json().get("sha")
+    except (ValueError, AttributeError):
+        sha = None
+    return True, sha

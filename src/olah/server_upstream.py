@@ -6,7 +6,13 @@ from fastapi.responses import Response
 from olah.errors import error_proxy_timeout, error_repo_not_found, error_revision_not_found
 from olah.proxy.result import ProxyResult
 from olah.server_access import RepoRef
-from olah.utils.repo_utils import check_commit_hf, get_commit_hf, get_newest_commit_hf, is_full_commit_hash
+from olah.utils.repo_utils import (
+    check_commit_hf,
+    get_commit_hf,
+    get_newest_commit_hf,
+    is_full_commit_hash,
+    lookup_commit_hf,
+)
 
 
 @dataclass(frozen=True)
@@ -53,7 +59,35 @@ async def resolve_requested_commit(
                 return None, error_proxy_timeout()
             if not repo_exists:
                 return None, error_repo_not_found()
-        commit_exists = await check_commit_hf(
+        # A full SHA needs only an existence check; a branch/tag GET answers
+        # existence and resolution together.
+        if is_full_commit_hash(requested_commit):
+            commit_exists = await check_commit_hf(
+                app,
+                repo.repo_type,
+                repo.org,
+                repo.repo,
+                commit=requested_commit,
+                authorization=authorization,
+            )
+            resolved_commit = requested_commit.lower()
+        else:
+            commit_exists, resolved_commit = await lookup_commit_hf(
+                app,
+                repo.repo_type,
+                repo.org,
+                repo.repo,
+                commit=requested_commit,
+                authorization=authorization,
+            )
+        if commit_exists is None:
+            return None, error_proxy_timeout()
+        if not commit_exists:
+            if missing_commit_response == "repo_not_found":
+                return None, error_repo_not_found()
+            return None, error_revision_not_found(revision=requested_commit)
+    else:
+        resolved_commit = await get_commit_hf(
             app,
             repo.repo_type,
             repo.org,
@@ -61,21 +95,6 @@ async def resolve_requested_commit(
             commit=requested_commit,
             authorization=authorization,
         )
-        if commit_exists is None:
-            return None, error_proxy_timeout()
-        if not commit_exists:
-            if missing_commit_response == "repo_not_found":
-                return None, error_repo_not_found()
-            return None, error_revision_not_found(revision=requested_commit)
-
-    resolved_commit = await get_commit_hf(
-        app,
-        repo.repo_type,
-        repo.org,
-        repo.repo,
-        commit=requested_commit,
-        authorization=authorization,
-    )
     if resolved_commit is None:
         if app.state.app_settings.config.offline:
             return None, error_repo_not_found()
