@@ -100,7 +100,13 @@ def test_hfapi_discovery_and_immutable_download_online_then_offline(tmp_path, mo
     monkeypatch.setattr(httpx, "AsyncClient", UpstreamClient)
     with TestClient(app) as client:
         monkeypatch.setattr("huggingface_hub.hf_api.get_session", lambda: client)
-        monkeypatch.setattr("huggingface_hub.utils._pagination.get_session", lambda: client)
+        # huggingface_hub >= 2.0 moved the shared session from utils._pagination
+        # (its own binding, pre-2.0) to utils._http, where http_backoff resolves
+        # it at call time. Patch the binding that paginate() actually uses.
+        try:
+            monkeypatch.setattr("huggingface_hub.utils._pagination.get_session", lambda: client)
+        except AttributeError:
+            monkeypatch.setattr("huggingface_hub.utils._http.get_session", lambda: client)
         api = HfApi(endpoint="http://testserver", token=False)
 
         def discover(expected):
