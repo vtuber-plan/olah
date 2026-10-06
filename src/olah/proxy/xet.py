@@ -24,6 +24,7 @@ from fastapi import FastAPI, Request
 
 from olah.cache.olah_cache import OlahCache
 from olah.constants import WORKER_API_TIMEOUT
+from olah.errors import raise_if_rate_limited
 from olah.proxy.files import _build_file_response
 from olah.proxy.result import ProxyResult, single_chunk_body
 from olah.utils.file_utils import make_dirs
@@ -66,6 +67,7 @@ async def _xet_resolve_url(
             resp = await client.head(url, headers=headers, timeout=WORKER_API_TIMEOUT)
     except httpx.HTTPError:
         return None, None
+    raise_if_rate_limited(resp)
     if resp.status_code in (301, 302, 303, 307, 308):
         size = _int_or_none(
             resp.headers.get("x-linked-size") or resp.headers.get("content-length")

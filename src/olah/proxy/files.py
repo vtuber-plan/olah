@@ -33,7 +33,12 @@ from olah.cache.olah_cache import (
     OlahCache,
     compression_algo_from_name,
 )
-from olah.errors import error_entry_not_found, error_proxy_invalid_data, error_proxy_timeout
+from olah.errors import (
+    error_entry_not_found,
+    error_proxy_invalid_data,
+    error_proxy_timeout,
+    raise_if_rate_limited,
+)
 from olah.proxy.pathsinfo import pathsinfo_generator
 from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.url_utils import (
@@ -698,6 +703,9 @@ async def _resource_etag(hf_url: str, authorization: Optional[str]=None, offline
                     headers=etag_headers,
                     timeout=WORKER_API_TIMEOUT,
                 )
+            # A 429 carries no etag; the URL-derived fallback would then
+            # mismatch the cached identity and discard a good cache.
+            raise_if_rate_limited(response)
             if "etag" in response.headers:
                 ret_etag = response.headers["etag"]
             else:
@@ -737,6 +745,7 @@ async def _remote_file_metadata(
             )
     except (httpx.HTTPError, ValueError):
         return None, None
+    raise_if_rate_limited(response)
     if response.status_code >= 400:
         return None, response.status_code
 
@@ -873,6 +882,7 @@ async def _probe_xet_resolve(
                 return None
     except (httpx.HTTPError, ValueError):
         return None
+    raise_if_rate_limited(response)
     return response
 
 

@@ -61,9 +61,9 @@ async def test_authorize_fail_closed(monkeypatch, tmp_path):
 async def test_visibility_cache_skips_transient_failures(monkeypatch, tmp_path):
     """A transient upstream failure (504) must not poison the visibility cache.
 
-    With check_commit_hf mapping Hub 429/408/425 to None -> error_proxy_timeout,
+    With check_commit_hf mapping Hub 408/425/5xx to None -> error_proxy_timeout,
     caching that as "not visible" would deny every LFS/Xet object of the repo
-    for the whole TTL on a single rate-limit blip.
+    for the whole TTL on a single upstream blip.
     """
     import olah.server_access as server_access
 

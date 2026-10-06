@@ -10,6 +10,7 @@ import brotli
 import httpx
 import pytest
 from fastapi import Request
+from olah.errors import UpstreamRateLimited
 from olah.proxy.result import ProxyResult, single_chunk_body
 
 
@@ -780,7 +781,7 @@ async def test_remote_file_metadata_returns_none_on_http_errors(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("upstream_status", [400, 401, 403, 404, 429])
+@pytest.mark.parametrize("upstream_status", [400, 401, 403, 404])
 async def test_remote_file_metadata_reports_upstream_client_errors(monkeypatch, upstream_status):
     class FakeResponse:
         status_code = upstream_status
@@ -807,6 +808,39 @@ async def test_remote_file_metadata_reports_upstream_client_errors(monkeypatch, 
 
     assert metadata is None
     assert status == upstream_status
+
+
+@pytest.mark.asyncio
+async def test_remote_file_metadata_relays_rate_limit(monkeypatch):
+    class FakeResponse:
+        status_code = 429
+        headers = {"retry-after": "42", "ratelimit": '"resolvers";r=0;t=42', "set-cookie": "x"}
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(proxy_files.httpx, "AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(UpstreamRateLimited) as excinfo:
+        await proxy_files._remote_file_metadata(
+            app=None,
+            hf_url="https://remote/file",
+            authorization=None,
+            offline=False,
+        )
+
+    response = excinfo.value.response()
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "42"
+    assert response.headers["ratelimit"] == '"resolvers";r=0;t=42'
+    assert "set-cookie" not in response.headers
 
 
 @pytest.mark.asyncio

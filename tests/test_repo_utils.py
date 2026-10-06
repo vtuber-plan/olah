@@ -4,7 +4,9 @@ import json
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
+from olah.errors import UpstreamRateLimited
 from olah.utils import cache_utils, repo_utils
 
 
@@ -251,6 +253,7 @@ def _make_fake_client(
     class FakeResponse:
         def __init__(self, code):
             self.status_code = code
+            self.headers = {}
 
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs):
@@ -333,12 +336,53 @@ def test_check_commit_hf_follows_redirects_and_classifies_final_status(monkeypat
     assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is False
 
 
-def test_check_commit_hf_returns_none_on_rate_limit(monkeypatch, tmp_path):
+def test_check_commit_hf_raises_on_rate_limit_without_retrying(monkeypatch, tmp_path):
     app = _make_app(tmp_path, offline=False)
     calls = []
     _make_fake_client(monkeypatch, status_code=429, calls=calls)
-    assert asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo")) is None
-    assert len(calls) == 3
+    with pytest.raises(UpstreamRateLimited):
+        asyncio.run(repo_utils.check_commit_hf(app, "models", "team", "demo"))
+    assert len(calls) == 1
+
+
+def _rate_limited_get_client(monkeypatch):
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return httpx.Response(429, headers={"retry-after": "7"})
+
+    monkeypatch.setattr(repo_utils.httpx, "AsyncClient", FakeAsyncClient)
+
+
+def test_get_commit_hf_serves_cached_revision_when_rate_limited(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    save_path = tmp_path / "api" / "models" / "team" / "demo" / "revision" / "main" / "meta_get.json"
+    save_path.parent.mkdir(parents=True)
+    asyncio.run(
+        cache_utils.write_cache_request(
+            str(save_path),
+            status_code=200,
+            headers={"content-type": "application/json"},
+            content=json.dumps({"sha": "cached-sha"}).encode("utf-8"),
+        )
+    )
+    _rate_limited_get_client(monkeypatch)
+
+    assert asyncio.run(repo_utils.get_commit_hf(app, "models", "team", "demo", "main")) == "cached-sha"
+
+
+def test_get_commit_hf_raises_when_rate_limited_without_cache(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    _rate_limited_get_client(monkeypatch)
+
+    with pytest.raises(UpstreamRateLimited) as excinfo:
+        asyncio.run(repo_utils.get_commit_hf(app, "models", "team", "demo", "main"))
+    assert excinfo.value.headers == {"retry-after": "7"}
 
 
 def test_check_commit_hf_does_not_retry_anonymously_when_token_is_rejected(monkeypatch, tmp_path):
