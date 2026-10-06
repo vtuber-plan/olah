@@ -6,6 +6,7 @@
 # https://opensource.org/licenses/MIT.
 
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import json
 import os
@@ -176,6 +177,35 @@ async def _write_block_safely(
         raise
 
 
+@asynccontextmanager
+async def _open_remote_range(
+    client: httpx.AsyncClient, remote_info: RemoteInfo, start_pos: int, end_pos: int
+) -> AsyncIterator[httpx.Response]:
+    """Request a byte range, reusing the signed redirect target of earlier ranges."""
+    while True:
+        redirected = remote_info.redirected_url is not None
+        url = remote_info.redirected_url or remote_info.url
+        headers = {"range": f"bytes={start_pos}-{end_pos - 1}"}
+        authorization = remote_info.headers.get("authorization", None)
+        if authorization is not None and urlparse(url).netloc == urlparse(remote_info.url).netloc:
+            headers["authorization"] = authorization
+        async with client.stream(
+            method=remote_info.method,
+            url=url,
+            headers=headers,
+            timeout=WORKER_API_TIMEOUT,
+            follow_redirects=True,
+        ) as response:
+            if redirected and 400 <= response.status_code < 500 and response.status_code != 429:
+                # Most likely the signature expired; resolve it afresh.
+                remote_info.redirected_url = None
+                continue
+            if response.history:
+                remote_info.redirected_url = str(response.url)
+            yield response
+            return
+
+
 async def _get_file_range_from_remote(
     client: httpx.AsyncClient,
     remote_info: RemoteInfo,
@@ -183,20 +213,9 @@ async def _get_file_range_from_remote(
     start_pos: int,
     end_pos: int,
 ):
-    headers = {}
-    if remote_info.headers.get("authorization", None) is not None:
-        headers["authorization"] = remote_info.headers.get("authorization", None)
-    headers["range"] = f"bytes={start_pos}-{end_pos - 1}"
-
     chunk_bytes = 0
     decompressor: Optional[Decompressor] = None
-    async with client.stream(
-        method=remote_info.method,
-        url=remote_info.url,
-        headers=headers,
-        timeout=WORKER_API_TIMEOUT,
-        follow_redirects=True,
-    ) as response:
+    async with _open_remote_range(client, remote_info, start_pos, end_pos) as response:
         status_code = response.status_code
     
         if status_code == 429:
@@ -552,6 +571,7 @@ async def _file_chunk_get(
         expected_etag=expected_etag,
     )
 
+    remote_info = RemoteInfo(method, url, headers)
     try:
         _, all_ranges, _ = get_request_ranges(file_size, headers.get("range"))
 
@@ -573,7 +593,6 @@ async def _file_chunk_get(
                         raise Exception(
                             "cache miss in cache-only mode (no upstream URL available)"
                         )
-                    remote_info = RemoteInfo(method, url, headers)
                     async for piece in _yield_range_blocks(
                         client=client,
                         remote_info=remote_info,
@@ -605,7 +624,6 @@ async def _file_chunk_get(
                         if url is None:
                             # Cache-only mode cannot re-fetch; let it surface.
                             raise
-                        remote_info = RemoteInfo(method, url, headers)
                         async for piece in _yield_range_blocks(
                             client=client,
                             remote_info=remote_info,

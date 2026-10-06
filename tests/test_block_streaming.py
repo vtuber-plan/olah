@@ -58,6 +58,7 @@ class _GatedStreamResponse:
 
     def __init__(self, body: bytes, gate: asyncio.Event, parts: int, gate_after: int):
         self.status_code = 206
+        self.history = []
         self.headers = {"content-length": str(len(body))}
         self._body = body
         self._gate = gate
@@ -162,6 +163,7 @@ class _PlainStreamResponse:
 
     def __init__(self, body: bytes, parts: int, content_length: int):
         self.status_code = 206
+        self.history = []
         self.headers = {"content-length": str(content_length)}
         self._body = body
         self._parts = parts
@@ -626,6 +628,7 @@ class _BrotliRangeClient:
 
         class _Resp:
             status_code = 206
+            history = []
             headers = {"content-encoding": "br"}
 
             async def __aenter__(self):

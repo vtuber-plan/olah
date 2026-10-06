@@ -631,6 +631,7 @@ async def test_get_file_range_from_remote_streams_decompressed_content_and_sets_
 
     class FakeResponse:
         status_code = 206
+        history = []
         headers = {"content-encoding": "br"}
 
         async def __aenter__(self):
@@ -678,6 +679,7 @@ async def test_get_file_range_from_remote_streams_decompressed_content_and_sets_
 async def test_get_file_range_from_remote_raises_on_incomplete_content_length():
     class FakeResponse:
         status_code = 206
+        history = []
         headers = {"content-length": "3"}
 
         async def __aenter__(self):
@@ -719,6 +721,7 @@ async def test_get_file_range_from_remote_supports_chunked_responses_without_con
 
     class FakeResponse:
         status_code = 206
+        history = []
         headers = {}
 
         async def __aenter__(self):
@@ -785,6 +788,7 @@ async def test_remote_file_metadata_returns_none_on_http_errors(monkeypatch):
 async def test_remote_file_metadata_reports_upstream_client_errors(monkeypatch, upstream_status):
     class FakeResponse:
         status_code = upstream_status
+        history = []
         headers = {}
 
     class FakeAsyncClient:
@@ -852,6 +856,7 @@ async def test_file_chunk_get_persists_single_block_files(tmp_path):
 
     class FakeResponse:
         status_code = 206
+        history = []
         headers = {"content-encoding": "gzip"}
 
         async def __aenter__(self):

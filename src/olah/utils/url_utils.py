@@ -171,6 +171,8 @@ class RemoteInfo(object):
         self.method = method
         self.url = url
         self.headers = headers
+        # Reused for later ranges so each block isn't another Hub resolve call.
+        self.redirected_url: Optional[str] = None
 
 
 def check_url_has_param_name(url: str, param_name: str) -> bool:
