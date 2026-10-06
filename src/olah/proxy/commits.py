@@ -8,9 +8,8 @@
 import os
 from typing import Literal, Optional
 from urllib.parse import urljoin
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 
-from olah.constants import CHUNK_SIZE
 from olah.errors import error_entry_not_found
 
 from olah.utils.cache_utils import read_cache_request
