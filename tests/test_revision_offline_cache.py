@@ -138,7 +138,7 @@ async def test_full_sha_tree_cold_and_warm_online_and_offline(environment, offli
     else:
         assert env.calls[:2] == [("HEAD", API, "Bearer fixture"), ("HEAD", f"{API}/revision/{sha}", "Bearer fixture")]
         assert all(method == "HEAD" or "/tree/" in path for method, path, _ in env.calls)
-        assert len(env.calls) == (2 if warm else 4)
+        assert len(env.calls) == (2 if warm else 3)
         assert all(path == f"{API}/tree/{SHA}/" for method, path, _ in env.calls if method != "HEAD")
     assert not (Path(env.config.repos_path) / f"api/models/{REPO}/revision/{SHA}/meta_get.json").exists()
 
@@ -319,7 +319,7 @@ async def test_full_sha_online_respects_cache_write_rules(environment):
     response = await _request(env, f"{API}/tree/{SHA}/?recursive=true")
     assert response.status_code == 200
     assert not list(Path(env.config.repos_path).rglob("tree_*.json"))
-    assert len(env.calls) == 4
+    assert len(env.calls) == 3
 
 
 @pytest.mark.asyncio
@@ -365,3 +365,17 @@ async def test_offline_stream_never_recovers_blocks_from_upstream(environment, c
         ):
             _ = [chunk async for chunk in body]
     assert env.calls == []
+
+
+@pytest.mark.asyncio
+async def test_branch_tree_resolves_revision_with_one_get(environment):
+    env = environment
+    response = await _request(env, f"{API}/tree/main?recursive=true")
+    assert response.status_code == 200
+    assert response.json() == TREE
+    assert [(method, path) for method, path, _ in env.calls] == [
+        ("HEAD", API),
+        ("GET", f"{API}/revision/main"),
+        ("GET", f"{API}/tree/main/"),
+        ("GET", f"{API}/tree/{SHA}/"),
+    ]

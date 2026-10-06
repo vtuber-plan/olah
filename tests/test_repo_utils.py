@@ -360,3 +360,36 @@ def test_check_commit_hf_does_not_retry_anonymously_when_token_is_rejected(monke
     assert ok is False
     assert len(calls) == 1
     assert calls[0]["headers"].get("authorization") == "Bearer hf_bogus"
+
+
+def test_lookup_commit_hf_resolves_with_a_single_get(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+    calls = []
+
+    async def upstream(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json={"sha": "resolved-sha"})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        repo_utils.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=httpx.MockTransport(upstream), **kwargs),
+    )
+
+    result = asyncio.run(repo_utils.lookup_commit_hf(app, "models", "team", "demo", "main"))
+
+    assert result == (True, "resolved-sha")
+    assert calls == [("GET", "/api/models/team/demo/revision/main")]
+
+
+def test_lookup_commit_hf_classifies_like_check_commit_hf(monkeypatch, tmp_path):
+    app = _make_app(tmp_path, offline=False)
+
+    _make_fake_client(monkeypatch, status_code=404)
+    assert asyncio.run(repo_utils.lookup_commit_hf(app, "models", "team", "demo", "main")) == (False, None)
+
+    calls = []
+    _make_fake_client(monkeypatch, status_code=503, calls=calls)
+    assert asyncio.run(repo_utils.lookup_commit_hf(app, "models", "team", "demo", "main")) == (None, None)
+    assert len(calls) == 3
