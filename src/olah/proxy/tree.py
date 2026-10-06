@@ -6,18 +6,16 @@
 # https://opensource.org/licenses/MIT.
 
 import os
-from typing import AsyncIterator, Dict, Literal, Mapping, Optional
+from typing import Literal, Optional
 from urllib.parse import urljoin
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 
-import httpx
-from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 from olah.errors import error_entry_not_found
 
-from olah.utils.cache_utils import read_cache_request, write_cache_request
+from olah.utils.cache_utils import read_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
-from olah.utils.file_utils import make_dirs
+from olah.proxy.api_proxy import proxy_api_request
 from olah.proxy.result import ProxyResult, single_chunk_body
 
 
@@ -28,64 +26,6 @@ async def _tree_cache_generator(save_path: str) -> ProxyResult:
         headers=cache_rq["headers"],
         body=single_chunk_body(cache_rq["content"]),
     )
-
-async def _tree_proxy_generator(
-    app: FastAPI,
-    headers: Dict[str, str],
-    tree_url: str,
-    method: str,
-    params: Mapping[str, str],
-    allow_cache: bool,
-    save_path: str,
-) -> ProxyResult:
-    response_status_code = 500
-    response_headers: Dict[str, str] = {}
-
-    async def body_iter() -> AsyncIterator[bytes]:
-        nonlocal response_status_code, response_headers
-        content_chunks = []
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            async with client.stream(
-                method=method,
-                url=tree_url,
-                params=params,
-                headers=headers,
-                timeout=WORKER_API_TIMEOUT,
-            ) as response:
-                response_status_code = response.status_code
-                response_headers = dict(response.headers)
-                async for raw_chunk in response.aiter_raw():
-                    if not raw_chunk:
-                        continue
-                    content_chunks.append(raw_chunk)
-                    yield raw_chunk
-
-        content = bytearray()
-        for chunk in content_chunks:
-            content += chunk
-
-        if allow_cache and response_status_code == 200:
-            make_dirs(save_path)
-            await write_cache_request(
-                save_path, response_status_code, response_headers, bytes(content)
-            )
-
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        async with client.stream(
-            method=method,
-            url=tree_url,
-            params=params,
-            headers=headers,
-            timeout=WORKER_API_TIMEOUT,
-        ) as response:
-            response_status_code = response.status_code
-            response_headers = dict(response.headers)
-    return ProxyResult(
-        status_code=response_status_code,
-        headers=response_headers,
-        body=body_iter(),
-    )
-
 
 async def tree_generator(
     app: FastAPI,
@@ -131,6 +71,6 @@ async def tree_generator(
             headers=missing.headers,
             body=single_chunk_body(missing.body),
         )
-    return await _tree_proxy_generator(
-        app, headers, tree_url, method, {"recursive": recursive, "expand": expand}, allow_cache, save_path
+    return await proxy_api_request(
+        tree_url, method, headers, allow_cache, save_path, params={"recursive": recursive, "expand": expand}
     )
