@@ -5,8 +5,30 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
+from typing import Mapping
+
 from fastapi import Response
 from fastapi.responses import JSONResponse
+
+# Headers huggingface_hub reads to decide how long to back off on a 429.
+_RATE_LIMIT_HEADERS = ("retry-after", "ratelimit", "ratelimit-policy", "x-error-code", "x-error-message")
+
+
+class UpstreamRateLimited(Exception):
+    """The Hub answered 429; relayed to the client so it can honour the reset window."""
+
+    def __init__(self, upstream_headers: Mapping[str, str]):
+        super().__init__("Upstream rate limited")
+        self.headers = {h: upstream_headers[h] for h in _RATE_LIMIT_HEADERS if h in upstream_headers}
+
+    def response(self) -> Response:
+        headers = {"x-error-message": "Upstream rate limited", **self.headers}
+        return JSONResponse(content={"error": headers["x-error-message"]}, headers=headers, status_code=429)
+
+
+def raise_if_rate_limited(response) -> None:
+    if response.status_code == 429:
+        raise UpstreamRateLimited(response.headers)
 
 
 def error_repo_not_found() -> JSONResponse:

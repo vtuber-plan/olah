@@ -14,7 +14,7 @@ from fastapi import FastAPI
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-from olah.errors import error_entry_not_found, error_proxy_invalid_data
+from olah.errors import error_entry_not_found, error_proxy_invalid_data, raise_if_rate_limited
 from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
@@ -47,6 +47,7 @@ async def _pathsinfo_proxy(
             data={"paths": path},
             timeout=WORKER_API_TIMEOUT,
         )
+        raise_if_rate_limited(response)
 
         if allow_cache and response.status_code == 200:
             make_dirs(save_path)
@@ -56,7 +57,11 @@ async def _pathsinfo_proxy(
                 response.headers,
                 bytes(response.content),
             )
-    return response.status_code, response.headers, response.content
+    response_headers = dict(response.headers)
+    # httpx.content is decoded, so wire-length/encoding headers no longer apply.
+    for name in ("content-encoding", "content-length", "transfer-encoding", "set-cookie"):
+        response_headers.pop(name, None)
+    return response.status_code, response_headers, response.content
 
 
 async def pathsinfo_generator(

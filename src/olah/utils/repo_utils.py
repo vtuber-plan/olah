@@ -18,6 +18,7 @@ import zlib
 from urllib.parse import urljoin
 import httpx
 from olah.constants import WORKER_API_TIMEOUT
+from olah.errors import raise_if_rate_limited
 from olah.utils.cache_utils import read_cache_request
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 # exist", so rate-limits and redirects must not be mapped onto that.
 # Redirects are followed (follow_redirects on the AsyncClient below), so
 # classification only ever sees the final status of the redirect chain.
-_HF_VISIBILITY_RETRY = {408, 425, 429}
+_HF_VISIBILITY_RETRY = {408, 425}
 
 
 def _content_encoding_is_gzip(headers: object) -> bool:
@@ -307,7 +308,10 @@ async def get_newest_commit_hf(
                 headers["authorization"] = authorization
             response = await client.get(url, headers=headers, timeout=WORKER_API_TIMEOUT, follow_redirects=True)
             if response.status_code not in [200, 307]:
-                return await get_newest_commit_hf_offline(app, repo_type, org, repo)
+                cached = await get_newest_commit_hf_offline(app, repo_type, org, repo)
+                if cached is None:
+                    raise_if_rate_limited(response)
+                return cached
             obj = json.loads(response.text)
         return obj.get("sha", None)
     except (httpx.HTTPError, ValueError, OSError):
@@ -402,7 +406,10 @@ async def get_commit_hf(
                 url, headers=headers, timeout=WORKER_API_TIMEOUT, follow_redirects=True
             )
             if response.status_code not in [200, 307]:
-                return await get_commit_hf_offline(app, repo_type, org, repo, commit)
+                cached = await get_commit_hf_offline(app, repo_type, org, repo, commit)
+                if cached is None:
+                    raise_if_rate_limited(response)
+                return cached
             obj = json.loads(response.text)
         return obj.get("sha", None)
     except (httpx.HTTPError, ValueError, OSError):
@@ -418,7 +425,13 @@ async def get_commit_hf(
 async def _probe_hf(
     url: str, method: str, authorization: Optional[str]
 ) -> Tuple[Optional[bool], Optional[httpx.Response]]:
-    """Request a Hub API URL and classify the final status (see check_commit_hf)."""
+    """Request a Hub API URL and classify the final status (see check_commit_hf).
+
+    Raises:
+        UpstreamRateLimited: on a 429, without retrying: retrying immediately
+        only extends the rate limit, and the client can wait for the reset
+        window given in the relayed headers.
+    """
     headers = {}
     if authorization is not None:
         headers["authorization"] = authorization
@@ -433,6 +446,7 @@ async def _probe_hf(
     except httpx.HTTPError as e:
         logger.warning("Upstream request failed while checking %s: %r", url, e)
         return None, None
+    raise_if_rate_limited(response)
     status_code = response.status_code
     if status_code in _HF_VISIBILITY_RETRY or status_code >= 500:
         return None, response
@@ -462,9 +476,14 @@ async def check_commit_hf(
         True if the commit is valid (a final 2xx status once redirects have
         been followed), False if the upstream rejected it (other
         non-retryable status), or None if the upstream could not be reached
-        (transport error, 429, or 5xx).
-        None is retried; callers map it to HTTP 504 rather than 401 so
-        huggingface_hub does not treat a blip as "repo not found".
+        (transport error, 408/425, or 5xx).
+        None is retried by the decorator; callers map it to HTTP 504 rather
+        than 401 so huggingface_hub does not treat a blip as "repo not found".
+
+    Raises:
+        UpstreamRateLimited: on a 429, without retrying: retrying immediately
+        only extends the rate limit, and the client can wait for the reset
+        window given in the relayed headers.
 
     """
     org_repo = get_org_repo(org, repo)

@@ -20,7 +20,7 @@ from fastapi_utils.tasks import repeat_every
 
 from olah.configs import OlahConfig
 from olah.constants import OLAH_CODE_DIR
-from olah.errors import error_page_not_found
+from olah.errors import UpstreamRateLimited, error_page_not_found
 from olah.server_routes import (
     cdn_proxy_common,
     commits_proxy_common,
@@ -170,6 +170,11 @@ _apply_config_from_env()
 @app.exception_handler(404)
 async def custom_404_handler(_, __):
     return error_page_not_found()
+
+
+@app.exception_handler(UpstreamRateLimited)
+async def upstream_rate_limited_handler(_, exc: UpstreamRateLimited):
+    return exc.response()
 
 
 def init():
