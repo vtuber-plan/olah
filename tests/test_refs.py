@@ -76,7 +76,9 @@ async def test_online_refresh_offline_snapshot_and_cold_miss(setup):
         assert (await client.get("/api/models/team/demo/refs")).json() == refs_payload(SHA1)
         state["sha"] = SHA2
         assert (await client.get("/api/models/team/demo/refs")).json() == refs_payload(SHA2)
-        assert len(calls) == 4
+        # Refs always revalidate online (2 GETs); the repo visibility HEAD is
+        # reused from the metadata TTL cache on the second request.
+        assert len(calls) == 3
         config.offline = True
         calls.clear()
         assert (await client.get("/api/models/team/demo/refs")).json() == refs_payload(SHA2)
@@ -119,6 +121,11 @@ async def test_invalid_or_unreachable_refs_preserve_snapshot(setup, failure):
 @pytest.mark.asyncio
 async def test_auth_cache_isolation_and_visibility_gate(setup, tmp_path):
     app, config, calls, state = setup
+    # This test pins the visibility gate itself: a repo that turns private must
+    # stop being served on the very next request. Disable the metadata TTL so
+    # the gate is exercised on every request (TTL semantics have their own
+    # tests in test_metadata_ttl.py).
+    config.metadata_cache_ttl = 0
     auth = {"authorization": "Bearer secret-fixture-token"}
     async with ORIGINAL_CLIENT(transport=httpx.ASGITransport(app=app), base_url="http://olah.test") as client:
         assert (await client.get("/api/models/team/demo/refs", headers=auth)).status_code == 200

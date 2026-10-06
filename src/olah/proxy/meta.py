@@ -12,7 +12,7 @@ from fastapi import FastAPI
 
 from olah.errors import error_entry_not_found
 
-from olah.utils.cache_utils import read_cache_request
+from olah.utils.cache_utils import read_cache_request, read_cache_request_if_fresh
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
@@ -61,7 +61,16 @@ async def meta_generator(
     )
     # proxy
     offline = app.state.app_settings.config.offline
-    if use_cache and (offline or not override_cache):
+    # override_cache is set when a branch-named request was just resolved to a
+    # SHA, so the branch's cached copy would normally be bypassed to fetch the
+    # freshest state. Within the metadata TTL that refresh is skipped: the
+    # resolution itself already confirmed the mapping, and revalidating every
+    # metadata request against the Hub is what exhausts its API rate limit.
+    ttl = getattr(app.state.app_settings.config, "metadata_cache_ttl", 0)
+    fresh = use_cache and ttl > 0 and (
+        await read_cache_request_if_fresh(save_path, ttl) is not None
+    )
+    if use_cache and (offline or not override_cache or fresh):
         return await _meta_cache_generator(save_path)
     if offline:
         missing = error_entry_not_found()

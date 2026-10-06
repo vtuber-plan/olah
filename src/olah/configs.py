@@ -106,6 +106,13 @@ class OlahConfig(object):
         # through olah's cache. Default off.
         self.xet_passthrough: bool = False
         self.xet_passthrough_min_size: int = 50 * 1024**3
+        # Seconds a cached repo/revision metadata response (visibility probe,
+        # branch -> SHA resolution, repo info) is reused without revalidating
+        # against Hugging Face. Model loads repeat these lookups per file and
+        # per worker, which can exhaust the Hub's API rate limit (1000 requests
+        # / 5 minutes); a TTL collapses them to one upstream call per period.
+        # 0 disables reuse: every request revalidates (pre-v0.5.3 behavior).
+        self.metadata_cache_ttl: int = 600
 
         self.hf_scheme: str = "https"
         self.hf_netloc: str = "huggingface.co"
@@ -188,6 +195,7 @@ class OlahConfig(object):
             )
             if xet_min_size is not None:
                 self.xet_passthrough_min_size = xet_min_size
+            self.metadata_cache_ttl = basic.get("metadata-cache-ttl", self.metadata_cache_ttl)
 
             self.hf_scheme = basic.get("hf-scheme", self.hf_scheme)
             self.hf_netloc = basic.get("hf-netloc", self.hf_netloc)

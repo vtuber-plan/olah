@@ -5,6 +5,7 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
+import asyncio
 import datetime
 import gzip
 import logging
@@ -18,8 +19,9 @@ import zlib
 from urllib.parse import urljoin
 import httpx
 from olah.constants import WORKER_API_TIMEOUT
-from olah.errors import raise_if_rate_limited
-from olah.utils.cache_utils import read_cache_request
+from olah.errors import raise_if_rate_limited, UpstreamRateLimited
+from olah.utils.cache_utils import read_cache_request, read_cache_request_if_fresh, write_cache_request
+from olah.utils.file_utils import make_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +137,65 @@ def get_org_repo(org: Optional[str], repo: str) -> str:
     else:
         org_repo = f"{org}/{repo}"
     return org_repo
+
+
+# Metadata (repo visibility, branch -> SHA resolution) is requested per file and
+# per worker during model loads. The per-key locks below collapse a concurrent
+# stampede of identical lookups within one worker into a single upstream call;
+# the fresh/stale disk cache additionally shares results across workers.
+_metadata_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _metadata_lock(key: str) -> asyncio.Lock:
+    """Per-key async lock guarding one metadata revalidation at a time.
+
+    Locks are never removed: the key space is bounded by (repo, revision)
+    pairs actually served, and a dict entry is ~100 bytes.
+    """
+    lock = _metadata_locks.get(key)
+    if lock is None:
+        lock = _metadata_locks.setdefault(key, asyncio.Lock())
+    return lock
+
+
+def _metadata_ttl(app) -> int:
+    return getattr(app.state.app_settings.config, "metadata_cache_ttl", 0)
+
+
+async def _metadata_cache_allowed(app, repo_type: Optional[str], org: Optional[str], repo: str) -> bool:
+    """Cache rules gate metadata cache writes, exactly as for refs/meta/pathsinfo.
+
+    Deferred import: rule_utils imports this module (get_org_repo), so a module
+    level import would be circular.
+    """
+    from olah.utils.rule_utils import check_cache_rules_hf
+
+    return await check_cache_rules_hf(app, repo_type, org, repo)
+
+
+def _cacheable_headers(response: httpx.Response) -> Dict[str, str]:
+    """Headers safe to persist next to a decoded response body.
+
+    httpx returns ``response.content`` already decompressed, so wire-length and
+    encoding headers no longer describe the stored bytes and must not be
+    replayed to clients reading this cache (same normalization as refs).
+    """
+    headers = dict(response.headers)
+    for name in ("content-encoding", "content-length", "transfer-encoding", "set-cookie"):
+        headers.pop(name, None)
+    return headers
+
+
+def get_repo_get_save_path(repos_path: str, repo_type: str, org: Optional[str], repo: str) -> str:
+    """Disk path of the TTL cache for the repo-root info GET (latest commit)."""
+    org_repo = get_org_repo(org, repo)
+    return os.path.join(repos_path, f"api/{repo_type}/{org_repo}/repo_get.json")
+
+
+def get_repo_head_save_path(repos_path: str, repo_type: str, org: Optional[str], repo: str) -> str:
+    """Disk path of the TTL cache for the repo-root visibility HEAD probe."""
+    org_repo = get_org_repo(org, repo)
+    return os.path.join(repos_path, f"api/{repo_type}/{org_repo}/repo_head.json")
 
 
 def parse_org_repo(org_repo: str) -> Tuple[Optional[str], Optional[str]]:
@@ -285,6 +346,9 @@ async def get_newest_commit_hf(
     """
     Retrieves the newest commit hash for a repository.
 
+    Within the configured metadata TTL the cached repo info is reused without
+    contacting Hugging Face; a stale copy is served when the upstream fails.
+
     Args:
         app: The application object.
         repo_type: The type of repository.
@@ -301,11 +365,24 @@ async def get_newest_commit_hf(
     )
     if app.state.app_settings.config.offline:
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
+
+    ttl = _metadata_ttl(app)
+    save_path = get_repo_get_save_path(
+        app.state.app_settings.config.repos_path, repo_type, org, repo
+    )
+    if ttl > 0:
+        cached = await read_cache_request_if_fresh(save_path, ttl)
+        if cached is not None:
+            try:
+                return _load_cached_json_payload(cached).get("sha")
+            except (ValueError, UnicodeDecodeError, zlib.error):
+                pass
+    allow_cache = ttl > 0 and await _metadata_cache_allowed(app, repo_type, org, repo)
     try:
+        headers = {}
+        if authorization is not None:
+            headers["authorization"] = authorization
         async with httpx.AsyncClient() as client:
-            headers = {}
-            if authorization is not None:
-                headers["authorization"] = authorization
             response = await client.get(url, headers=headers, timeout=WORKER_API_TIMEOUT, follow_redirects=True)
             if response.status_code not in [200, 307]:
                 cached = await get_newest_commit_hf_offline(app, repo_type, org, repo)
@@ -313,6 +390,11 @@ async def get_newest_commit_hf(
                     raise_if_rate_limited(response)
                 return cached
             obj = json.loads(response.text)
+        if allow_cache:
+            make_dirs(save_path)
+            await write_cache_request(
+                save_path, 200, _cacheable_headers(response), response.content
+            )
         return obj.get("sha", None)
     except (httpx.HTTPError, ValueError, OSError):
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
@@ -487,16 +569,35 @@ async def check_commit_hf(
 
     """
     org_repo = get_org_repo(org, repo)
+    ttl = _metadata_ttl(app)
+    repos_path = app.state.app_settings.config.repos_path
     if commit is None:
         url = urljoin(
             app.state.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}"
         )
+        save_path = get_repo_head_save_path(repos_path, repo_type, org, repo)
     else:
         url = urljoin(
             app.state.app_settings.config.hf_url_base(),
             f"/api/{repo_type}/{org_repo}/revision/{commit}",
         )
+        # Same envelope the client-facing HEAD route persists under
+        # revision/{commit}/meta_head.json, so both writers feed one cache
+        # entry per revision.
+        revision_dir = os.path.dirname(
+            get_meta_save_path(repos_path, repo_type, org, repo, commit)
+        )
+        save_path = os.path.join(revision_dir, "meta_head.json")
+    if ttl > 0 and await read_cache_request_if_fresh(save_path, ttl) is not None:
+        return True
     exists, _ = await _probe_hf(url, "HEAD", authorization)
+    if (
+        exists is True
+        and ttl > 0
+        and await _metadata_cache_allowed(app, repo_type, org, repo)
+    ):
+        make_dirs(save_path)
+        await write_cache_request(save_path, 200, {}, b"")
     return exists
 
 
@@ -510,20 +611,98 @@ async def lookup_commit_hf(
 ) -> Tuple[Optional[bool], Optional[str]]:
     """Check a revision and resolve it to a commit SHA in one upstream request.
 
+    Within the configured metadata TTL the branch/tag -> SHA mapping is served
+    from the revision metadata cache (the same ``revision/{rev}/meta_get.json``
+    envelope the client-facing metadata route and offline mode use), so file
+    downloads that address a branch stop re-resolving it against the Hub on
+    every request. Concurrent lookups of the same revision inside one worker
+    share a single upstream call; when revalidation fails but a stale entry
+    exists, the stale SHA is served instead of erroring, which keeps clients
+    retrying against the cache rather than burning rate-limit quota.
+
     Returns ``(exists, sha)``: ``exists`` is classified exactly as
     ``check_commit_hf`` does, and ``sha`` is set only when the revision exists
-    and the Hub returned a usable payload.
+    and the Hub returned a usable payload. Only positive results are cached.
     """
+    ttl = _metadata_ttl(app)
+    save_path = get_meta_save_path(
+        app.state.app_settings.config.repos_path, repo_type, org, repo, commit
+    )
+
+    def _sha_from(cached: Dict) -> Optional[str]:
+        try:
+            return _load_cached_json_payload(cached).get("sha")
+        except (ValueError, UnicodeDecodeError, zlib.error):
+            return None
+
+    if ttl > 0:
+        cached = await read_cache_request_if_fresh(save_path, ttl)
+        if cached is not None:
+            cached_sha = _sha_from(cached)
+            if cached_sha is not None:
+                return True, cached_sha
+
     org_repo = get_org_repo(org, repo)
     url = urljoin(
         app.state.app_settings.config.hf_url_base(),
         f"/api/{repo_type}/{org_repo}/revision/{commit}",
     )
-    exists, response = await _probe_hf(url, "GET", authorization)
-    if not exists:
-        return exists, None
+    lock = _metadata_lock(f"revision:{repo_type}:{org_repo}:{commit}")
+    async with lock:
+        allow_cache = ttl > 0 and await _metadata_cache_allowed(app, repo_type, org, repo)
+        # Another coroutine may have revalidated while this caller waited.
+        if ttl > 0:
+            cached = await read_cache_request_if_fresh(save_path, ttl)
+            if cached is not None:
+                cached_sha = _sha_from(cached)
+                if cached_sha is not None:
+                    return True, cached_sha
+        try:
+            exists, response = await _probe_hf(url, "GET", authorization)
+        except (UpstreamRateLimited, httpx.HTTPError):
+            # A rate-limited or unreachable upstream must not turn a cached
+            # revision into an error: serving the last known SHA keeps the
+            # mirror usable and stops the client retry loop from spending
+            # whatever quota remains.
+            if ttl > 0 and os.path.exists(save_path):
+                stale = await _read_stale_sha(save_path)
+                if stale is not None:
+                    logger.warning(
+                        "Upstream failed for %s; serving stale revision metadata", url
+                    )
+                    return True, stale
+            raise
+        if exists is None:
+            # Upstream unreachable (transport error, 408/425, 5xx after
+            # retries): same stale-serving rationale as the exception path.
+            if ttl > 0 and os.path.exists(save_path):
+                stale = await _read_stale_sha(save_path)
+                if stale is not None:
+                    logger.warning(
+                        "Upstream unavailable for %s; serving stale revision metadata", url
+                    )
+                    return True, stale
+            return None, None
+        if not exists:
+            return exists, None
+        try:
+            sha = response.json().get("sha")
+        except (ValueError, AttributeError):
+            sha = None
+        if allow_cache and sha is not None:
+            make_dirs(save_path)
+            await write_cache_request(
+                save_path, 200, _cacheable_headers(response), response.content
+            )
+        return True, sha
+
+
+async def _read_stale_sha(save_path: str) -> Optional[str]:
+    """Best-effort SHA from a stale (age-expired) revision cache entry."""
     try:
-        sha = response.json().get("sha")
-    except (ValueError, AttributeError):
-        sha = None
-    return True, sha
+        cached = await read_cache_request(save_path)
+        if cached.get("status_code") != 200:
+            return None
+        return _load_cached_json_payload(cached).get("sha")
+    except (OSError, ValueError, KeyError, zlib.error):
+        return None

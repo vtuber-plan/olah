@@ -7,6 +7,9 @@ repos-path = "/data/repos"
 cache-size-limit = ""
 cache-clean-strategy = "LRU"
 cache-compression = "none"
+# Reuse cached repo/revision metadata for this many seconds before
+# revalidating against Hugging Face (0 = revalidate every request).
+metadata-cache-ttl = 600
 # Xet pass-through: let the client's hf_xet download Xet files >= the
 # threshold directly from xethub.hf.co (hf_hub cannot fetch them over
 # plain HTTP). Smaller Xet files still flow through the cache.

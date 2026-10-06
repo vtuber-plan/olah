@@ -197,6 +197,7 @@ def init():
     parser.add_argument("--cache-clean-strategy", type=str, default="LRU", help="The clean strategy of cache. ('LRU', 'FIFO', 'LARGE_FIRST')")
     parser.add_argument("--cache-compression", type=str, default="none", help="Compression algorithm for cache blocks. ('none', 'gzip', 'lzma')")
     parser.add_argument("--log-path", type=str, default="./logs", help="The folder to save logs")
+    parser.add_argument("--metadata-cache-ttl", type=int, default=600, help="Seconds to reuse cached repo/revision metadata before revalidating against Hugging Face. 0 disables reuse (always revalidate).")
     parser.add_argument("--workers", type=int, default=1, help="Number of worker processes. Default 1 (single process). Values >1 enable multi-process scaling for production throughput and require --config (each worker re-reads it).")
     args = parser.parse_args()
 
@@ -248,6 +249,8 @@ def init():
             config.cache_clean_strategy = args.cache_clean_strategy
         if not is_default_value(args, "cache_compression"):
             config.cache_compression = args.cache_compression
+        if not is_default_value(args, "metadata_cache_ttl"):
+            config.metadata_cache_ttl = args.metadata_cache_ttl
 
         config.host = normalize_server_host(config.host)
 

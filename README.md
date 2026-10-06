@@ -174,6 +174,7 @@ ssl-cert = ""
 repos-path = "./repos"
 cache-size-limit = ""
 cache-clean-strategy = "LRU"
+metadata-cache-ttl = 600
 hf-scheme = "https"
 hf-netloc = "huggingface.co"
 hf-lfs-netloc = "cdn-lfs.huggingface.co"
@@ -188,6 +189,7 @@ mirrors-path = ["./mirrors_dir"]
 - `repos-path`: Specifies the directory for storing cached data.
 - `cache-size-limit`: Specifies cache size limit (For example, 100G, 500GB, 2TB). Olah will scan the size of the cache folder every hour. If it exceeds the limit, olah will delete some cache files.
 - `cache-clean-strategy`: Specifies cache cleaning strategy (Available strategies: LRU, FIFO, LARGE_FIRST).
+- `metadata-cache-ttl`: Seconds a cached repo/revision metadata response (repo visibility probe, branch → commit resolution) is reused before revalidating against Hugging Face. A single model startup can repeat these lookups thousands of times (per file, per worker) and exhaust the Hub's API rate limit (1000 requests / 5 minutes). With the default 600, each (repo, revision) costs at most one upstream call per 10 minutes; if the upstream fails or is rate-limited, the last known value is served instead of erroring. `0` disables reuse: every request revalidates (pre-v0.5.3 behavior).
 - `hf-scheme`: Network protocol for the Hugging Face official site (usually no need to modify).
 - `hf-netloc`: Network location of the Hugging Face official site (usually no need to modify).
 - `hf-lfs-netloc`: Network location for Hugging Face official site's LFS files (usually no need to modify).
