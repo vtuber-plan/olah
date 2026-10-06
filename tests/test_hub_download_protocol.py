@@ -77,7 +77,11 @@ def test_hfapi_discovery_and_immutable_download_online_then_offline(tmp_path, mo
         elif "/resolve/" in path:
             sha = path.split("/resolve/", 1)[1].split("/", 1)[0]
             content = contents[sha]
-            headers = {"etag": f'"{hashlib.sha1(content).hexdigest()}"', "content-length": str(len(content))}
+            headers = {
+                "etag": f'"{hashlib.sha1(content).hexdigest()}"',
+                "content-length": str(len(content)),
+                "x-repo-commit": sha,
+            }
             if request.method == "HEAD":
                 return httpx.Response(200, headers=headers, stream=RawBytes(b""))
             data = content
