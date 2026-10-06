@@ -46,6 +46,16 @@ pip install --upgrade pip
 pip install -e .
 ```
 
+### 方法3：使用Docker
+
+Olah 每个版本都会发布多架构（`linux/amd64` 和 `linux/arm64`）镜像到 Docker Hub：
+
+```bash
+docker pull xiahan2019/olah:latest
+```
+
+使用方法见[使用 Docker 运行](#使用-docker-运行)。
+
 ## 快速开始
 在控制台运行以下命令：
 ```bash
@@ -116,10 +126,33 @@ olah-cli --host localhost --port 8090 --repos-path ./hf_mirrors
 **注意，不同版本之间的缓存数据不能迁移，请删除缓存文件夹后再进行olah的升级**
 
 在实际部署中可能出现下载并发量很大，导致新的连接出现Timeout错误。
-可以设置uvicorn的WEB_CONCURRENCY变量以增加worker数量以提升产品场景的并发量。
-例如Linux下:
+可以增加worker数量以提升产品场景的并发量：
 ```bash
-export WEB_CONCURRENCY=4
+olah-cli --workers 4
+```
+
+### 使用 Docker 运行
+
+使用已发布的镜像启动服务器（缓存的数据保存在 `olah-repos` 卷中）：
+```bash
+docker run -d --name olah -p 8090:8090 \
+  -v olah-repos:/data/repos \
+  xiahan2019/olah:latest --host 0.0.0.0
+```
+
+然后在客户端设置 `HF_ENDPOINT=http://localhost:8090`，与上面的用法相同。
+
+注意：
+
+- `--host 0.0.0.0` 让服务器监听所有网络接口，这样端口映射才能访问。`0.5.2` 及之前的镜像必须显式指定，之后的镜像将作为默认值。
+- 每个版本都有对应的版本标签（如 `xiahan2019/olah:0.5.2`），可以固定版本。
+- 其他命令行参数与 `olah-cli` 相同，例如 `--hf-netloc hf-mirror.com` 可以把上游改为中转镜像站。
+- 如需在代理缓存之外提供本地 git 镜像，还需要挂载 `/data/mirrors`。
+
+仓库中也提供了现成的 compose 文件和 `configs.toml` 模板，见 [`docker/up`](https://github.com/vtuber-plan/olah/blob/main/docker/up/)：
+```bash
+cd docker/up
+docker compose up -d
 ```
 
 ## 更多配置

@@ -1,4 +1,4 @@
-ARG OLAH_SOURCE=olah==0.3.3
+ARG OLAH_SOURCE=olah==0.5.2
 
 FROM python:3.12
 
@@ -17,4 +17,4 @@ VOLUME /data/mirrors
 
 ENTRYPOINT [ "olah-cli" ]
 
-CMD ["--repos-path", "/data/repos"]
+CMD ["--host", "0.0.0.0", "--repos-path", "/data/repos"]

@@ -47,6 +47,16 @@ pip install --upgrade pip
 pip install -e .
 ```
 
+### Method 3: With Docker
+
+Olah publishes a multi-arch (`linux/amd64` and `linux/arm64`) image to Docker Hub for every release:
+
+```bash
+docker pull xiahan2019/olah:latest
+```
+
+See [Run with Docker](#run-with-docker) for usage.
+
 ## Quick Start
 Run the command in the console: 
 ```bash
@@ -115,10 +125,33 @@ olah-cli --host localhost --port 8090 --repos-path ./hf_mirrors
 **Note that the cached data between different versions cannot be migrated. Please delete the cache folder before upgrading to the latest version of Olah.**
 
 In deployment scenarios, there may be high concurrent downloads, leading to Timeout errors for new connections.
-You can set the `WEB_CONCURRENCY` variable for uvicorn to increase the number of workers, thereby enhancing concurrency in production environments.
-For example, on Linux:
+You can increase the number of workers to enhance concurrency in production environments:
 ```bash
-export WEB_CONCURRENCY=4
+olah-cli --workers 4
+```
+
+### Run with Docker
+
+Start the server with the published image (cached repositories are kept in the `olah-repos` volume):
+```bash
+docker run -d --name olah -p 8090:8090 \
+  -v olah-repos:/data/repos \
+  xiahan2019/olah:latest --host 0.0.0.0
+```
+
+Then point your clients at it by setting `HF_ENDPOINT=http://localhost:8090`, the same as above.
+
+Notes:
+
+- `--host 0.0.0.0` makes the server listen on all interfaces so the published port is reachable. It is required for images up to `0.5.2` and becomes the image default in later releases.
+- Each release is also tagged by version (e.g. `xiahan2019/olah:0.5.2`), so you can pin one.
+- Other CLI flags work the same way as `olah-cli`, e.g. `--hf-netloc hf-mirror.com` to use an intermediate mirror as the upstream.
+- To serve local git mirrors in addition to the proxy cache, also mount `/data/mirrors`.
+
+There is also a ready-made compose file with a `configs.toml` template under [`docker/up`](https://github.com/vtuber-plan/olah/blob/main/docker/up/):
+```bash
+cd docker/up
+docker compose up -d
 ```
 
 ## More Configurations
