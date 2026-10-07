@@ -85,11 +85,18 @@ def setup(tmp_path, monkeypatch):
 
 
 def _age_every_envelope(repos_path: str, seconds: float) -> None:
-    """Rewind ``cached_at`` on every envelope below repos_path by ``seconds``."""
+    """Rewind ``cached_at`` on every envelope, and access markers, below repos_path by ``seconds``."""
     import os
 
     for root, _, files in os.walk(repos_path):
         for name in files:
+            if os.path.relpath(root, repos_path).split(os.sep)[0] == "access":
+                path = os.path.join(root, name)
+                with open(path, "r", encoding="utf-8") as f:
+                    confirmed_at = float(f.read())
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(repr(confirmed_at - seconds))
+                continue
             if not name.endswith(".json") or name.endswith(".body"):
                 continue
             path = os.path.join(root, name)
