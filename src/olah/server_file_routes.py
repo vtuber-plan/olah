@@ -31,7 +31,7 @@ from olah.server_mirror import has_local_mirror, load_local_mirror_payload
 from olah.server_responses import build_streaming_response
 from olah.server_upstream import resolve_requested_commit
 from olah.utils.lfs_object_index import authorize_lfs_object, cache_allowed_for_lfs_object
-from olah.utils.repo_utils import get_org_repo
+from olah.utils.repo_utils import get_org_repo, record_resolved_commit
 
 
 router = APIRouter()
@@ -101,6 +101,7 @@ async def _file_via_resolve_probe(
         return await _file_via_metadata(
             app, repo_ref, commit, file_path, request, method, authorization
         )
+    await record_resolved_commit(app, repo_ref.repo_type, repo_ref.org, repo_ref.repo, commit, resolved_commit)
     try:
         generator = await file_get_generator(
             app,
