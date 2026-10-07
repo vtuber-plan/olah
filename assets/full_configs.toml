@@ -9,8 +9,10 @@ cache-clean-strategy = "LRU"
 cache-compression = "none"
 # Seconds a cached repo/revision metadata response (visibility probe,
 # branch -> SHA resolution) is reused without revalidating against
-# Hugging Face. Model loads repeat these lookups per file and per worker,
-# which can exhaust the Hub's API rate limit (1000 requests / 5 minutes).
+# Hugging Face. Visibility depends on the caller's token, so it is only
+# reused for the same caller. Model loads repeat these lookups per file
+# and per worker, which can exhaust the Hub's API rate limit (1000
+# requests / 5 minutes).
 # 0 disables reuse: every request revalidates (pre-v0.5.3 behavior).
 metadata-cache-ttl = 600
 # Xet pass-through: let the client's hf_xet download Xet files >= the

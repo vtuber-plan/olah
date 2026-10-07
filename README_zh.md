@@ -191,7 +191,7 @@ mirrors-path = ["./mirrors_dir"]
 - repos-path: 用于保存缓存数据的目录
 - cache-size-limit: 指定缓存大小限制（例如，100G，500GB，2TB）。Olah会每小时扫描缓存文件夹的大小。如果超出限制，Olah会删除一些缓存文件
 - cache-clean-strategy: 指定缓存清理策略（可用策略：LRU，FIFO，LARGE_FIRST）
-- metadata-cache-ttl: 仓库/版本元数据（仓库可见性探测、分支 → commit 解析）在缓存中被复用的秒数，超过后才向 Hugging Face 重新校验。一次模型启动可能重复这些查询上千次（每个文件、每个 worker），耗尽 Hub 的 API 限流配额（每 5 分钟 1000 次请求）。默认 600 表示每个（仓库， 版本）每 10 分钟最多产生一次上游调用；上游失败或被限流时，会返回最后一次已知的值而不是报错。设为 0 可禁用复用：每个请求都重新校验（v0.5.3 之前的行为）。
+- metadata-cache-ttl: 仓库/版本元数据（仓库可见性探测、分支 → commit 解析）在缓存中被复用的秒数，超过后才向 Hugging Face 重新校验。可见性取决于调用者的 token，因此只对同一调用者复用。一次模型启动可能重复这些查询上千次（每个文件、每个 worker），耗尽 Hub 的 API 限流配额（每 5 分钟 1000 次请求）。默认 600 表示每个（仓库， 版本）每 10 分钟最多产生一次上游调用；上游失败或被限流时，会返回最后一次已知的值而不是报错。设为 0 可禁用复用：每个请求都重新校验（v0.5.3 之前的行为）。
 - hf-scheme: huggingface官方站点的网络协议（一般不需要改动）
 - hf-netloc: huggingface官方站点的网络位置（一般不需要改动）
 - hf-lfs-netloc: huggingface官方站点LFS文件的网络位置（一般不需要改动）
