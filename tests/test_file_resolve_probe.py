@@ -41,6 +41,10 @@ def env(tmp_path, monkeypatch):
             if state.lfs:
                 entry["lfs"] = {"oid": LFS_OID, "size": len(CONTENT)}
             return httpx.Response(200, json=[entry])
+        if path == "/api/models/team/demo":
+            return httpx.Response(200)
+        if path.endswith("/revision/main"):
+            return httpx.Response(200, json={"sha": SHA, "siblings": []})
         if request.method == "HEAD" and "/resolve/" in path:
             state.head_request_headers = dict(request.headers)
             if state.head is not None:
@@ -161,3 +165,49 @@ async def test_proxy_rules_are_checked_before_any_upstream_call(env):
 
     assert response.status_code == 401
     assert env.calls == []
+
+
+@pytest.mark.asyncio
+async def test_missing_repo_commit_header_falls_back_to_api_flow(env):
+    # A third-party --hf-netloc may not speak the resolve headers; the
+    # download must still succeed through the API-based flow.
+    env.head = lambda request: httpx.Response(
+        200, headers={"etag": '"blob-oid"', "content-length": str(len(CONTENT))}
+    )
+
+    response = await env.request()
+
+    assert response.status_code == 200
+    assert response.content == CONTENT
+    assert [(m, p) for m, _, p in env.calls] == [
+        ("HEAD", "/team/demo/resolve/main/file.bin"),
+        ("GET", "/api/models/team/demo/revision/main"),
+        ("POST", f"/api/models/team/demo/paths-info/{SHA}"),
+        # No probe response to reuse, so the etag HEAD happens separately,
+        # exactly as in the pre-#97 flow.
+        ("HEAD", f"/team/demo/resolve/{SHA}/file.bin"),
+        ("GET", f"/team/demo/resolve/{SHA}/file.bin"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_redirect_netloc_compare_ignores_case_and_default_port(env):
+    def head(request):
+        if request.url.path.startswith("/team/old-name/"):
+            # Same host, different case and explicit default port.
+            return httpx.Response(
+                307, headers={"location": "http://Upstream.Invalid:80/team/demo/resolve/main/file.bin"}
+            )
+        return httpx.Response(200, headers={"etag": '"blob-oid"', "content-length": str(len(CONTENT)), "x-repo-commit": SHA})
+
+    env.head = head
+
+    response = await env.request("GET", "/team/old-name/resolve/main/file.bin")
+
+    assert response.status_code == 200
+    assert response.content == CONTENT
+    heads = [p for m, _, p in env.calls if m == "HEAD"]
+    assert heads == [
+        "/team/old-name/resolve/main/file.bin",
+        "/team/demo/resolve/main/file.bin",
+    ]

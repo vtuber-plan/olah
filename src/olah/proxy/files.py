@@ -894,15 +894,37 @@ def hf_resolve_url(app, repo_type: str, org_repo: str, revision: str, file_path:
     )
 
 
+def _normalized_netloc(scheme: str, netloc: str) -> str:
+    """Netloc normalized for hub-membership checks.
+
+    DNS names are case-insensitive and the scheme's default port is not part
+    of a host's identity, so ``Hub.Invalid:443`` over https and
+    ``hub.invalid`` must compare equal when deciding whether a redirect is
+    still on the Hub.
+    """
+    netloc = netloc.lower()
+    if (scheme == "http" and netloc.endswith(":80")) or (
+        scheme == "https" and netloc.endswith(":443")
+    ):
+        netloc = netloc.rsplit(":", 1)[0]
+    return netloc
+
+
 async def probe_file_resolve(
     app, url: str, authorization: Optional[str]
 ) -> Tuple[Optional[httpx.Response], Optional[Response]]:
     """HEAD a resolve URL like huggingface_hub does, following redirects only while on the Hub.
 
-    Returns the response (carrying ``x-repo-commit``), or the error to send:
-    the Hub's own 4xx, or a 504.
+    Returns the response (huggingface.co carries ``x-repo-commit`` on it), or
+    the error to send: the Hub's own 4xx, or a 504. A 2xx/3xx response
+    without ``x-repo-commit`` is still returned; the caller decides whether
+    to fall back to the API-based flow for upstreams that don't speak the
+    resolve headers.
     """
-    hub_netloc = app.state.app_settings.config.hf_netloc
+    hub_netloc = _normalized_netloc(
+        app.state.app_settings.config.hf_scheme,
+        app.state.app_settings.config.hf_netloc,
+    )
     headers = {"accept-encoding": "identity"}
     if authorization is not None:
         headers["authorization"] = authorization
@@ -920,7 +942,8 @@ async def probe_file_resolve(
                 if not (300 <= response.status_code < 400 and location):
                     break
                 target = urljoin(url, location)
-                if urlparse(target).netloc != hub_netloc:
+                target_parsed = urlparse(target)
+                if _normalized_netloc(target_parsed.scheme, target_parsed.netloc) != hub_netloc:
                     break
                 url = target
             else:
@@ -935,8 +958,6 @@ async def probe_file_resolve(
         return None, Response(status_code=response.status_code, headers=error_headers)
     if response.status_code >= 400:
         return None, error_proxy_timeout()
-    if HUGGINGFACE_HEADER_X_REPO_COMMIT.lower() not in response.headers:
-        return None, error_proxy_invalid_data()
     return response, None
 
 

@@ -9,7 +9,7 @@ import glob
 import os
 import re
 import traceback
-from typing import Literal
+from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, FastAPI, Request
@@ -86,21 +86,74 @@ async def _file_via_resolve_probe(
     access_error = await ensure_repo_access(app, repo_ref)
     if access_error is not None:
         return access_error
+    authorization = request.headers.get("authorization", None)
     url = hf_resolve_url(app, repo_ref.repo_type, repo_ref.org_repo, commit, file_path)
-    probe, error = await probe_file_resolve(app, url, request.headers.get("authorization", None))
+    probe, error = await probe_file_resolve(app, url, authorization)
     if error is not None:
         return error
+    resolved_commit = probe.headers.get("x-repo-commit")
+    if resolved_commit is None:
+        # The probe succeeded, so the repository is visible to this caller,
+        # but the upstream does not speak the resolve headers. huggingface.co
+        # always sends x-repo-commit; a third-party --hf-netloc may not. Fall
+        # back to the API-based flow (which the metadata TTL still amortizes)
+        # instead of failing every download from such a site.
+        return await _file_via_metadata(
+            app, repo_ref, commit, file_path, request, method, authorization
+        )
     try:
         generator = await file_get_generator(
             app,
             repo_ref.repo_type,
             repo_ref.org,
             repo_ref.repo,
-            probe.headers["x-repo-commit"],
+            resolved_commit,
             file_path=file_path,
             method=method,
             request=request,
             resolve_probe=probe,
+        )
+        return await build_streaming_response(generator)
+    except httpx.ConnectTimeout:
+        traceback.print_exc()
+        return Response(status_code=504)
+
+
+async def _file_via_metadata(
+    app: FastAPI,
+    repo_ref: RepoRef,
+    commit: str,
+    file_path: str,
+    request: Request,
+    method: Literal["HEAD", "GET"],
+    authorization: Optional[str],
+) -> Response:
+    """API-based flow: resolve the revision through the Hub API, then serve.
+
+    Used by the fallback path when the upstream does not return resolve
+    headers; visibility was already established by the successful probe, so
+    only the revision resolution remains.
+    """
+    try:
+        resolved_commit, commit_error = await resolve_requested_commit(
+            app,
+            repo_ref,
+            commit,
+            authorization,
+            repo_visible=True,
+            missing_commit_response="repo_not_found",
+        )
+        if commit_error is not None:
+            return commit_error
+        generator = await file_get_generator(
+            app,
+            repo_ref.repo_type,
+            repo_ref.org,
+            repo_ref.repo,
+            resolved_commit.resolved,
+            file_path=file_path,
+            method=method,
+            request=request,
         )
         return await build_streaming_response(generator)
     except httpx.ConnectTimeout:
