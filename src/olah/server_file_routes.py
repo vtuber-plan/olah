@@ -15,7 +15,7 @@ import httpx
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
-from olah.errors import error_repo_not_found
+from olah.errors import UpstreamRateLimited, error_repo_not_found
 from olah.proxy.files import cdn_file_get_generator, file_get_generator, hf_resolve_url, probe_file_resolve
 from olah.proxy.lfs import lfs_get_generator, lfs_head_generator
 from olah.proxy.xet import xet_get_generator
@@ -31,7 +31,8 @@ from olah.server_mirror import has_local_mirror, load_local_mirror_payload
 from olah.server_responses import build_streaming_response
 from olah.server_upstream import resolve_requested_commit
 from olah.utils.lfs_object_index import authorize_lfs_object, cache_allowed_for_lfs_object
-from olah.utils.repo_utils import get_org_repo, record_resolved_commit
+from olah.utils.repo_utils import get_org_repo, record_caller_access, record_resolved_commit
+from olah.utils.upstream_fallback import is_offline, serve_from_cache_if_granted
 
 
 router = APIRouter()
@@ -81,16 +82,32 @@ async def _file_via_resolve_probe(
     file_path: str,
     request: Request,
     method: Literal["HEAD", "GET"],
-) -> Response:
-    # One resolve HEAD replaces the visibility and revision API calls.
+) -> Optional[Response]:
+    """One resolve HEAD replaces the visibility and revision API calls.
+
+    Returns None when the Hub can't answer but the caller may be served from
+    cache; the caller then continues on the API-based flow, now cache-only.
+    """
     access_error = await ensure_repo_access(app, repo_ref)
     if access_error is not None:
         return access_error
     authorization = request.headers.get("authorization", None)
     url = hf_resolve_url(app, repo_ref.repo_type, repo_ref.org_repo, commit, file_path)
-    probe, error = await probe_file_resolve(app, url, authorization)
+    try:
+        probe, error = await probe_file_resolve(app, url, authorization)
+    except UpstreamRateLimited as rate_limited:
+        if serve_from_cache_if_granted(
+            app, repo_ref.repo_type, repo_ref.org, repo_ref.repo, authorization, rate_limited.response()
+        ):
+            return None
+        raise
     if error is not None:
+        if error.status_code >= 500 and serve_from_cache_if_granted(
+            app, repo_ref.repo_type, repo_ref.org, repo_ref.repo, authorization, error
+        ):
+            return None
         return error
+    await record_caller_access(app, repo_ref.repo_type, repo_ref.org, repo_ref.repo, authorization)
     resolved_commit = probe.headers.get("x-repo-commit")
     if resolved_commit is None:
         # The probe succeeded, so the repository is visible to this caller,
@@ -164,7 +181,7 @@ async def _file_via_metadata(
 
 def _uses_resolve_probe(app: FastAPI, repo_ref: RepoRef) -> bool:
     # Local mirrors rely on the API visibility check; offline never probes.
-    return not app.state.app_settings.config.offline and not has_local_mirror(app, repo_ref)
+    return not is_offline(app) and not has_local_mirror(app, repo_ref)
 
 
 async def file_head_common(
@@ -178,7 +195,9 @@ async def file_head_common(
 ) -> Response:
     repo_ref = build_repo_ref(repo_type, org, repo)
     if _uses_resolve_probe(app, repo_ref):
-        return await _file_via_resolve_probe(app, repo_ref, commit, file_path, request, "HEAD")
+        response = await _file_via_resolve_probe(app, repo_ref, commit, file_path, request, "HEAD")
+        if response is not None:
+            return response
     access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
     if access_error is not None:
         return access_error
@@ -259,7 +278,9 @@ async def file_get_common(
 ) -> Response:
     repo_ref = build_repo_ref(repo_type, org, repo)
     if _uses_resolve_probe(app, repo_ref):
-        return await _file_via_resolve_probe(app, repo_ref, commit, file_path, request, "GET")
+        response = await _file_via_resolve_probe(app, repo_ref, commit, file_path, request, "GET")
+        if response is not None:
+            return response
     access_error = await ensure_repo_visibility(app, repo_ref, request.headers.get("authorization", None))
     if access_error is not None:
         return access_error

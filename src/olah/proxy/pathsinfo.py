@@ -14,17 +14,27 @@ from fastapi import FastAPI
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 
-from olah.errors import error_entry_not_found, error_proxy_invalid_data, raise_if_rate_limited
-from olah.utils.cache_utils import read_cache_request, write_cache_request
+from olah.errors import UpstreamRateLimited, error_entry_not_found, error_proxy_invalid_data, raise_if_rate_limited
+from olah.utils.cache_utils import read_cache_request, read_cache_request_if_fresh, write_cache_request
 from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 from olah.proxy.result import ProxyResult, single_chunk_body
+from olah.utils.upstream_fallback import is_offline
 
 
 async def _pathsinfo_cache(save_path: str) -> Tuple[int, Dict[str, str], bytes]:
     cache_rq = await read_cache_request(save_path)
     return cache_rq["status_code"], cache_rq["headers"], cache_rq["content"]
+
+
+async def _pathsinfo_stale(save_path: str, max_stale: float) -> Optional[Tuple[int, Dict[str, str], bytes]]:
+    if max_stale <= 0:
+        return None
+    cached = await read_cache_request_if_fresh(save_path, max_stale)
+    if cached is None:
+        return None
+    return cached["status_code"], cached["headers"], cached["content"]
 
 
 async def _pathsinfo_proxy(
@@ -100,7 +110,7 @@ async def pathsinfo_generator(
             f"/api/{repo_type}/{org_repo}/paths-info/{commit}",
         )
         # proxy
-        offline = app.state.app_settings.config.offline
+        offline = is_offline(app)
         if use_cache and (offline or not override_cache):
             status, response_headers, content = await _pathsinfo_cache(save_path)
         elif offline:
@@ -111,9 +121,21 @@ async def pathsinfo_generator(
                 body=single_chunk_body(missing.body),
             )
         else:
-            status, response_headers, content = await _pathsinfo_proxy(
-                app, request_headers, pathsinfo_url, method, path, allow_cache, save_path
-            )
+            max_stale = getattr(app.state.app_settings.config, "metadata_stale_if_error", 0)
+            try:
+                status, response_headers, content = await _pathsinfo_proxy(
+                    app, request_headers, pathsinfo_url, method, path, allow_cache, save_path
+                )
+            except (UpstreamRateLimited, httpx.HTTPError):
+                stale = await _pathsinfo_stale(save_path, max_stale)
+                if stale is None:
+                    raise
+                status, response_headers, content = stale
+            else:
+                if status >= 500:
+                    stale = await _pathsinfo_stale(save_path, max_stale)
+                    if stale is not None:
+                        status, response_headers, content = stale
 
         if status != 200:
             return ProxyResult(

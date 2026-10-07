@@ -11,6 +11,10 @@ cache-compression = "none"
 # revalidating against Hugging Face; visibility is only reused for the
 # same caller (0 = revalidate every request).
 metadata-cache-ttl = 600
+# When Hugging Face is rate-limiting or unavailable, keep serving cached
+# content to callers whose access it confirmed within this many seconds
+# (0 = pass the error on).
+metadata-stale-if-error = 86400
 # Xet pass-through: let the client's hf_xet download Xet files >= the
 # threshold directly from xethub.hf.co (hf_hub cannot fetch them over
 # plain HTTP). Smaller Xet files still flow through the cache.

@@ -113,6 +113,7 @@ class OlahConfig(object):
         # / 5 minutes); a TTL collapses them to one upstream call per period.
         # 0 disables reuse: every request revalidates (pre-v0.5.3 behavior).
         self.metadata_cache_ttl: int = 600
+        self.metadata_stale_if_error: int = 24 * 60 * 60
 
         self.hf_scheme: str = "https"
         self.hf_netloc: str = "huggingface.co"
@@ -196,6 +197,7 @@ class OlahConfig(object):
             if xet_min_size is not None:
                 self.xet_passthrough_min_size = xet_min_size
             self.metadata_cache_ttl = basic.get("metadata-cache-ttl", self.metadata_cache_ttl)
+            self.metadata_stale_if_error = basic.get("metadata-stale-if-error", self.metadata_stale_if_error)
 
             self.hf_scheme = basic.get("hf-scheme", self.hf_scheme)
             self.hf_netloc = basic.get("hf-netloc", self.hf_netloc)

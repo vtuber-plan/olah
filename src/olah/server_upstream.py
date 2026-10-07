@@ -13,6 +13,7 @@ from olah.utils.repo_utils import (
     is_full_commit_hash,
     lookup_commit_hf,
 )
+from olah.utils.upstream_fallback import is_offline
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ async def resolve_requested_commit(
     repo_visible: bool = False,
     missing_commit_response: Literal["repo_not_found", "revision_not_found"] = "revision_not_found",
 ) -> Tuple[Optional[ResolvedCommit], Optional[Response]]:
-    if not app.state.app_settings.config.offline:
+    if not is_offline(app):
         if not repo_visible:
             repo_exists = await check_commit_hf(
                 app,
@@ -96,14 +97,14 @@ async def resolve_requested_commit(
             authorization=authorization,
         )
     if resolved_commit is None:
-        if app.state.app_settings.config.offline:
+        if is_offline(app):
             return None, error_repo_not_found()
         return None, error_proxy_timeout()
     return ResolvedCommit(requested=requested_commit, resolved=resolved_commit), None
 
 
 async def prepare_revision_generator(app, resolved_commit: ResolvedCommit, generator_factory: Callable[[str, bool], object]) -> ProxyResult:
-    if not app.state.app_settings.config.offline and resolved_commit.refresh_cache:
+    if not is_offline(app) and resolved_commit.refresh_cache:
         refresh_result = await generator_factory(resolved_commit.requested, True)
         async for _ in refresh_result.body:
             pass

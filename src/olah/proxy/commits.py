@@ -17,6 +17,7 @@ from olah.utils.rule_utils import check_cache_rules_hf
 from olah.utils.repo_utils import get_org_repo
 from olah.proxy.api_proxy import proxy_api_request
 from olah.proxy.result import ProxyResult, single_chunk_body
+from olah.utils.upstream_fallback import is_offline
 
 
 async def _commits_cache_generator(save_path: str) -> ProxyResult:
@@ -59,7 +60,7 @@ async def commits_generator(
         f"/api/{repo_type}/{org_repo}/commits/{commit}",
     )
     # proxy
-    offline = app.state.app_settings.config.offline
+    offline = is_offline(app)
     if use_cache and (offline or not override_cache):
         return await _commits_cache_generator(save_path)
     if offline:
@@ -69,4 +70,6 @@ async def commits_generator(
             headers=missing.headers,
             body=single_chunk_body(missing.body),
         )
-    return await proxy_api_request(commits_url, method, headers, allow_cache, save_path)
+    return await proxy_api_request(
+        commits_url, method, headers, allow_cache, save_path, max_stale=getattr(app.state.app_settings.config, "metadata_stale_if_error", 0)
+    )
