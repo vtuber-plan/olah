@@ -67,6 +67,7 @@ class _FakeStreamResponse:
 
     def __init__(self, body: bytes, status_code: int = 206):
         self.status_code = status_code
+        self.history = []
         self.headers = {"content-length": str(len(body))}
         self._body = body
 
