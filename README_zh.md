@@ -176,6 +176,7 @@ repos-path = "./repos"
 cache-size-limit = ""
 cache-clean-strategy = "LRU"
 metadata-cache-ttl = 600
+metadata-stale-if-error = 86400
 hf-scheme = "https"
 hf-netloc = "huggingface.co"
 hf-lfs-netloc = "cdn-lfs.huggingface.co"
@@ -192,6 +193,7 @@ mirrors-path = ["./mirrors_dir"]
 - cache-size-limit: 指定缓存大小限制（例如，100G，500GB，2TB）。Olah会每小时扫描缓存文件夹的大小。如果超出限制，Olah会删除一些缓存文件
 - cache-clean-strategy: 指定缓存清理策略（可用策略：LRU，FIFO，LARGE_FIRST）
 - metadata-cache-ttl: 仓库/版本元数据（仓库可见性探测、分支 → commit 解析）在缓存中被复用的秒数，超过后才向 Hugging Face 重新校验。可见性取决于调用者的 token，因此只对同一调用者复用。一次模型启动可能重复这些查询上千次（每个文件、每个 worker），耗尽 Hub 的 API 限流配额（每 5 分钟 1000 次请求）。默认 600 表示每个（仓库， 版本）每 10 分钟最多产生一次上游调用；上游失败或被限流时，会返回最后一次已知的值而不是报错。设为 0 可禁用复用：每个请求都重新校验（v0.5.3 之前的行为）。
+- metadata-stale-if-error: 当 Hugging Face 正在限流（429）或不可用（5xx、超时）时，调用者最后一次被确认访问某仓库的时间在此秒数内，就继续从缓存提供内容（与离线模式相同）；如果缓存也无法应答，则把上游错误透传给客户端。文件下载总是重新校验访问权，因此无论 metadata-cache-ttl 为何值，该配置对文件下载都生效。设为 0 可禁用该回退。
 - hf-scheme: huggingface官方站点的网络协议（一般不需要改动）
 - hf-netloc: huggingface官方站点的网络位置（一般不需要改动）
 - hf-lfs-netloc: huggingface官方站点LFS文件的网络位置（一般不需要改动）
