@@ -21,6 +21,7 @@ from urllib.parse import urlparse, urljoin
 
 from olah.constants import (
     CHUNK_SIZE,
+    HEADER_HOLD_TIMEOUT,
     WORKER_API_TIMEOUT,
     HUGGINGFACE_HEADER_X_REPO_COMMIT,
     HUGGINGFACE_HEADER_X_LINKED_ETAG,
@@ -35,6 +36,8 @@ from olah.cache.olah_cache import (
     compression_algo_from_name,
 )
 from olah.errors import (
+    UpstreamRateLimited,
+    UpstreamStatusError,
     error_entry_not_found,
     error_proxy_invalid_data,
     error_proxy_timeout,
@@ -217,10 +220,11 @@ async def _get_file_range_from_remote(
     decompressor: Optional[Decompressor] = None
     async with _open_remote_range(client, remote_info, start_pos, end_pos) as response:
         status_code = response.status_code
-    
         if status_code == 429:
-            raise Exception("Too many requests in a given amount of time.")
-        
+            raise UpstreamRateLimited(response.headers)
+        if not 200 <= status_code < 300:
+            raise UpstreamStatusError(status_code)
+
         is_compressed = "content-encoding" in response.headers
         if is_compressed:
             decompressor = Decompressor(response.headers["content-encoding"].split(","))
@@ -1350,7 +1354,33 @@ async def _build_file_response(
             else:
                 raise Exception(f"Unsupported method: {method}")
 
-    return ProxyResult(status_code=status_code, headers=response_headers, body=body_iter())
+    body = body_iter()
+    # Hold the headers briefly so a 429/4xx on the first range request can be
+    # sent as a status. Anything else aborts the body after the headers, which
+    # huggingface_hub resumes, whereas it would fail on a 5xx status.
+    first_piece = asyncio.ensure_future(body.__anext__())
+    await asyncio.wait({first_piece}, timeout=HEADER_HOLD_TIMEOUT)
+    if first_piece.done():
+        error = first_piece.exception()
+        if isinstance(error, UpstreamRateLimited):
+            raise error
+        if isinstance(error, UpstreamStatusError) and 400 <= error.status_code < 500:
+            return ProxyResult(
+                status_code=error.status_code,
+                headers={"x-error-message": str(error)},
+                body=single_chunk_body(b""),
+            )
+    return ProxyResult(status_code=status_code, headers=response_headers, body=_resume_body(first_piece, body))
+
+
+async def _resume_body(first_piece: "asyncio.Future[bytes]", rest: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    try:
+        first = await first_piece
+    except StopAsyncIteration:
+        return
+    yield first
+    async for chunk in rest:
+        yield chunk
 
 
 async def file_get_generator(
