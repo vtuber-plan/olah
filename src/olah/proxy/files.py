@@ -886,6 +886,60 @@ async def _probe_xet_resolve(
     return response
 
 
+def hf_resolve_url(app, repo_type: str, org_repo: str, revision: str, file_path: str) -> str:
+    prefix = "" if repo_type == "models" else f"/{repo_type}"
+    return urljoin(
+        app.state.app_settings.config.hf_url_base(),
+        f"{prefix}/{org_repo}/resolve/{revision}/{file_path}",
+    )
+
+
+async def probe_file_resolve(
+    app, url: str, authorization: Optional[str]
+) -> Tuple[Optional[httpx.Response], Optional[Response]]:
+    """HEAD a resolve URL like huggingface_hub does, following redirects only while on the Hub.
+
+    Returns the response (carrying ``x-repo-commit``), or the error to send:
+    the Hub's own 4xx, or a 504.
+    """
+    hub_netloc = app.state.app_settings.config.hf_netloc
+    headers = {"accept-encoding": "identity"}
+    if authorization is not None:
+        headers["authorization"] = authorization
+    try:
+        async with httpx.AsyncClient() as client:
+            for _ in range(5):
+                response = await client.request(
+                    method="HEAD",
+                    url=url,
+                    headers=headers,
+                    timeout=WORKER_API_TIMEOUT,
+                    follow_redirects=False,
+                )
+                location = response.headers.get("location")
+                if not (300 <= response.status_code < 400 and location):
+                    break
+                target = urljoin(url, location)
+                if urlparse(target).netloc != hub_netloc:
+                    break
+                url = target
+            else:
+                return None, error_proxy_timeout()
+    except (httpx.HTTPError, ValueError):
+        return None, error_proxy_timeout()
+    raise_if_rate_limited(response)
+    if 400 <= response.status_code < 500:
+        error_headers = {
+            h: response.headers[h] for h in ("x-error-code", "x-error-message") if h in response.headers
+        }
+        return None, Response(status_code=response.status_code, headers=error_headers)
+    if response.status_code >= 400:
+        return None, error_proxy_timeout()
+    if HUGGINGFACE_HEADER_X_REPO_COMMIT.lower() not in response.headers:
+        return None, error_proxy_invalid_data()
+    return response, None
+
+
 def _xet_passthrough_result(
     response: Optional[httpx.Response],
     commit: Optional[str],
@@ -948,6 +1002,7 @@ async def _file_realtime_stream(
     allow_cache=True,
     commit: Optional[str] = None,
     expected_etag: Optional[str] = None,
+    resolve_probe: Optional[httpx.Response] = None,
 ) -> ProxyResult:
     async def error_result(response) -> ProxyResult:
         return ProxyResult(
@@ -1002,7 +1057,9 @@ async def _file_realtime_stream(
     )
     redirect_model_on = not cfg.offline and getattr(cfg, "cache_redirect_model", False)
     if xet_passthrough_on or redirect_model_on:
-        probe = await _probe_xet_resolve(hf_url=hf_url, authorization=authorization)
+        probe = resolve_probe
+        if probe is None:
+            probe = await _probe_xet_resolve(hf_url=hf_url, authorization=authorization)
         if xet_passthrough_on:
             passthrough = _xet_passthrough_result(
                 probe, commit, getattr(cfg, "xet_passthrough_min_size", 0)
@@ -1067,6 +1124,8 @@ async def _file_realtime_stream(
         # plain (non-LFS) files.
         if lfs_oid:
             etag = f'"{lfs_oid}"'
+        elif resolve_probe is not None and "etag" in resolve_probe.headers:
+            etag = resolve_probe.headers["etag"]
         else:
             etag = await _resource_etag(
                 hf_url=hf_url,
@@ -1264,6 +1323,7 @@ async def file_get_generator(
     file_path: str,
     method: Literal["HEAD", "GET"],
     request: Request,
+    resolve_probe: Optional[httpx.Response] = None,
 ):
     org_repo = get_org_repo(org, repo)
     # save
@@ -1275,17 +1335,7 @@ async def file_get_generator(
 
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
 
-    # proxy
-    if repo_type == "models":
-        url = urljoin(
-            app.state.app_settings.config.hf_url_base(),
-            f"/{org_repo}/resolve/{commit}/{file_path}",
-        )
-    else:
-        url = urljoin(
-            app.state.app_settings.config.hf_url_base(),
-            f"/{repo_type}/{org_repo}/resolve/{commit}/{file_path}",
-        )
+    url = hf_resolve_url(app, repo_type, org_repo, commit, file_path)
     return await _file_realtime_stream(
         app=app,
         repo_type=repo_type,
@@ -1298,6 +1348,7 @@ async def file_get_generator(
         method=method,
         allow_cache=allow_cache,
         commit=commit,
+        resolve_probe=resolve_probe,
     )
 
 

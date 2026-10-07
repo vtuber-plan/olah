@@ -502,10 +502,11 @@ async def test_meta_proxy_common_checks_visibility_before_local_mirror(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_file_get_common_checks_visibility_before_local_mirror(monkeypatch):
+async def test_file_get_common_checks_visibility_before_local_mirror(monkeypatch, tmp_path):
     from fastapi import Request
 
-    app = _make_app()
+    (tmp_path / "models" / "team" / "demo").mkdir(parents=True)
+    app = _make_app(mirrors_path=[str(tmp_path)])
     app.state.logger = None
 
     scope = {
