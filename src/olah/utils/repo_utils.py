@@ -24,6 +24,7 @@ from olah.utils.cache_utils import cache_age, read_cache_request, read_cache_req
 from olah.utils.file_utils import make_dirs
 from olah.utils.access_record import access_age, record_access
 from olah.utils.auth_utils import token_hash
+from olah.utils.upstream_fallback import is_offline
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +360,7 @@ async def get_newest_commit_hf(
     url = urljoin(
         app.state.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}"
     )
-    if app.state.app_settings.config.offline:
+    if is_offline(app):
         return await get_newest_commit_hf_offline(app, repo_type, org, repo)
 
     ttl = _metadata_ttl(app)
@@ -505,7 +506,7 @@ async def get_commit_hf(
         app.state.app_settings.config.hf_url_base(),
         f"/api/{repo_type}/{org_repo}/revision/{commit}",
     )
-    if app.state.app_settings.config.offline:
+    if is_offline(app):
         return await get_commit_hf_offline(app, repo_type, org, repo, commit)
     try:
         headers = {}
@@ -563,6 +564,18 @@ async def _probe_hf(
     return 200 <= status_code < 300, response
 
 
+async def record_caller_access(
+    app, repo_type: str, org: Optional[str], repo: str, authorization: Optional[str]
+) -> None:
+    """Record that the Hub just confirmed this caller's access, for the TTLs that reuse it."""
+    config = app.state.app_settings.config
+    if _metadata_ttl(app) <= 0 and getattr(config, "metadata_stale_if_error", 0) <= 0:
+        return
+    if not await _metadata_cache_allowed(app, repo_type, org, repo):
+        return
+    record_access(config.repos_path, repo_type, org, repo, token_hash(authorization))
+
+
 async def check_commit_hf(
     app,
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
@@ -609,8 +622,8 @@ async def check_commit_hf(
         if ttl > 0 and age is not None and age < ttl:
             return True
         exists, _ = await _probe_hf(url, "HEAD", authorization)
-        if exists is True and ttl > 0 and await _metadata_cache_allowed(app, repo_type, org, repo):
-            record_access(repos_path, repo_type, org, repo, caller)
+        if exists is True:
+            await record_caller_access(app, repo_type, org, repo, authorization)
         return exists
 
     url = urljoin(

@@ -14,6 +14,7 @@ from olah.proxy.result import ProxyResult, single_chunk_body
 from olah.utils.cache_utils import read_cache_request, write_cache_request
 from olah.utils.repo_utils import get_org_repo
 from olah.utils.rule_utils import check_cache_rules_hf
+from olah.utils.upstream_fallback import is_offline
 
 
 def _valid_refs(content: bytes, include_prs: bool) -> bool:
@@ -53,7 +54,7 @@ async def refs_generator(
         f"api/{repo_type}/{org_repo}/refs/{identity}/refs_include_prs_{include_prs}.json",
     )
 
-    if config.offline:
+    if is_offline(app):
         try:
             cached = await read_cache_request(save_path)
             if cached["status_code"] == 200 and _valid_refs(cached["content"], include_prs):

@@ -62,6 +62,7 @@ from olah.utils.file_utils import make_dirs
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 from olah.utils.zip_utils import Decompressor, decompress_data
 from olah.proxy.result import ProxyResult, single_chunk_body
+from olah.utils.upstream_fallback import is_offline
 
 
 XET_RESPONSE_HEADERS = (
@@ -552,7 +553,7 @@ async def _file_chunk_get(
     # Redirect Chunks
     cfg = app.state.app_settings.config
     # Never recover a missing/corrupt cached block from upstream while offline.
-    if cfg.offline:
+    if is_offline(app):
         url = None
     compression_algo = compression_algo_from_name(cfg.cache_compression)
     block_size = cfg.cache_block_size or DEFAULT_BLOCK_SIZE
@@ -691,7 +692,7 @@ async def _file_chunk_head(
     allow_cache: bool,
     file_size: int,
 ):
-    if not app.state.app_settings.config.offline:
+    if not is_offline(app):
         async with client.stream(
             method=method,
             url=url,
@@ -1096,9 +1097,9 @@ async def _file_realtime_stream(
     # With both features off (the default) no probe is made at all.
     cfg = app.state.app_settings.config
     xet_passthrough_on = (
-        not cfg.offline and getattr(cfg, "xet_passthrough", False)
+        not is_offline(app) and getattr(cfg, "xet_passthrough", False)
     )
-    redirect_model_on = not cfg.offline and getattr(cfg, "cache_redirect_model", False)
+    redirect_model_on = not is_offline(app) and getattr(cfg, "cache_redirect_model", False)
     if xet_passthrough_on or redirect_model_on:
         probe = resolve_probe
         if probe is None:
@@ -1173,14 +1174,14 @@ async def _file_realtime_stream(
             etag = await _resource_etag(
                 hf_url=hf_url,
                 authorization=authorization,
-                offline=app.state.app_settings.config.offline,
+                offline=is_offline(app),
             )
     else:
         metadata, upstream_status = await _remote_file_metadata(
             app=app,
             hf_url=hf_url,
             authorization=authorization,
-            offline=app.state.app_settings.config.offline,
+            offline=is_offline(app),
         )
         if metadata is None:
             # Pass the upstream verdict through: a missing/unauthorized file is
@@ -1258,7 +1259,7 @@ async def _build_file_response(
             _multipart_content_length(boundary, all_ranges, file_size)
         )
 
-    if app.state.app_settings.config.offline:
+    if is_offline(app):
         # Reject missing requested blocks before sending successful headers.
         # Keep the streaming path cache-only too: eviction or corruption after
         # this check must never silently turn an offline hit into a download.
@@ -1289,7 +1290,7 @@ async def _build_file_response(
     # Identity passed to the cache for online revalidation. Offline trusts the
     # disk (None) so a transient upstream-derived pseudo-etag never destroys a
     # good cache while offline.
-    cache_expected_etag = None if app.state.app_settings.config.offline else etag
+    cache_expected_etag = None if is_offline(app) else etag
 
     async def body_iter() -> AsyncIterator[bytes]:
         async with httpx.AsyncClient() as client:

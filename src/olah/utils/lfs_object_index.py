@@ -33,6 +33,7 @@ from typing import List, Optional, Tuple
 import portalocker
 
 from olah.utils.auth_utils import token_hash
+from olah.utils.upstream_fallback import is_offline
 
 # In-process memo for (token, repo) -> authorized, to avoid re-probing HF on
 # every cache hit. Short TTL so visibility changes propagate.
@@ -153,7 +154,7 @@ async def authorize_lfs_object(
       ``cache_allowed_for_lfs_object``), because their authorization could not be
       re-validated on a later cache hit. This preserves transparent-proxy use.
     """
-    if app.state.app_settings.config.offline:
+    if is_offline(app):
         return None
     candidates = await get_lfs_object_repos(app, content_hash)
     if not candidates:
@@ -277,7 +278,7 @@ async def authorize_xet_object(
     all fail visibility is denied (fail-closed). Callers should 404 first if
     ``get_xet_metadata`` returns no refs (unknown objects cannot be re-resolved).
     """
-    if app.state.app_settings.config.offline:
+    if is_offline(app):
         return None
     refs, _size, _oid = await get_xet_metadata(app, xet_hash)
     if not refs:

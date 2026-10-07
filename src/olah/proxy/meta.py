@@ -18,6 +18,7 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 from olah.proxy.api_proxy import proxy_api_request
 from olah.proxy.result import ProxyResult, single_chunk_body
+from olah.utils.upstream_fallback import is_offline
 
 async def _meta_cache_generator(save_path: str) -> ProxyResult:
     cache_rq = await read_cache_request(save_path)
@@ -60,7 +61,7 @@ async def meta_generator(
         f"/api/{repo_type}/{org_repo}/revision/{commit}",
     )
     # proxy
-    offline = app.state.app_settings.config.offline
+    offline = is_offline(app)
     # override_cache is set when a branch-named request was just resolved to a
     # SHA, so the branch's cached copy would normally be bypassed to fetch the
     # freshest state. Within the metadata TTL that refresh is skipped: the
@@ -79,4 +80,6 @@ async def meta_generator(
             headers=missing.headers,
             body=single_chunk_body(missing.body),
         )
-    return await proxy_api_request(meta_url, method, headers, allow_cache, save_path)
+    return await proxy_api_request(
+        meta_url, method, headers, allow_cache, save_path, max_stale=getattr(app.state.app_settings.config, "metadata_stale_if_error", 0)
+    )

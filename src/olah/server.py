@@ -38,6 +38,7 @@ from olah.utils.disk_utils import (
     evict_cache_to_limit,
 )
 from olah.utils.logging import build_logger
+from olah.utils.upstream_fallback import UpstreamFallbackMiddleware
 
 
 BASE_SETTINGS = False
@@ -141,6 +142,7 @@ templates = Jinja2Templates(directory=os.path.join(OLAH_CODE_DIR, "static"))
 app.state.templates = templates
 app.state.logger = None
 app.include_router(router)
+app.add_middleware(UpstreamFallbackMiddleware)
 
 
 class AppSettings(BaseSettings):
@@ -198,6 +200,7 @@ def init():
     parser.add_argument("--cache-compression", type=str, default="none", help="Compression algorithm for cache blocks. ('none', 'gzip', 'lzma')")
     parser.add_argument("--log-path", type=str, default="./logs", help="The folder to save logs")
     parser.add_argument("--metadata-cache-ttl", type=int, default=600, help="Seconds to reuse cached repo/revision metadata before revalidating against Hugging Face. 0 disables reuse (always revalidate).")
+    parser.add_argument("--metadata-stale-if-error", type=int, default=86400, help="Seconds a caller's last confirmed repo access may still be used, serving from cache, when Hugging Face is rate-limiting or unavailable. 0 disables.")
     parser.add_argument("--workers", type=int, default=1, help="Number of worker processes. Default 1 (single process). Values >1 enable multi-process scaling for production throughput and require --config (each worker re-reads it).")
     args = parser.parse_args()
 
@@ -251,6 +254,8 @@ def init():
             config.cache_compression = args.cache_compression
         if not is_default_value(args, "metadata_cache_ttl"):
             config.metadata_cache_ttl = args.metadata_cache_ttl
+        if not is_default_value(args, "metadata_stale_if_error"):
+            config.metadata_stale_if_error = args.metadata_stale_if_error
 
         config.host = normalize_server_host(config.host)
 
