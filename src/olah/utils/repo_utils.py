@@ -20,7 +20,7 @@ from urllib.parse import urljoin
 import httpx
 from olah.constants import WORKER_API_TIMEOUT
 from olah.errors import raise_if_rate_limited, UpstreamRateLimited
-from olah.utils.cache_utils import read_cache_request, read_cache_request_if_fresh, write_cache_request
+from olah.utils.cache_utils import cache_age, read_cache_request, read_cache_request_if_fresh, write_cache_request
 from olah.utils.file_utils import make_dirs
 
 logger = logging.getLogger(__name__)
@@ -405,6 +405,26 @@ def is_full_commit_hash(commit: str) -> bool:
     return re.fullmatch(r"[0-9a-fA-F]{40}", commit) is not None
 
 
+def get_resolved_commit_save_path(
+    repos_path: str, repo_type: str, org: Optional[str], repo: str, revision: str
+) -> str:
+    """Disk path of the revision -> commit mapping recorded by the file-route probe."""
+    revision_dir = os.path.dirname(get_meta_save_path(repos_path, repo_type, org, repo, revision))
+    return os.path.join(revision_dir, "resolved_commit.json")
+
+
+async def record_resolved_commit(
+    app, repo_type: str, org: Optional[str], repo: str, revision: str, commit: str
+) -> None:
+    if is_full_commit_hash(revision) or not await _metadata_cache_allowed(app, repo_type, org, repo):
+        return
+    save_path = get_resolved_commit_save_path(
+        app.state.app_settings.config.repos_path, repo_type, org, repo, revision
+    )
+    make_dirs(save_path)
+    await write_cache_request(save_path, 200, {}, commit.encode("ascii"))
+
+
 async def get_commit_hf_offline(
     app,
     repo_type: Optional[Literal["models", "datasets", "spaces"]],
@@ -432,17 +452,29 @@ async def get_commit_hf_offline(
     if is_full_commit_hash(commit):
         return commit.lower()
     repos_path = app.state.app_settings.config.repos_path
-    save_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
-    if not os.path.exists(save_path):
-        return None
-    try:
-        request_cache = await read_cache_request(save_path)
-        request_cache_json = _load_cached_json_payload(request_cache)
-    except (ValueError, OSError, zlib.error):
-        # Corrupt or unreadable cache: treat as a cache miss so the caller can
-        # surface "commit not found" instead of crashing with a 500.
-        return None
-    return request_cache_json.get("sha")
+    meta_path = get_meta_save_path(repos_path, repo_type, org, repo, commit)
+    resolved_path = get_resolved_commit_save_path(repos_path, repo_type, org, repo, commit)
+    # Both the metadata routes and file downloads record where a branch points;
+    # the more recent one wins.
+    def age(path: str) -> float:
+        seconds = cache_age(path)
+        return float("inf") if seconds is None else seconds
+
+    candidates = sorted((p for p in (meta_path, resolved_path) if os.path.exists(p)), key=age)
+    for path in candidates:
+        try:
+            request_cache = await read_cache_request(path)
+            if path == resolved_path:
+                sha = request_cache["content"].decode("ascii").strip()
+            else:
+                sha = _load_cached_json_payload(request_cache).get("sha")
+        except (ValueError, OSError, KeyError, UnicodeDecodeError, zlib.error):
+            # Corrupt or unreadable cache: treat as a cache miss so the caller can
+            # surface "commit not found" instead of crashing with a 500.
+            continue
+        if sha:
+            return sha
+    return None
 
 
 async def get_commit_hf(
