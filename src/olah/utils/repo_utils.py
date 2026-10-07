@@ -22,6 +22,8 @@ from olah.constants import WORKER_API_TIMEOUT
 from olah.errors import raise_if_rate_limited, UpstreamRateLimited
 from olah.utils.cache_utils import cache_age, read_cache_request, read_cache_request_if_fresh, write_cache_request
 from olah.utils.file_utils import make_dirs
+from olah.utils.access_record import access_age, record_access
+from olah.utils.auth_utils import token_hash
 
 logger = logging.getLogger(__name__)
 
@@ -190,12 +192,6 @@ def get_repo_get_save_path(repos_path: str, repo_type: str, org: Optional[str], 
     """Disk path of the TTL cache for the repo-root info GET (latest commit)."""
     org_repo = get_org_repo(org, repo)
     return os.path.join(repos_path, f"api/{repo_type}/{org_repo}/repo_get.json")
-
-
-def get_repo_head_save_path(repos_path: str, repo_type: str, org: Optional[str], repo: str) -> str:
-    """Disk path of the TTL cache for the repo-root visibility HEAD probe."""
-    org_repo = get_org_repo(org, repo)
-    return os.path.join(repos_path, f"api/{repo_type}/{org_repo}/repo_head.json")
 
 
 def parse_org_repo(org_repo: str) -> Tuple[Optional[str], Optional[str]]:
@@ -604,22 +600,30 @@ async def check_commit_hf(
     ttl = _metadata_ttl(app)
     repos_path = app.state.app_settings.config.repos_path
     if commit is None:
+        # Visibility depends on the caller's token, so it is cached per caller.
         url = urljoin(
             app.state.app_settings.config.hf_url_base(), f"/api/{repo_type}/{org_repo}"
         )
-        save_path = get_repo_head_save_path(repos_path, repo_type, org, repo)
-    else:
-        url = urljoin(
-            app.state.app_settings.config.hf_url_base(),
-            f"/api/{repo_type}/{org_repo}/revision/{commit}",
-        )
-        # Same envelope the client-facing HEAD route persists under
-        # revision/{commit}/meta_head.json, so both writers feed one cache
-        # entry per revision.
-        revision_dir = os.path.dirname(
-            get_meta_save_path(repos_path, repo_type, org, repo, commit)
-        )
-        save_path = os.path.join(revision_dir, "meta_head.json")
+        caller = token_hash(authorization)
+        age = access_age(repos_path, repo_type, org, repo, caller)
+        if ttl > 0 and age is not None and age < ttl:
+            return True
+        exists, _ = await _probe_hf(url, "HEAD", authorization)
+        if exists is True and ttl > 0 and await _metadata_cache_allowed(app, repo_type, org, repo):
+            record_access(repos_path, repo_type, org, repo, caller)
+        return exists
+
+    url = urljoin(
+        app.state.app_settings.config.hf_url_base(),
+        f"/api/{repo_type}/{org_repo}/revision/{commit}",
+    )
+    # Same envelope the client-facing HEAD route persists under
+    # revision/{commit}/meta_head.json, so both writers feed one cache entry
+    # per revision. Shared across callers, who have each passed the repo check.
+    revision_dir = os.path.dirname(
+        get_meta_save_path(repos_path, repo_type, org, repo, commit)
+    )
+    save_path = os.path.join(revision_dir, "meta_head.json")
     if ttl > 0 and await read_cache_request_if_fresh(save_path, ttl) is not None:
         return True
     exists, _ = await _probe_hf(url, "HEAD", authorization)
