@@ -2,7 +2,7 @@ fastapi==0.142.2
 fastapi-utils==0.8.0
 GitPython==3.2.0
 httpx==0.28.1
-pydantic==2.13.5
+pydantic==2.14.0
 pydantic-settings==2.15.0
 toml==0.10.2
 huggingface_hub==2.1.1
