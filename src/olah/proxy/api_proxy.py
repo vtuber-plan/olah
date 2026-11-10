@@ -13,6 +13,13 @@ import httpx
 from olah.constants import WORKER_API_TIMEOUT
 from olah.proxy.result import ProxyResult, single_chunk_body
 from olah.utils.cache_utils import read_cache_request_if_fresh, write_cache_request
+from olah.utils.encoding_utils import (
+    decode_cached_response,
+    flush_decoder_chain,
+    make_decoder_chain,
+    normalize_relay_headers,
+    push_decoder_chain,
+)
 from olah.utils.file_utils import make_dirs
 
 logger = logging.getLogger(__name__)
@@ -29,9 +36,12 @@ async def proxy_api_request(
 ) -> ProxyResult:
     """Stream a Hub API response from a single upstream request, caching a 200.
 
-    The body is relayed raw (still content-encoded) so it stays consistent with
-    the relayed headers and with the cache format readers expect. When the Hub
-    rate-limits or fails, a cached copy younger than ``max_stale`` is served instead.
+    The body is relayed identity-encoded: the upstream content-encoding is
+    decoded incrementally while streaming, and the wire-level headers
+    (content-encoding/length, transfer-encoding) are stripped so clients
+    without decoders (e.g. llama.cpp's vendored cpp-httplib) can read it.
+    When the Hub rate-limits or fails, a cached copy younger than ``max_stale``
+    is served instead.
     """
     upstream: Dict = {}
 
@@ -45,20 +55,31 @@ async def proxy_api_request(
                 timeout=WORKER_API_TIMEOUT,
             ) as response:
                 upstream["status_code"] = response.status_code
-                upstream["headers"] = dict(response.headers)
+                # The streamed body below is decoded, so the wire-level
+                # headers no longer describe the relayed bytes.
+                upstream["headers"] = normalize_relay_headers(dict(response.headers))
+                decoder_chain = make_decoder_chain(response.headers.get("content-encoding", ""))
                 yield b""
                 chunks = []
                 async for raw_chunk in response.aiter_raw():
                     if not raw_chunk:
                         continue
-                    chunks.append(raw_chunk)
-                    yield raw_chunk
+                    chunk = push_decoder_chain(decoder_chain, raw_chunk)
+                    if not chunk:
+                        continue
+                    chunks.append(chunk)
+                    yield chunk
+                tail = flush_decoder_chain(decoder_chain)
+                if tail:
+                    chunks.append(tail)
+                    yield tail
 
         if allow_cache and upstream["status_code"] == 200:
             make_dirs(save_path)
-            await write_cache_request(
-                save_path, upstream["status_code"], upstream["headers"], b"".join(chunks)
-            )
+            body = b"".join(chunks)
+            cache_headers = dict(upstream["headers"])
+            cache_headers["content-length"] = str(len(body))
+            await write_cache_request(save_path, upstream["status_code"], cache_headers, body)
 
     body = body_iter()
     # Run up to the response headers. A started async generator is always
@@ -90,8 +111,9 @@ async def _stale_copy(save_path: str, max_stale: float) -> Optional[ProxyResult]
     if cached is None:
         return None
     logger.warning("Upstream unavailable; serving cached %s", save_path)
+    content, response_headers = decode_cached_response(cached["content"], cached["headers"])
     return ProxyResult(
         status_code=cached["status_code"],
-        headers=cached["headers"],
-        body=single_chunk_body(cached["content"]),
+        headers=response_headers,
+        body=single_chunk_body(content),
     )

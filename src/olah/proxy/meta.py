@@ -18,14 +18,16 @@ from olah.utils.repo_utils import get_org_repo
 from olah.utils.file_utils import make_dirs
 from olah.proxy.api_proxy import proxy_api_request
 from olah.proxy.result import ProxyResult, single_chunk_body
+from olah.utils.encoding_utils import decode_cached_response
 from olah.utils.upstream_fallback import is_offline
 
 async def _meta_cache_generator(save_path: str) -> ProxyResult:
     cache_rq = await read_cache_request(save_path)
+    content, response_headers = decode_cached_response(cache_rq["content"], cache_rq["headers"])
     return ProxyResult(
         status_code=cache_rq["status_code"],
-        headers=cache_rq["headers"],
-        body=single_chunk_body(cache_rq["content"]),
+        headers=response_headers,
+        body=single_chunk_body(content),
     )
 
 
